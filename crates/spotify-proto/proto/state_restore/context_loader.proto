@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package spotify.player.proto.state_restore;
+
+import "context.proto";
+
+option optimize_for = CODE_SIZE;
+
+message ContextLoader {
+  required .spotify.player.proto.Context context = 1;
+}

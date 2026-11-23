@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package spotify.list_player.proto;
+
+import "google/protobuf/timestamp.proto";
+import "playlist_play.proto";
+
+option optimize_for = CODE_SIZE;
+
+message ListPlayerState {
+  optional .spotify.playlist.proto.PlaylistPlayRequest play_request = 1;
+  .google.protobuf.Timestamp timestamp = 2;
+}

@@ -1,0 +1,12 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message CoreAudioProcessorOverload {
+  optional string driver_name = 1;
+  optional int64 notification_count = 2;
+  optional int64 first_observed_at_ms = 3;
+  optional int64 last_observed_at_ms = 4;
+}

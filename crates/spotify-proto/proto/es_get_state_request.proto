@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package spotify.player.esperanto.proto;
+
+import "es_optional.proto";
+
+option java_package = "com.spotify.player.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option objc_class_prefix = "ESP";
+
+message GetStateRequest {
+  .spotify.player.esperanto.proto.OptionalInt64 prev_tracks_cap = 1;
+  .spotify.player.esperanto.proto.OptionalInt64 next_tracks_cap = 2;
+  optional string logical_playback_identifier = 3;
+}

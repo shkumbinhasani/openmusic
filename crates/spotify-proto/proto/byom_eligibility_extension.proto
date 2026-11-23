@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package spotify.byom.v1;
+
+option java_package = "com.spotify.byom.v1";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message ByomEligibilityExtension {
+  bool eligible = 1;
+}

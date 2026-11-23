@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message TokenRefreshFailureNonAuth {
+  optional string auth_session_id = 1;
+  optional string error_description = 2;
+  optional string error_response_http_code = 3;
+}

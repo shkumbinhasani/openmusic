@@ -1,0 +1,18 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message RawLyrics {
+  optional bytes lyrics_event_id = 1;
+  optional string content_uri = 2;
+  optional string playback_id = 3;
+  optional int64 character_count = 6;
+  optional int64 core_version = 7;
+  optional string provider = 8;
+  optional string provider_lyrics_id = 9;
+  optional string sync_type = 10;
+  repeated string surface_types = 11;
+  optional int64 ms_played = 12;
+}

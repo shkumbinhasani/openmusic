@@ -1,0 +1,15 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message NebulaRequest {
+  optional int64 latency = 1;
+  optional int64 payload_size = 2;
+  optional int32 status_code = 3;
+  optional string error_reason = 4;
+  optional string error_message = 5;
+  optional string fetched_reason = 6;
+  optional string platform = 7;
+}

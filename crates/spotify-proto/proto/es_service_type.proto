@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package spotify.connectivity.hosts.esperanto.proto;
+
+option java_package = "com.spotify.connectivity.hosts.esperanto.proto";
+option optimize_for = CODE_SIZE;
+
+message ServiceType {
+  .spotify.connectivity.hosts.esperanto.proto.ServiceTypeEnum serviceType = 1;
+}
+
+enum ServiceTypeEnum {
+  BACKEND_RPC_GLOBAL = 0;
+  BACKEND_RPC_REGIONAL = 1;
+  BACKEND_STREAMING = 2;
+}

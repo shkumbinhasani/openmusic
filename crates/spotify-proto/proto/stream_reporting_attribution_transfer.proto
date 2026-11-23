@@ -1,0 +1,12 @@
+syntax = "proto2";
+
+package spotify.player.proto.transfer;
+
+option optimize_for = CODE_SIZE;
+
+message StreamReportingAttribution {
+  optional string provenance = 1;
+  optional string page_id = 2;
+  optional string root_specification_id = 3;
+  optional string leaf_specification_id = 4;
+}

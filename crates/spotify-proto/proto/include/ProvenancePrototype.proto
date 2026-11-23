@@ -1,0 +1,16 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ProvenancePrototype {
+  message Provenance {
+    optional string interaction_id = 1;
+    optional string referrer_root = 2;
+    optional string event_provenance = 1009;
+  }
+  optional string interaction_id = 1;
+  optional string referrer_root = 2;
+  optional .spotify.event_sender.proto.ProvenancePrototype.Provenance provenance = 1009;
+}

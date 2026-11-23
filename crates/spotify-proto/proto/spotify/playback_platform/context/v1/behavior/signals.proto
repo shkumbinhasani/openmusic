@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package spotify.playback_platform.context.v1.behavior;
+
+import "spotify/playback_platform/context/v1/behavior/handler.proto";
+
+option java_package = "spotify.playback_platform.context.v1.behavior";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message Signals {
+  message OnReceive {
+    .spotify.playback_platform.context.v1.behavior.Trigger trigger = 1;
+    .spotify.playback_platform.context.v1.behavior.Actions actions = 2;
+    .spotify.playback_platform.context.v1.behavior.Enabled publish = 3;
+    repeated string signal_ids = 4;
+  }
+  repeated .spotify.playback_platform.context.v1.behavior.Signals.OnReceive on_receive_signal = 1;
+}

@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package spotify.ads.proto;
+
+option optimize_for = CODE_SIZE;
+
+message UnifiedConfigRequest {
+  map<string, string> initial_state = 1;
+  optional string device_info = 2;
+}
+
+message UnifiedConfigResponse {
+  repeated string request_triggers = 1;
+  bool reset_state = 2;
+  optional int64 transition_decision_ms = 3;
+  repeated .spotify.ads.proto.SlotConfig active_slots = 4;
+}
+
+message SlotConfig {
+  string slot_name = 1;
+  oneof specific_config {
+    .spotify.ads.proto.StreamConfig stream = 2;
+    .spotify.ads.proto.LeaderboardConfig leaderboard = 3;
+    .spotify.ads.proto.BillboardConfig billboard = 4;
+    .spotify.ads.proto.MobileScreensaverConfig mobile_screensaver = 5;
+  }
+}
+
+message StreamConfig {
+  int32 stream_time_elapsed_ms = 1;
+}
+
+message LeaderboardConfig {
+  int32 focus_time_elapsed_ms = 1;
+  reserved 2, 3, 4;
+}
+
+message BillboardConfig {
+  int32 focus_time_elapsed_ms = 1;
+}
+
+message MobileScreensaverConfig {
+  int32 focus_time_elapsed_ms = 1;
+}
+
+message CachedConfigEnvelope {
+  .spotify.ads.proto.UnifiedConfigResponse last_ad_config = 1;
+  bool last_product_state_ads_enabled = 2;
+}

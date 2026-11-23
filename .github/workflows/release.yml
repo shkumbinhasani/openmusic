@@ -1,0 +1,170 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha256_arm64: ${{ steps.package.outputs.sha256_arm64 }}
+      sha256_x86_64: ${{ steps.package.outputs.sha256_x86_64 }}
+      notarized: ${{ steps.notarize.outputs.notarized || 'false' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          manifest="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Metal Toolchain
+        run: xcrun -sdk macosx metal --version > /dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Warn about ad-hoc signing
+        if: env.MACOS_CERTIFICATE == ''
+        run: echo "::warning::No MACOS_CERTIFICATE secret. Builds are signed ad hoc, so macOS asks users to approve OpenMusic again after every upgrade."
+
+      - name: Import signing certificate
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -f pkcs12 -A -t cert
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain"
+          identities="$(security find-identity -v -p codesigning "$keychain")"
+          identity="$(printf '%s\n' "$identities" | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+          if [ -z "$identity" ]; then
+            identity="$(printf '%s\n' "$identities" | awk -F'"' '/Apple Development/ { print $2; exit }')"
+          fi
+          if [ -z "$identity" ]; then
+            echo "::error::MACOS_CERTIFICATE holds no Developer ID Application or Apple Development identity"
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          rm "$RUNNER_TEMP/certificate.p12"
+
+      - name: Build apps
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          export CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+          TARGET=aarch64-apple-darwin ./scripts/bundle-macos.sh
+          TARGET=x86_64-apple-darwin ./scripts/bundle-macos.sh
+
+      - name: Notarize
+        id: notarize
+        if: startsWith(env.CODESIGN_IDENTITY, 'Developer ID Application') && env.APPLE_API_KEY != ''
+        run: |
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$APPLE_API_KEY" | base64 --decode > "$key"
+          for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+            app="target/$triple/OpenMusic.app"
+            ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+              --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait
+            xcrun stapler staple "$app"
+            spctl --assess --type execute --verbose "$app"
+          done
+          rm "$key" "$RUNNER_TEMP/notarize.zip"
+          echo "notarized=true" >> "$GITHUB_OUTPUT"
+
+      - name: Package
+        id: package
+        run: |
+          mkdir -p dist
+          for pair in arm64:aarch64-apple-darwin x86_64:x86_64-apple-darwin; do
+            arch="${pair%%:*}"
+            triple="${pair#*:}"
+            archive="dist/OpenMusic-$VERSION-$arch.zip"
+            ditto -c -k --keepParent "target/$triple/OpenMusic.app" "$archive"
+            echo "sha256_$arch=$(shasum -a 256 "$archive" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          done
+          (cd dist && shasum -a 256 -- *.zip > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "OpenMusic $VERSION" \
+            --generate-notes
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP || format('{0}/homebrew-tap', github.repository_owner) }}
+    steps:
+      - name: Check for tap token
+        id: token
+        run: echo "present=$([ -n "$TAP_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        if: steps.token.outputs.present == 'true'
+        with:
+          path: source
+
+      - uses: actions/checkout@v5
+        if: steps.token.outputs.present == 'true'
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update cask
+        if: steps.token.outputs.present == 'true'
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          SHA256_ARM64: ${{ needs.release.outputs.sha256_arm64 }}
+          SHA256_X86_64: ${{ needs.release.outputs.sha256_x86_64 }}
+          NOTARIZED: ${{ needs.release.outputs.notarized }}
+        run: |
+          mkdir -p tap/Casks
+          python3 - <<'PY'
+          import os, re
+          cask = open("source/packaging/homebrew/openmusic.rb").read()
+          for name in ["VERSION", "SHA256_ARM64", "SHA256_X86_64"]:
+              cask = cask.replace(f"@{name}@", os.environ[name])
+          cask = cask.replace("@REPOSITORY@", os.environ["GITHUB_REPOSITORY"])
+          if os.environ["NOTARIZED"] == "true":
+              cask = re.sub(r"\n  postflight_steps do\n.*?\n  end\n", "", cask, count=1, flags=re.S)
+          open("tap/Casks/openmusic.rb", "w").write(cask)
+          PY
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/openmusic.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "openmusic $VERSION"
+          git push

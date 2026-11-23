@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package spotify.remote_config.nebula.proto;
+
+import "google/protobuf/timestamp.proto";
+
+option optimize_for = CODE_SIZE;
+
+message Attribute {
+  oneof value {
+    bool bool_value = 2;
+    int64 long_value = 3;
+    string string_value = 4;
+    .google.protobuf.Timestamp timestamp_value = 5;
+  }
+}
+
+message GetAttributesResponse {
+  map<string, .spotify.remote_config.nebula.proto.Attribute> attributes = 1;
+}

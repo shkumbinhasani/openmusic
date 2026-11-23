@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package spotify.podcast_segments.playback;
+
+import "podcast_segments.proto";
+
+option java_package = "com.spotify.podcastsegments.playback.proto";
+option java_outer_classname = "PlaybackSegmentsProto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "SPT";
+
+message PlaybackSegments {
+  repeated .spotify.podcast_segments.PlaybackSegment playback_segments = 1;
+}

@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package spotify.player.sequence.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ContextStackEntry {
+  optional string selected_child_uid = 1;
+}

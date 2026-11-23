@@ -1,0 +1,134 @@
+syntax = "proto3";
+
+package spotify.resumption.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/any.proto";
+
+option java_package = "com.spotify.resumption.v1";
+option java_outer_classname = "ResumePointProto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message ListResumePoint {
+  string uri = 1;
+  .spotify.resumption.v1.ResumePoint resume_point = 2;
+  .spotify.resumption.v1.Affinity affinity = 3;
+  optional bytes uid = 4;
+  optional string shuffle_seed = 5;
+  optional .google.protobuf.Any custom = 6;
+  .spotify.resumption.v1.NavigationHistory navigation_history = 7;
+}
+
+message NavigationHistory {
+  message UidList {
+    repeated bytes previous_uids = 1;
+    repeated bytes next_uids = 2;
+  }
+  message Waypoints {
+  }
+  oneof navigation_history {
+    .spotify.resumption.v1.NavigationHistory.UidList uid_list = 1;
+    .spotify.resumption.v1.NavigationHistory.Waypoints waypoints = 2;
+  }
+}
+
+message RelativePosition {
+  .google.protobuf.Duration start_offset = 1;
+  .google.protobuf.Duration content_duration = 2;
+}
+
+message ImtPosition {
+  .google.protobuf.Duration position = 1;
+  string audio_uri = 2;
+}
+
+message TimelinePosition {
+  .google.protobuf.Duration umt_position = 1;
+  .spotify.resumption.v1.ImtPosition imt_position = 2;
+}
+
+message ResumePoint {
+  string resume_point_id = 1;
+  oneof resume_point {
+    .google.protobuf.Duration position = 2;
+    .google.protobuf.Empty started = 3;
+    .google.protobuf.Empty finished = 4;
+    int32 counter = 5;
+    string uri = 6;
+    .google.protobuf.Any custom = 7;
+    .google.protobuf.Empty marked_as_finished = 8;
+    .google.protobuf.Empty unmarked_as_finished = 9;
+    .spotify.resumption.v1.RelativePosition relative_position = 10;
+    .google.protobuf.Empty tombstone = 11;
+    .spotify.resumption.v1.ListResumePoint list_resume_point = 12;
+    .spotify.resumption.v1.TimelinePosition timeline_position = 13;
+  }
+}
+
+message ResumePointRevision {
+  string resume_point_revision_id = 1;
+  .spotify.resumption.v1.ResumePoint snapshot = 2;
+  .google.protobuf.Timestamp create_time = 3;
+  .google.protobuf.Timestamp update_time = 4;
+}
+
+message ListResumePointRevisionsRequest {
+  string user_id = 1;
+  string uri = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListResumePointRevisionsResponse {
+  repeated .spotify.resumption.v1.ResumePointRevision resume_point_revisions = 1;
+  string next_page_token = 2;
+}
+
+message CreateResumePointRevisionRequest {
+  string user_id = 1;
+  string uri = 2;
+  .spotify.resumption.v1.ResumePointRevision resume_point_revision = 4;
+}
+
+message CreateResumePointRevisionResponse {
+  .spotify.resumption.v1.ResumePointRevision resume_point_revision = 1;
+}
+
+message BatchCreateResumePointRevisionsRequest {
+  string user_id = 1;
+  repeated .spotify.resumption.v1.CreateResumePointRevisionRequest requests = 2;
+}
+
+message BatchCreateResumePointRevisionsResponse {
+  map<string, .spotify.resumption.v1.ResumePointRevisionList> resume_point_revisions = 1;
+}
+
+message ResumePointRevisionList {
+  repeated .spotify.resumption.v1.ResumePointRevision resume_point_revisions = 1;
+}
+
+message CurrentState {
+  string uri = 1;
+  repeated .spotify.resumption.v1.ResumePointRevision resume_point_revisions = 2;
+}
+
+message ListCurrentStatesRequest {
+  string user_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+  string filter = 4;
+}
+
+message ListCurrentStatesResponse {
+  repeated .spotify.resumption.v1.CurrentState current_states = 1;
+  string next_page_token = 2;
+}
+
+enum Affinity {
+  AFFINITY_UNSPECIFIED = 0;
+  AFFINITY_PARENT = 1;
+  AFFINITY_SELF = 2;
+}

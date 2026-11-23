@@ -1,0 +1,431 @@
+syntax = "proto3";
+
+package spotify.offline_esperanto.proto;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+option java_package = "com.spotify.offline_esperanto.proto";
+option optimize_for = CODE_SIZE;
+option objc_class_prefix = "ESPOffline";
+
+message GetOfflinePlaybackStatusResponse {
+  bool allowed = 1;
+  bool explicitly_enabled = 2;
+  bool implicitly_enabled = 3;
+}
+
+message SetOfflinePlaybackAllowedRequest {
+  bool enable = 1;
+}
+
+message SetOfflinePlaybackAllowedResponse {
+  bool ok = 1;
+}
+
+message Error {
+  enum ErrorCode {
+    SUCCESS = 0;
+    GENERIC = 1;
+    DISK_FULL = 8;
+    EXPIRED = 14;
+    TOO_MANY_TRACKS = 19;
+    NOT_ALLOWED = 23;
+    CONNECTION_DISABLED = 36;
+    DEVICE_LIMIT_REACHED = 7028;
+  }
+  .spotify.offline_esperanto.proto.Error.ErrorCode code = 1;
+}
+
+message ContextInfoPolicy {
+  bool items = 1;
+}
+
+message Context {
+  enum State {
+    NOT_DOWNLOADED = 0;
+    ERROR = 1;
+    REQUESTED = 2;
+    DOWNLOADED = 3;
+    DOWNLOADING = 4;
+    WAITING = 5;
+  }
+  string uri = 1;
+  .spotify.offline_esperanto.proto.Context.State state = 2;
+  float percent_complete = 3;
+}
+
+message Item {
+  enum State {
+    NOT_DOWNLOADED = 0;
+    ERROR = 1;
+    DOWNLOADED_EXPIRED = 2;
+    DOWNLOADED = 3;
+    WAITING_FOR_REDOWNLOAD = 4;
+    DOWNLOADING = 5;
+    WAITING = 6;
+    WAITING_LIMIT_EXCEEDED = 7;
+  }
+  enum Kind {
+    DEFAULT = 0;
+    VIDEO = 1;
+  }
+  string uri = 1;
+  .spotify.offline_esperanto.proto.Item.State state = 2;
+  .spotify.offline_esperanto.proto.Item.State video_state = 3 [deprecated = true];
+  uint32 sync_progress = 4;
+  .spotify.offline_esperanto.proto.Item.Kind kind = 5;
+}
+
+message ContextInfo {
+  .spotify.offline_esperanto.proto.Context context = 1;
+  repeated .spotify.offline_esperanto.proto.Item items = 2;
+}
+
+message DeviceKey {
+  string device_id = 1;
+  string cache_id = 2;
+}
+
+message DeviceContextInfo {
+  .spotify.offline_esperanto.proto.DeviceKey device = 1;
+  .spotify.offline_esperanto.proto.Context context = 2;
+}
+
+message GetContextsRequest {
+  message Filtering {
+    repeated string item_uris = 1;
+  }
+  optional .spotify.offline_esperanto.proto.ContextInfoPolicy policy = 1;
+  optional .spotify.offline_esperanto.proto.DeviceKey device = 2;
+  repeated string uris = 3;
+  optional .spotify.offline_esperanto.proto.GetContextsRequest.Filtering filtering = 4;
+}
+
+message GetContextsResponse {
+  repeated .spotify.offline_esperanto.proto.ContextInfo contexts = 1;
+  int64 error = 2;
+}
+
+message GetItemsRequest {
+  repeated string uris = 1;
+}
+
+message GetItemsResponse {
+  repeated .spotify.offline_esperanto.proto.Item items = 1;
+}
+
+message DownloadRequest {
+  optional .spotify.offline_esperanto.proto.DeviceKey device = 1;
+  string uri = 2;
+  repeated string music_video_uris = 3;
+}
+
+message DownloadResponse {
+  int64 error = 1;
+}
+
+message Progress {
+  enum TrackTotalsState {
+    TRACK_TOTALS_STATE_UNSPECIFIED = 0;
+    TRACK_TOTALS_STATE_RESOLVING = 1;
+    TRACK_TOTALS_STATE_RESOLVED = 2;
+  }
+  int64 queued_tracks = 1;
+  int64 queued_bytes = 2;
+  int64 downloaded_tracks = 3;
+  int64 downloaded_bytes = 4;
+  int64 total_tracks = 5;
+  int64 total_bytes = 6;
+  bool downloading = 7;
+  int64 download_speed = 8;
+  float percent_complete = 9;
+  int64 seconds_left = 10;
+  .spotify.offline_esperanto.proto.Progress.TrackTotalsState track_totals_state = 11;
+}
+
+message GetContextsProgressRequest {
+  repeated string uris = 1;
+}
+
+message ContextProgress {
+  string uri = 1;
+  .spotify.offline_esperanto.proto.Progress progress = 2;
+}
+
+message ContextsProgressResponse {
+  repeated .spotify.offline_esperanto.proto.ContextProgress progresses = 1;
+}
+
+message TotalProgressResponse {
+  .spotify.offline_esperanto.proto.Progress progress = 1;
+}
+
+message Capabilities {
+  bool remote_downloads_enabled = 1;
+}
+
+message Device {
+  string device_id = 1;
+  string cache_id = 2;
+  string name = 3;
+  int32 type = 4;
+  int32 platform = 5;
+  .google.protobuf.Timestamp last_seen_at = 6;
+  bool is_local = 7;
+  string client_id = 8;
+  .spotify.offline_esperanto.proto.Capabilities capabilities = 9;
+  bool offline_enabled = 10;
+}
+
+message GetDevicesResponse {
+  repeated .spotify.offline_esperanto.proto.Device devices = 1;
+  int64 error = 2;
+}
+
+message DevicesWithContextRequest {
+  string uri = 1;
+}
+
+message DevicesWithContextResponse {
+  message DeviceWithContext {
+    .spotify.offline_esperanto.proto.Device device = 1;
+    bool is_supported = 2;
+    optional .spotify.offline_esperanto.proto.Context context = 3;
+  }
+  repeated .spotify.offline_esperanto.proto.DevicesWithContextResponse.DeviceWithContext deviceWithContext = 1;
+  int64 error = 2;
+}
+
+message OfflineLicenseInfo {
+  message Expiry {
+    .google.protobuf.Timestamp track = 1;
+    .google.protobuf.Timestamp episode = 2;
+  }
+  .spotify.offline_esperanto.proto.OfflineLicenseInfo.Expiry expiry = 1;
+}
+
+message GetEstimatedStorageIncreaseRequest {
+  enum Setting {
+    UNKNOWN = 0;
+    LOW = 1;
+    NORMAL = 2;
+    HIGH = 3;
+    VERY_HIGH = 4;
+    LOSSLESS = 5;
+  }
+  .spotify.offline_esperanto.proto.GetEstimatedStorageIncreaseRequest.Setting setting = 1;
+}
+
+message EstimatedStorageIncrease {
+  int64 estimated_bytes_increase = 1;
+}
+
+message GetListsContainingItemRequest {
+  string item_uri = 1;
+}
+
+message GetListsContainingItemResponse {
+  repeated string list_uris = 1;
+}
+
+message LicenseStatusResponse {
+  int32 max_licenses = 1;
+  int32 free_licenses = 2;
+  int64 error = 3;
+}
+
+message PrepareResourceRequest {
+  string resource_id = 1;
+  .spotify.offline_esperanto.proto.ResourceType type = 2;
+}
+
+message PrepareResourceResponse {
+  bool success = 1;
+}
+
+message HasResourceRequest {
+  string resource_id = 1;
+  .spotify.offline_esperanto.proto.ResourceType type = 2;
+}
+
+message HasResourceResponse {
+  bool present = 1;
+}
+
+message RemoveResourceRequest {
+  string resource_id = 1;
+  .spotify.offline_esperanto.proto.ResourceType type = 2;
+}
+
+message EstimateMusicVideoDownloadSizeRequest {
+  repeated string links = 1;
+}
+
+message EstimateMusicVideoDownloadSizeResponse {
+  optional int64 estimated_total_bytes = 1;
+}
+
+message RemoveMusicVideoDownloadsRequest {
+  repeated string track_uris = 1;
+}
+
+message BulkRedownloadPreflightResponse {
+  int64 total_download_bytes = 1;
+  int32 total_tracks = 2;
+  bool is_on_cellular = 3;
+  bool sync_over_cellular_allowed = 4;
+  bool has_sufficient_storage = 5;
+  int32 downloads_in_progress = 6;
+  int64 current_downloaded_bytes = 7;
+}
+
+message BulkRedownloadStartResponse {
+  bool started = 1;
+  string error_message = 2;
+}
+
+message BulkRedownloadCancelResponse {
+  bool cancelled = 1;
+}
+
+message DownloadOnCellularRequest {
+  uint32 session_id = 1;
+}
+
+message DownloadOnCellularResponse {
+  bool enabled = 1;
+}
+
+message ContextAdded {
+  enum Reason {
+    UNSPECIFIED = 0;
+    USER_ACTION_LOCAL_DEVICE = 1;
+    USER_ACTION_REMOTE_DEVICE = 2;
+    AUTO_DOWNLOAD_SERVICE = 3;
+  }
+  string uri = 1;
+  .spotify.offline_esperanto.proto.ContextAdded.Reason reason = 2;
+}
+
+message DownloadSession {
+  message Progress {
+    uint64 completed = 1;
+    uint64 total = 2;
+  }
+  enum StartReason {
+    START_REASON_UNSPECIFIED = 0;
+    START_REASON_LOCAL_REQUEST = 1;
+    START_REASON_REMOTE_REQUEST = 2;
+    START_REASON_AUTOMATIC_DOWNLOAD = 3;
+    START_REASON_CONTENT_UPDATE = 4;
+    START_REASON_QUALITY_CHANGE = 5;
+    START_REASON_BULK_REDOWNLOAD = 6;
+  }
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_WAITING = 1;
+    STATUS_DOWNLOADING = 2;
+    STATUS_DOWNLOADED = 3;
+    STATUS_FAILED = 4;
+    STATUS_ABORTED = 5;
+  }
+  enum StatusReason {
+    STATUS_REASON_UNSPECIFIED = 0;
+    STATUS_REASON_NONE = 1;
+    STATUS_REASON_FAILED_UNAVAILABLE_CONTENT = 2;
+    STATUS_REASON_FAILED_OTHER = 3;
+  }
+  uint32 session_id = 1;
+  string context_uri = 2;
+  .spotify.offline_esperanto.proto.DownloadSession.StartReason start_reason = 3;
+  .spotify.offline_esperanto.proto.DownloadSession.Status status = 4;
+  .spotify.offline_esperanto.proto.DownloadSession.StatusReason status_reason = 5;
+  optional int64 ended_at_ms = 6;
+  bool download_on_cellular = 7;
+  .spotify.offline_esperanto.proto.DownloadSession.Progress tracks = 8;
+  uint64 total_bytes = 9;
+}
+
+message DownloadTotalProgress {
+  .spotify.offline_esperanto.proto.DownloadSession.Progress tracks = 1;
+  .spotify.offline_esperanto.proto.DownloadSession.Progress bytes = 2;
+}
+
+message DownloadSessionsSnapshot {
+  repeated .spotify.offline_esperanto.proto.DownloadSession sessions = 1;
+  optional .spotify.offline_esperanto.proto.DownloadTotalProgress total_progress = 2;
+}
+
+message DownloadSessionsChange {
+  optional .spotify.offline_esperanto.proto.DownloadSession upsert = 1;
+  optional .spotify.offline_esperanto.proto.DownloadTotalProgress total_progress = 2;
+}
+
+message DownloadSessionsEvent {
+  oneof payload {
+    .spotify.offline_esperanto.proto.DownloadSessionsSnapshot snapshot = 1;
+    .spotify.offline_esperanto.proto.DownloadSessionsChange change = 2;
+    uint32 removed_session_id = 3;
+  }
+}
+
+message DownloadBlockerState {
+  .spotify.offline_esperanto.proto.DownloadBlocker blocker = 1;
+}
+
+enum ResourceType {
+  RESOURCE_TYPE_VIDEO = 0;
+  RESOURCE_TYPE_AUDIO = 1;
+}
+
+enum DownloadBlocker {
+  DOWNLOAD_BLOCKER_UNSPECIFIED = 0;
+  DOWNLOAD_BLOCKER_NO_CONNECTION = 1;
+  DOWNLOAD_BLOCKER_FORCED_OFFLINE = 2;
+  DOWNLOAD_BLOCKER_CELLULAR_RESTRICTED = 3;
+  DOWNLOAD_BLOCKER_STORAGE_FULL = 4;
+  DOWNLOAD_BLOCKER_NONE = 5;
+  DOWNLOAD_BLOCKER_ROAMING_NETWORK_DISABLED = 6;
+  DOWNLOAD_BLOCKER_WIFI_DOWNLOADS_DISABLED = 7;
+  DOWNLOAD_BLOCKER_UNSUPPORTED_CONNECTION_TYPE = 8;
+}
+
+service Offline {
+  rpc GetOfflinePlaybackStatus(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.GetOfflinePlaybackStatusResponse);
+  rpc SubscribeOfflinePlaybackStatus(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.GetOfflinePlaybackStatusResponse);
+  rpc SetOfflinePlaybackAllowed(.spotify.offline_esperanto.proto.SetOfflinePlaybackAllowedRequest) returns (.spotify.offline_esperanto.proto.SetOfflinePlaybackAllowedResponse);
+  rpc SubscribeError(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.Error);
+  rpc GetContexts(.spotify.offline_esperanto.proto.GetContextsRequest) returns (.spotify.offline_esperanto.proto.GetContextsResponse);
+  rpc SubscribeContexts(.spotify.offline_esperanto.proto.GetContextsRequest) returns (stream .spotify.offline_esperanto.proto.GetContextsResponse);
+  rpc GetItems(.spotify.offline_esperanto.proto.GetItemsRequest) returns (.spotify.offline_esperanto.proto.GetItemsResponse);
+  rpc SubscribeItems(.spotify.offline_esperanto.proto.GetItemsRequest) returns (stream .spotify.offline_esperanto.proto.GetItemsResponse);
+  rpc AddDownload(.spotify.offline_esperanto.proto.DownloadRequest) returns (.spotify.offline_esperanto.proto.DownloadResponse);
+  rpc RemoveDownload(.spotify.offline_esperanto.proto.DownloadRequest) returns (.spotify.offline_esperanto.proto.DownloadResponse);
+  rpc RemoveAllDownloads(.google.protobuf.Empty) returns (.google.protobuf.Empty);
+  rpc GetContextsProgress(.spotify.offline_esperanto.proto.GetContextsProgressRequest) returns (.spotify.offline_esperanto.proto.ContextsProgressResponse);
+  rpc SubscribeContextsProgress(.spotify.offline_esperanto.proto.GetContextsProgressRequest) returns (stream .spotify.offline_esperanto.proto.ContextsProgressResponse);
+  rpc GetTotalProgress(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.TotalProgressResponse);
+  rpc SubscribeTotalProgress(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.TotalProgressResponse);
+  rpc GetDevices(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.GetDevicesResponse);
+  rpc GetLocalDevice(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.Device);
+  rpc SubscribeDevicesWithContext(.spotify.offline_esperanto.proto.DevicesWithContextRequest) returns (stream .spotify.offline_esperanto.proto.DevicesWithContextResponse);
+  rpc SubscribeContextAdded(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.ContextAdded);
+  rpc LicenseStatus(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.LicenseStatusResponse);
+  rpc GetOfflineLicenseInfo(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.OfflineLicenseInfo);
+  rpc GetEstimatedStorageIncrease(.spotify.offline_esperanto.proto.GetEstimatedStorageIncreaseRequest) returns (.spotify.offline_esperanto.proto.EstimatedStorageIncrease);
+  rpc GetListsContainingItem(.spotify.offline_esperanto.proto.GetListsContainingItemRequest) returns (.spotify.offline_esperanto.proto.GetListsContainingItemResponse);
+  rpc PrepareResource(.spotify.offline_esperanto.proto.PrepareResourceRequest) returns (.spotify.offline_esperanto.proto.PrepareResourceResponse);
+  rpc HasResource(.spotify.offline_esperanto.proto.HasResourceRequest) returns (.spotify.offline_esperanto.proto.HasResourceResponse);
+  rpc RemoveResource(.spotify.offline_esperanto.proto.RemoveResourceRequest) returns (.google.protobuf.Empty);
+  rpc EstimateMusicVideoDownloadSize(.spotify.offline_esperanto.proto.EstimateMusicVideoDownloadSizeRequest) returns (.spotify.offline_esperanto.proto.EstimateMusicVideoDownloadSizeResponse);
+  rpc RemoveMusicVideoDownloads(.spotify.offline_esperanto.proto.RemoveMusicVideoDownloadsRequest) returns (.google.protobuf.Empty);
+  rpc BulkRedownloadPreflight(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.BulkRedownloadPreflightResponse);
+  rpc BulkRedownloadStart(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.BulkRedownloadStartResponse);
+  rpc BulkRedownloadCancel(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.BulkRedownloadCancelResponse);
+  rpc SubscribeBulkRedownloadProgress(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.Progress);
+  rpc SubscribeDownloadSessions(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.DownloadSessionsEvent);
+  rpc SubscribeDownloadBlocker(.google.protobuf.Empty) returns (stream .spotify.offline_esperanto.proto.DownloadBlockerState);
+  rpc DownloadOnCellular(.spotify.offline_esperanto.proto.DownloadOnCellularRequest) returns (.spotify.offline_esperanto.proto.DownloadOnCellularResponse);
+  rpc DownloadAllOnCellular(.google.protobuf.Empty) returns (.spotify.offline_esperanto.proto.DownloadOnCellularResponse);
+}

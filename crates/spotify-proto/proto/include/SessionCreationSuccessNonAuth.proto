@@ -1,0 +1,10 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message SessionCreationSuccessNonAuth {
+  optional string method = 1;
+  optional string auth_session_id = 2;
+}

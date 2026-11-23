@@ -1,0 +1,15 @@
+syntax = "proto2";
+
+package spotify.player.proto;
+
+import "stream_reporting_attribution_transfer.proto";
+
+option optimize_for = CODE_SIZE;
+
+message ContextTrack {
+  optional string uri = 1;
+  optional string uid = 2;
+  optional bytes gid = 3;
+  map<string, string> metadata = 4;
+  optional .spotify.player.proto.transfer.StreamReportingAttribution stream_reporting_attribution = 5;
+}

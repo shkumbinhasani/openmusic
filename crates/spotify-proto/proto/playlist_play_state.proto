@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package spotify.playlist.proto;
+
+option optimize_for = CODE_SIZE;
+
+message NavigationHistory {
+  repeated string prev_items = 1;
+  repeated string next_items = 2;
+}
+
+message PlayState {
+  message ShuffleState {
+    enum ShuffleType {
+      NONE = 0;
+      NORMAL_SHUFFLE = 1;
+      SMART_SHUFFLE = 2;
+    }
+    .spotify.playlist.proto.PlayState.ShuffleState.ShuffleType type = 1;
+    optional string head_uid = 3;
+    optional string shuffle_seed = 4;
+    optional .spotify.playlist.proto.NavigationHistory navigation_history = 5;
+    reserved 2;
+  }
+  optional .spotify.playlist.proto.PlayState.ShuffleState shuffle_state = 1;
+}

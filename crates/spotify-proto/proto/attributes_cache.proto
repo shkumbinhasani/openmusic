@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package spotify.playlist_cache.proto;
+
+import "playlist_permission.proto";
+
+option java_package = "com.spotify.playlist.proto";
+option optimize_for = CODE_SIZE;
+
+message CachedPlaylistAttributes {
+  optional string name = 1;
+  optional int32 length = 2;
+  optional bool collaborative = 3;
+  optional string description = 4;
+  optional string picture = 5;
+  optional string owner = 6;
+  optional bytes revision = 7;
+  optional string format_list_type = 8;
+  optional string mosaic_uri = 9;
+  map<string, string> format_list_attributes = 10;
+  map<string, string> picture_sizes = 11;
+  optional bytes encoded_capabilities = 12;
+  repeated int32 geoblocked_attributes = 13;
+  map<int32, int32> num_items_per_link_type = 14;
+  optional string ai_curation_id = 15;
+  optional int32 status_code = 16;
+  optional int32 item_id_algorithm = 17;
+  optional int64 updated_at_ms = 18;
+  optional bool deleted_by_owner = 19;
+  optional bool is_user_created = 20;
+  optional .spotify.playlist_permission.proto.PermissionState permission_state = 21;
+  optional string mosaic_v2_uri = 22;
+  optional int32 mosaic_layout = 23;
+  optional .spotify.playlist_cache.proto.NumMembersPerPermissionLevel num_members_per_permission_level = 24;
+}
+
+message NumMembersPerPermissionLevel {
+  map<int32, int32> counts = 1;
+}

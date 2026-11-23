@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package spotify.extendedmetadata.v3;
+
+import "google/protobuf/duration.proto";
+import "spotify/extendedmetadata/v3/extension_config.proto";
+
+option java_package = "com.spotify.extendedmetadata.v3";
+option optimize_for = SPEED;
+option java_multiple_files = true;
+
+message GetAllExtensionConfigsRequest {
+}
+
+message GetAllExtensionConfigsResponse {
+  int32 status_code = 1;
+  .google.protobuf.Duration config_cache_ttl = 2;
+  map<string, .spotify.extendedmetadata.v3.ExtensionConfig> configs = 3;
+}
+
+service ExtensionConfigService {
+  rpc GetAllExtensionConfigs(.spotify.extendedmetadata.v3.GetAllExtensionConfigsRequest) returns (.spotify.extendedmetadata.v3.GetAllExtensionConfigsResponse);
+}

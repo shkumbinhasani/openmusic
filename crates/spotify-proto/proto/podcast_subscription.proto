@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package spotify.podcast_paywalls;
+
+option java_package = "com.spotify.podcastsubscription.proto";
+option java_outer_classname = "PodcastSubscriptionProto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "SPT";
+
+message PodcastSubscription {
+  enum UserExplanation {
+    SUBSCRIPTION_DIALOG = 0;
+    NONE = 1;
+  }
+  enum Badge {
+    BADGE_UNSPECIFIED = 0;
+    BADGE_EXTRAS = 1;
+  }
+  bool is_paywalled = 1;
+  bool is_user_subscribed = 2;
+  .spotify.podcast_paywalls.PodcastSubscription.UserExplanation user_explanation = 3;
+  .spotify.podcast_paywalls.PodcastSubscription.Badge badge = 5;
+}

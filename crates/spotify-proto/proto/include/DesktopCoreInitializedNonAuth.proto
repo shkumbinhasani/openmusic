@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message DesktopCoreInitializedNonAuth {
+  optional string buildsystem = 1;
+  optional string campaign_id = 2;
+  optional string app_variant = 3;
+}

@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package spotify.metadata_esperanto.proto;
+
+import "metadata_cosmos.proto";
+
+option java_package = "com.spotify.metadata.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message GetEntityRequest {
+  string uri = 1;
+}
+
+message GetEntityResponse {
+  .spotify.metadata_cosmos.proto.MetadataItem item = 1;
+}
+
+service ClassicMetadataService {
+  rpc GetEntity(.spotify.metadata_esperanto.proto.GetEntityRequest) returns (.spotify.metadata_esperanto.proto.GetEntityResponse);
+  rpc MultigetEntity(.spotify.metadata_cosmos.proto.MultiRequest) returns (.spotify.metadata_cosmos.proto.MultiResponse);
+}

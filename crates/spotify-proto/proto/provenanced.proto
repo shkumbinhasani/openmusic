@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package spotify.event_sender.provenanced.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ProvenancedString {
+  string value = 1;
+  string provenance = 2;
+  .spotify.event_sender.provenanced.proto.Validation validation = 3;
+}
+
+enum Validation {
+  UNVERIFIED = 0;
+  INVALID = 1;
+  VALID = 2;
+  TRUSTED = 3;
+}

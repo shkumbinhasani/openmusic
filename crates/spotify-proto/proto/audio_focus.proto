@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package spotify.timeline_conductor.audio_focus.proto;
+
+option java_package = "com.spotify.timeline_conductor.audiofocus.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "ESP";
+
+message LoseAudioFocusRequest {
+  bool transient = 1;
+}
+
+message AudioRouteLostRequest {
+}
+
+message GainAudioFocusRequest {
+  bool automatic_resume_allowed = 1;
+}

@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package spotify.resumptionboundaries.v1;
+
+option java_package = "com.spotify.resumptionboundaries.proto.v1";
+option java_outer_classname = "ResumptionBoundariesProto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message ResumptionBoundaries {
+  repeated .spotify.resumptionboundaries.v1.Segmentation segmentations = 1;
+}
+
+message Segmentation {
+  .spotify.resumptionboundaries.v1.Strategy strategy = 1;
+  oneof boundaries {
+    .spotify.resumptionboundaries.v1.DeltaBoundaries deltas = 2;
+  }
+}
+
+message DeltaBoundaries {
+  repeated uint32 deltas_ms = 1;
+}
+
+enum Strategy {
+  STRATEGY_UNSPECIFIED = 0;
+  STRATEGY_SENTENCE = 1;
+}

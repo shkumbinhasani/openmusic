@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package spotify.esperanto;
+
+import "google/protobuf/descriptor.proto";
+
+option optimize_for = CODE_SIZE;
+
+extend .google.protobuf.MethodOptions {
+  optional bool direct_call = 54212;
+}

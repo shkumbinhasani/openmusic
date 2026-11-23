@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package spotify.narration.proto;
+
+import "tts-resolve.proto";
+
+option optimize_for = CODE_SIZE;
+
+message TtsRequest {
+  oneof prompt {
+    string text = 1;
+    string ssml = 2;
+  }
+  .spotify.narration.proto.ResolveRequest.AudioFormat audio_format = 3;
+  string language = 4;
+  .spotify.narration.proto.ResolveRequest.TtsVoice tts_voice = 5;
+  .spotify.narration.proto.ResolveRequest.TtsProvider tts_provider = 6;
+  int32 sample_rate_hz = 7;
+}
+
+message TtsResponse {
+  string url = 1;
+}
+
+service ClientTtsService {
+  rpc GetTtsUrl(.spotify.narration.proto.TtsRequest) returns (.spotify.narration.proto.TtsResponse);
+}

@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package spotify.your_library.proto;
+
+option optimize_for = CODE_SIZE;
+
+message RecentlyPlayedPlaylist {
+  int64 last_played = 1;
+}

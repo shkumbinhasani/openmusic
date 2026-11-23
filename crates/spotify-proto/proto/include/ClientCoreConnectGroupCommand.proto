@@ -1,0 +1,26 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ClientCoreConnectGroupCommand {
+  optional string command_type = 1;
+  optional string device_id = 2;
+  optional string target_device_id = 3;
+  optional string group_instance = 4;
+  optional string group_device_identifier = 5;
+  optional string resolution = 6;
+  optional int64 duration_ms = 7;
+  optional int64 first_acceptance_ms = 8;
+  optional int32 command_count = 9;
+  optional bool commands_truncated = 10;
+  repeated string command_ids = 11;
+  repeated string command_outcomes = 12;
+  repeated string interaction_ids = 13;
+  optional string apply_source = 14;
+  optional bool push_connection_lost = 15;
+  optional int32 group_size = 16;
+  optional string target_device_brand = 17;
+  optional string target_device_model = 18;
+}

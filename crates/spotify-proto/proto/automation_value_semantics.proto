@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package spotify.automix.proto;
+
+option java_package = "com.spotify.automix.proto";
+option optimize_for = CODE_SIZE;
+
+message AutomationRawRange {
+  double minimum = 1;
+  double maximum = 2;
+}
+
+message AutomationSpecialResult {
+  oneof display_value {
+    .spotify.automix.proto.AutomationSpecialRole role = 1;
+    double numeric_value = 2;
+  }
+}
+
+message AutomationSpecialCase {
+  oneof location {
+    double raw_value = 1;
+    .spotify.automix.proto.AutomationRawRange raw_range = 2;
+  }
+  .spotify.automix.proto.AutomationSpecialResult result = 3;
+}
+
+message AutomationBase10LogRatioMapping {
+  double raw_reference = 1;
+  double output_multiplier = 2;
+}
+
+message AutomationLinearInterpolation {
+}
+
+message AutomationSignedGeometricInterpolation {
+}
+
+message AutomationLinearEasing {
+}
+
+message AutomationPowerEasing {
+  double exponent = 1;
+}
+
+message AutomationInterpolationSegment {
+  double raw_start = 1;
+  double raw_end = 2;
+  double output_start = 3;
+  double output_end = 4;
+  oneof output_interpolation {
+    .spotify.automix.proto.AutomationLinearInterpolation linear = 5;
+    .spotify.automix.proto.AutomationSignedGeometricInterpolation signed_geometric = 6;
+  }
+  oneof easing {
+    .spotify.automix.proto.AutomationLinearEasing no_easing = 7;
+    .spotify.automix.proto.AutomationPowerEasing power_in = 8;
+    .spotify.automix.proto.AutomationPowerEasing power_out = 9;
+  }
+  .spotify.automix.proto.AutomationValueMode output_mode = 10;
+}
+
+message AutomationPiecewiseInterpolationMapping {
+  repeated .spotify.automix.proto.AutomationInterpolationSegment segments = 1;
+}
+
+message AutomationValueSemantics {
+  .spotify.automix.proto.AutomationValueKind kind = 1;
+  .spotify.automix.proto.AutomationValueUnit output_unit = 2;
+  oneof mapping {
+    .spotify.automix.proto.AutomationBase10LogRatioMapping base_10_log_ratio = 10;
+    .spotify.automix.proto.AutomationPiecewiseInterpolationMapping piecewise_interpolation = 11;
+  }
+  repeated .spotify.automix.proto.AutomationSpecialCase special_cases = 20;
+}
+
+enum AutomationValueKind {
+  AUTOMATION_VALUE_KIND_UNSPECIFIED = 0;
+  AUTOMATION_VALUE_KIND_LINEAR_GAIN = 1;
+  AUTOMATION_VALUE_KIND_EQ_GAIN = 2;
+  AUTOMATION_VALUE_KIND_FILTER_CUTOFF = 3;
+  AUTOMATION_VALUE_KIND_DRY_WET = 4;
+  AUTOMATION_VALUE_KIND_NOISE_COLOR = 5;
+}
+
+enum AutomationValueUnit {
+  AUTOMATION_VALUE_UNIT_UNSPECIFIED = 0;
+  AUTOMATION_VALUE_UNIT_DECIBELS = 1;
+  AUTOMATION_VALUE_UNIT_HERTZ = 2;
+  AUTOMATION_VALUE_UNIT_PERCENT = 3;
+}
+
+enum AutomationValueMode {
+  AUTOMATION_VALUE_MODE_UNSPECIFIED = 0;
+  AUTOMATION_VALUE_MODE_LOW_PASS = 1;
+  AUTOMATION_VALUE_MODE_HIGH_PASS = 2;
+}
+
+enum AutomationSpecialRole {
+  AUTOMATION_SPECIAL_ROLE_UNSPECIFIED = 0;
+  AUTOMATION_SPECIAL_ROLE_BYPASS = 1;
+  AUTOMATION_SPECIAL_ROLE_OFF = 2;
+  AUTOMATION_SPECIAL_ROLE_MUTE = 3;
+  AUTOMATION_SPECIAL_ROLE_KILL = 4;
+}

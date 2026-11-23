@@ -1,0 +1,13 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ResumptionSmartResumptionSkipped {
+  optional string item_uri = 1;
+  optional string skip_reason = 2;
+  optional int64 original_position_ms = 3;
+  optional int64 resume_point_age_seconds = 4;
+  optional string playback_id = 5;
+}

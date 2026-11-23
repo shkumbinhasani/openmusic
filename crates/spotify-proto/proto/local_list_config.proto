@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package spotify.playlist.local_list_config.proto;
+
+option optimize_for = CODE_SIZE;
+
+message LocalListConfig {
+  string name = 1;
+  string image_uri = 2;
+  string description = 3;
+}

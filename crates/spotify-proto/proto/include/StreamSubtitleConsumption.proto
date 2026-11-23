@@ -1,0 +1,24 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message StreamSubtitleConsumption {
+  optional bytes stream_id = 1;
+  optional bytes playback_id = 2;
+  optional string content_uri = 3;
+  repeated int64 timestamps = 4;
+  repeated int64 positions = 5;
+  repeated string subtitle_languages = 6;
+  repeated int64 ms_played = 7;
+  optional int64 end_timestamp = 8;
+  optional int64 end_position = 9;
+  repeated int64 end_timestamps = 10;
+  repeated int64 ms_played_nominal = 11;
+  repeated bool is_video_on = 12;
+  repeated string subtitle_types = 13;
+  repeated string subtitle_generation_types = 14;
+  repeated string subtitle_suppliers = 15;
+  repeated string subtitle_closed_captions = 16;
+}

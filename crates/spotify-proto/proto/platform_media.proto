@@ -1,0 +1,161 @@
+syntax = "proto3";
+
+package spotify.contentagnostic.v2;
+
+option java_package = "com.spotify.contentagnostic.v2";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message SpotifyPresentation {
+  uint32 timescale = 1;
+  uint64 duration = 2;
+  repeated .spotify.contentagnostic.v2.RelativeUrl base_urls = 3;
+  repeated .spotify.contentagnostic.v2.ContentTrack tracks = 4;
+  repeated .spotify.contentagnostic.v2.CompactDurations segment_timelines = 5;
+  repeated .spotify.contentagnostic.v2.EncryptionInfo encryption_infos = 6;
+}
+
+message ContentTrack {
+  bytes id = 1;
+  oneof type {
+    .spotify.contentagnostic.v2.AudioContentTrack audio = 2;
+    .spotify.contentagnostic.v2.VideoContentTrack video = 3;
+    .spotify.contentagnostic.v2.SubtitleContentTrack subtitle = 4;
+  }
+}
+
+message AudioContentTrack {
+  .spotify.contentagnostic.v2.ChannelLayout channels = 1;
+  string language = 2;
+  repeated .spotify.contentagnostic.v2.AudioEncoding encodings = 3;
+  .spotify.contentagnostic.v2.LoudnessMeasurement item_loudness = 4;
+  optional .spotify.contentagnostic.v2.LoudnessMeasurement group_loudness = 5;
+}
+
+message VideoContentTrack {
+  .spotify.contentagnostic.v2.VisualRange visual_range = 1;
+  string language = 2;
+  repeated .spotify.contentagnostic.v2.VideoEncoding encodings = 3;
+}
+
+message SubtitleContentTrack {
+  string language = 2;
+  repeated .spotify.contentagnostic.v2.SubtitleEncoding encodings = 3;
+}
+
+message LoudnessMeasurement {
+  float global_loudness_lufs = 1;
+  float truepeak_dbtp = 2;
+  optional float max_momentary_loudness_lufs = 3;
+}
+
+message AudioEncoding {
+  string codec = 1;
+  uint32 sample_rate_hz = 2;
+  optional .spotify.contentagnostic.v2.ChannelLayout channels = 3;
+  uint32 nominal_bitrate_kbps = 4;
+  float gain_adjustment_dbfs = 5;
+  uint32 segment_timeline = 6;
+  repeated .spotify.contentagnostic.v2.Packaging packagings = 7;
+}
+
+message VideoEncoding {
+  string codec = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 framerate_numerator = 4;
+  uint32 framerate_denominator = 5;
+  optional .spotify.contentagnostic.v2.VisualRange visual_range = 6;
+  uint32 average_bitrate_kbps = 7;
+  uint32 max_segment_bitrate_kbps = 8;
+  uint32 segment_timeline = 9;
+  repeated .spotify.contentagnostic.v2.Packaging packagings = 10;
+}
+
+message SubtitleEncoding {
+  string mime_type = 1;
+  optional uint32 segment_timeline = 2;
+  repeated .spotify.contentagnostic.v2.Packaging packagings = 3;
+}
+
+message RelativeUrl {
+  repeated uint32 bases = 1;
+  string url = 2;
+}
+
+message CompactDurations {
+  oneof mode {
+    .spotify.contentagnostic.v2.RunlengthDurations runlength_durations = 1;
+    .spotify.contentagnostic.v2.DeltaEncodedDurations variable_durations = 2;
+  }
+}
+
+message RunlengthDurations {
+  repeated sint32 values = 1;
+}
+
+message DeltaEncodedDurations {
+  repeated sint32 values = 1;
+}
+
+message Packaging {
+  string id = 1;
+  .spotify.contentagnostic.v2.ContainerFormat format = 2;
+  .spotify.contentagnostic.v2.RelativeUrl init_url = 3;
+  .spotify.contentagnostic.v2.RelativeUrl segment_url = 4;
+  optional uint32 encryption_info = 5;
+}
+
+message EncryptionInfo {
+  .spotify.contentagnostic.v2.EncryptionScheme scheme = 1;
+  bytes key_id = 2;
+  repeated .spotify.contentagnostic.v2.DrmSystem drm_systems = 3;
+}
+
+message DrmSystem {
+  oneof system {
+    .spotify.contentagnostic.v2.Widevine widevine = 1;
+    .spotify.contentagnostic.v2.PlayReady playready = 2;
+    .spotify.contentagnostic.v2.FairPlay fairplay = 3;
+    .spotify.contentagnostic.v2.SpotifyDrm spotify_drm = 4;
+  }
+}
+
+message Widevine {
+}
+
+message PlayReady {
+}
+
+message SpotifyDrm {
+}
+
+message FairPlay {
+  string license_url = 1;
+  bytes asset_id = 2;
+}
+
+enum ChannelLayout {
+  CHANNEL_LAYOUT_UNSPECIFIED = 0;
+  CHANNEL_LAYOUT_STEREO = 1;
+  CHANNEL_LAYOUT_SURROUND_5_1 = 2;
+  CHANNEL_LAYOUT_SURROUND_OBJECT = 3;
+}
+
+enum VisualRange {
+  VISUAL_RANGE_UNSPECIFIED = 0;
+  VISUAL_RANGE_SDR = 1;
+  VISUAL_RANGE_HDR = 2;
+}
+
+enum ContainerFormat {
+  CONTAINER_FORMAT_UNSPECIFIED = 0;
+  CONTAINER_FORMAT_FMP4 = 1;
+  CONTAINER_FORMAT_WEBM = 2;
+}
+
+enum EncryptionScheme {
+  ENCRYPTION_SCHEME_UNSPECIFIED = 0;
+  ENCRYPTION_SCHEME_CENC_CTR = 1;
+  ENCRYPTION_SCHEME_CENC_CBCS = 2;
+}

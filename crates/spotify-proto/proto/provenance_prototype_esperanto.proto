@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package spotify.event_sender.provenance_prototype.proto;
+
+import "provenanced.proto";
+
+option optimize_for = CODE_SIZE;
+
+message ReportRequest {
+  optional .spotify.event_sender.provenanced.proto.ProvenancedString interaction_id = 1;
+  optional .spotify.event_sender.provenanced.proto.ProvenancedString referrer_root = 2;
+}
+
+message ReportResponse {
+}
+
+service ProvenancePrototype {
+  rpc Report(.spotify.event_sender.provenance_prototype.proto.ReportRequest) returns (.spotify.event_sender.provenance_prototype.proto.ReportResponse);
+}

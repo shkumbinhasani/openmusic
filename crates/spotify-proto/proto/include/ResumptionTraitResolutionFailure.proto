@@ -1,0 +1,12 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ResumptionTraitResolutionFailure {
+  optional string item_uri = 1;
+  optional string trait_name = 2;
+  optional string failure_reason = 3;
+  optional string context = 4;
+}

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package spotify.list_player.impl.proto;
+
+option optimize_for = CODE_SIZE;
+
+message PlaybackSettings {
+  enum MediaPreference {
+    UNSPECIFIED = 0;
+    AUDIO = 1;
+    VIDEO = 2;
+  }
+  .spotify.list_player.impl.proto.PlaybackSettings.MediaPreference media_preference = 1;
+  optional bool legacy_repeat_list = 2 [deprecated = true];
+  bool repeat_item = 3;
+  optional bool search_repeat_list = 4;
+  optional bool non_search_repeat_list = 5;
+}

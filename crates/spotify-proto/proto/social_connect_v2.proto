@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package socialconnect;
+
+option optimize_for = CODE_SIZE;
+
+message Session {
+  int64 timestamp = 1;
+  string session_id = 2 [json_name = "session_id"];
+  repeated .socialconnect.SessionMember session_members = 6 [json_name = "session_members"];
+  bool is_session_owner = 9 [json_name = "is_session_owner"];
+  bool active = 17;
+  bool redirect_commands = 25;
+  bool requires_jam_lens = 31 [json_name = "requires_jam_lens"];
+  optional string logical_playback_identifier = 32 [json_name = "logical_playback_identifier"];
+  reserved 8, 12, 22, 26 to 30;
+  reserved "type", "is_discoverable", "quick_blend";
+}
+
+message SessionMember {
+  string id = 2;
+  string username = 3;
+  string display_name = 4 [json_name = "display_name"];
+  string image_url = 5 [json_name = "image_url"];
+  .socialconnect.PlaybackControl playback_control = 9;
+  bool is_current_user = 10 [json_name = "is_current_user"];
+  bool listen_mode = 11 [json_name = "listen_mode"];
+}
+
+message SessionUpdate {
+  .socialconnect.Session session = 1;
+  .socialconnect.SessionUpdateReason reason = 2;
+}
+
+enum SessionUpdateReason {
+  UNKNOWN_UPDATE_TYPE = 0;
+  NEW_SESSION = 1;
+  USER_JOINED = 2;
+  USER_LEFT = 3;
+  SESSION_DELETED = 4;
+  YOU_LEFT = 5;
+  YOU_WERE_KICKED = 6;
+  YOU_JOINED = 7;
+  USER_KICKED = 10;
+  VOLUME_CONTROL_PERMISSIONS_CHANGED = 11;
+  QUEUE_ONLY_MODE_CONTROL_CHANGED = 12;
+  WIFI_BROADCAST_CHANGED = 13;
+  ACTIVE_DEVICE_CHANGED = 14;
+  SESSION_MEMBER_UPDATED = 16;
+  SESSION_ACTIVATED = 17;
+  SESSION_MEMBER_PAUSE_CHANGED = 18;
+  JAM_CAPPING_STATE_CHANGED = 19;
+  YOU_WERE_REMOVED_UNSUPPORTED_CONTENT = 20;
+  reserved 8, 9, 15;
+  reserved "PARTICIPANT_PROMOTED_TO_HOST", "DISCOVERABILITY_CHANGED", "QUICK_BLEND_CHANGED";
+}
+
+enum PlaybackControl {
+  UNKNOWN = 0;
+  CONTROL = 1;
+  LISTEN_AND_CONTROL = 2;
+}

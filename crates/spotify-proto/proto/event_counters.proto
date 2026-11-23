@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message EventCounters {
+  message Counters {
+    repeated int32 counters = 1;
+  }
+  int32 file_format_version = 1;
+  map<string, .spotify.event_sender.proto.EventCounters.Counters> event_name_to_counters_map = 2;
+}

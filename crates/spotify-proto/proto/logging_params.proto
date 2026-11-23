@@ -1,0 +1,17 @@
+syntax = "proto2";
+
+package spotify.player.proto;
+
+import "stream_reporting_attribution.proto";
+
+option optimize_for = CODE_SIZE;
+
+message LoggingParams {
+  optional int64 command_initiated_time = 1;
+  optional int64 command_received_time = 2;
+  repeated string page_instance_ids = 3;
+  repeated string interaction_ids = 4;
+  optional string device_identifier = 5;
+  optional string command_id = 6;
+  optional .spotify.stream_reporting_attribution.proto.StreamReportingAttribution stream_reporting_attribution = 7;
+}

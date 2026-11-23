@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package spotify.collection_platform.proto;
+
+import "collection_platform_items.proto";
+
+option java_package = "com.spotify.collection_platform.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "ESP";
+
+message CollectionPlatformItemsRequest {
+  .spotify.collection_platform.proto.CollectionSet set = 1;
+  repeated string items = 2;
+  repeated .spotify.collection_platform.proto.CollectionPlatformItem collection_items = 3;
+  bool include_item_data = 4;
+}
+
+message CollectionPlatformAddContextItemsRequest {
+  .spotify.collection_platform.proto.CollectionSet set = 1;
+  repeated .spotify.collection_platform.proto.CollectionPlatformContextItem items = 2;
+}
+
+message CollectionPlatformRemoveContextItemsRequest {
+  .spotify.collection_platform.proto.CollectionSet set = 1;
+  repeated .spotify.collection_platform.proto.CollectionPlatformContextItem items = 2;
+}
+
+message CollectionPlatformGetContextItemsRequest {
+  .spotify.collection_platform.proto.CollectionSet set = 1;
+  repeated .spotify.collection_platform.proto.CollectionPlatformContextItem items = 2;
+  bool include_item_data = 3;
+}
+
+message CollectionPlatformContainsContextItemsRequest {
+  .spotify.collection_platform.proto.CollectionSet set = 1;
+  repeated .spotify.collection_platform.proto.CollectionPlatformContextItem items = 2;
+}
+
+enum CollectionSet {
+  UNKNOWN = 0;
+  IGNOREINRECS = 4;
+  BANNED_ARTISTS = 8;
+  CONCERTS = 10;
+  PRERELEASE = 12;
+  MARKED_AS_FINISHED = 13;
+  NOT_INTERESTED = 14;
+  PAGE_MATCH = 16;
+  ISBN_SCAN = 18;
+  RATINGS = 19;
+  HOME_HIDES = 20;
+  MVCDP_NOTIFICATIONS = 21;
+  AUTO_SAVE_SHOWS = 22;
+}

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package spotify.desktop.navigation_esperanto.proto;
+
+option optimize_for = CODE_SIZE;
+
+message SubscribeNavigationRequest {
+}
+
+message SubscribeDeepLinkRequest {
+}
+
+message NavigationEvent {
+  string uri = 1;
+  string original_uri = 2;
+}
+
+message DeepLinkEvent {
+  string url = 1;
+}
+
+service DesktopNavigation {
+  rpc SubscribeNavigation(.spotify.desktop.navigation_esperanto.proto.SubscribeNavigationRequest) returns (stream .spotify.desktop.navigation_esperanto.proto.NavigationEvent);
+  rpc SubscribeDeepLink(.spotify.desktop.navigation_esperanto.proto.SubscribeDeepLinkRequest) returns (stream .spotify.desktop.navigation_esperanto.proto.DeepLinkEvent);
+}

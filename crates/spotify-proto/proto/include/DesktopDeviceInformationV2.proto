@@ -1,0 +1,16 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message DesktopDeviceInformationV2 {
+  optional string cpu_model = 1;
+  optional string cpu_architecture = 2;
+  optional int64 physical_core_count = 3;
+  optional int64 logical_core_count = 4;
+  optional int64 total_physical_memory_bytes = 5;
+  optional string gpu_model = 6;
+  optional string gpu_vendor = 7;
+  optional string gpu_type = 8;
+}

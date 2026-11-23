@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package spotify.player.sequence.proto;
+
+import "spotify/playback_platform/context/v1/context_environment.proto";
+import "spotify/playback_platform/context/v1/context_state.proto";
+
+option optimize_for = CODE_SIZE;
+
+message ContextTree {
+  message NodeData {
+    optional .spotify.playback_platform.context.v1.ContextState state = 1;
+    .spotify.playback_platform.context.v1.ContextEnvironment context_environment = 2;
+  }
+  message Node {
+    .spotify.player.sequence.proto.ContextTree.NodeData data = 1;
+    map<string, .spotify.player.sequence.proto.ContextTree.Node> children = 2;
+  }
+  .spotify.player.sequence.proto.ContextTree.Node root_node = 1;
+}

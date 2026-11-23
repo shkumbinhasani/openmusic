@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package spotify.list.v1.model.attributes;
+
+option optimize_for = SPEED;
+
+message SortDefinition {
+  oneof sort_kind {
+    .spotify.list.v1.model.attributes.ProvidedSortKind provided = 1;
+  }
+}
+
+message ProvidedSortKind {
+  optional int32 sort_id = 1;
+  optional string name = 2;
+  optional string internal_id = 3;
+  optional bool descending = 4;
+  optional bool reversible = 5;
+}
+
+message SortManifest {
+  repeated .spotify.list.v1.model.attributes.SortDefinition sorts = 1;
+}
+
+message SortValues {
+  repeated .spotify.list.v1.model.attributes.SortValue values = 1;
+}
+
+message SortValue {
+  optional int32 sort_id = 1;
+  optional int32 index = 2;
+}

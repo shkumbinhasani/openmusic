@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package spotify.reportingblob.v1;
+
+option java_package = "com.spotify.reportingblob.v1";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message ReportingBlob {
+  oneof version {
+    .spotify.reportingblob.v1.ReportingBlobV1 v1 = 1;
+  }
+}
+
+message ReportingBlobV1 {
+  string content_uri = 1;
+}

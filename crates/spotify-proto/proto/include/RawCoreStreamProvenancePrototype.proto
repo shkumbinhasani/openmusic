@@ -1,0 +1,23 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message RawCoreStreamProvenancePrototype {
+  message Provenance {
+    optional string source_start = 5;
+    optional string referrer = 6;
+    optional string event_provenance = 1009;
+  }
+  optional bytes playback_id = 1;
+  optional bytes stream_id = 2;
+  optional string orchestration_stack = 3;
+  optional string playback_stack = 4;
+  optional string source_start = 5;
+  optional string referrer = 6;
+  optional string page_id = 7;
+  optional string root_specification_id = 8;
+  optional string leaf_specification_id = 9;
+  optional .spotify.event_sender.proto.RawCoreStreamProvenancePrototype.Provenance provenance = 1009;
+}

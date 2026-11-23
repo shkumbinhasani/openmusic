@@ -1,0 +1,19 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message AdDetectionTimestampMappingResult {
+  optional bytes detection_playback_id = 1;
+  optional string episode_uri = 2;
+  optional string audio_uri = 3;
+  optional int32 request_id = 4;
+  optional string canonical_timeline = 5;
+  optional string direction = 6;
+  optional int64 requested_position_ms = 7;
+  optional int64 converted_position_ms = 8;
+  optional string outcome = 9;
+  optional string completion_reason = 10;
+  optional bool is_best_effort = 11;
+}

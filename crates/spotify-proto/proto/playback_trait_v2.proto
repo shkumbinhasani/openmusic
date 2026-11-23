@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package spotify.contentagnostic.v2;
+
+import "platform_media.proto";
+import "playback_trait.proto";
+import "playback_trait_v2_transition_map.proto";
+
+option java_package = "com.spotify.contentagnostic.v2";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message PlaybackTraitV2 {
+  repeated .spotify.contentagnostic.v2.Presentation presentations = 1;
+  repeated .spotify.contentagnostic.v2.TransitionMap transition_maps = 2;
+}
+
+message Presentation {
+  bytes id = 1;
+  bytes reporting_blob = 2;
+  optional .spotify.contentagnostic.v2.PlaybackOffsets offsets = 3;
+  oneof delivery {
+    .spotify.contentagnostic.v2.FlatfilePresentation flatfile = 10;
+    .spotify.contentagnostic.v2.HLSPresentation hls = 11;
+    .spotify.contentagnostic.v2.SpotifyPresentation spotify = 12;
+  }
+}
+
+message FlatfilePresentation {
+  string url = 1;
+  optional .spotify.contentagnostic.v2.AdDetection ad_detection = 2;
+}
+
+message HLSPresentation {
+  string url = 1;
+}

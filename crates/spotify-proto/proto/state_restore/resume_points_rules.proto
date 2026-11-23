@@ -1,0 +1,15 @@
+syntax = "proto2";
+
+package spotify.player.proto.state_restore;
+
+option optimize_for = CODE_SIZE;
+
+message ResumePoint {
+  required bool is_fully_played = 1;
+  required int64 position = 2;
+  required int64 timestamp = 3;
+}
+
+message ResumePointsRules {
+  map<string, .spotify.player.proto.state_restore.ResumePoint> resume_points = 1;
+}

@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package spotify.desktop.logs_esperanto.proto;
+
+option optimize_for = CODE_SIZE;
+
+message CopyLogsToTempFolderRequest {
+}
+
+message CopyLogsToTempFolderResponse {
+  string temp_folder = 1;
+}
+
+message OpenFolderRequest {
+  string folder = 1;
+}
+
+message OpenFolderResponse {
+}
+
+message CreateStudioDebugLogsArchiveRequest {
+  string feedback = 1;
+}
+
+message CreateStudioDebugLogsArchiveResponse {
+  .spotify.desktop.logs_esperanto.proto.CreateStudioDebugLogsArchiveStatus status = 1;
+  bytes archive = 2;
+  string file_name = 3;
+  uint64 archive_size_bytes = 4;
+  bool native_logs_truncated = 5;
+}
+
+enum CreateStudioDebugLogsArchiveStatus {
+  CREATE_STUDIO_DEBUG_LOGS_ARCHIVE_STATUS_UNSPECIFIED = 0;
+  CREATE_STUDIO_DEBUG_LOGS_ARCHIVE_STATUS_SUCCESS = 1;
+  CREATE_STUDIO_DEBUG_LOGS_ARCHIVE_STATUS_COLLECTION_FAILED = 2;
+  CREATE_STUDIO_DEBUG_LOGS_ARCHIVE_STATUS_TOO_LARGE = 3;
+}
+
+service DesktopLogs {
+  rpc CopyLogsToTempFolder(.spotify.desktop.logs_esperanto.proto.CopyLogsToTempFolderRequest) returns (.spotify.desktop.logs_esperanto.proto.CopyLogsToTempFolderResponse);
+  rpc OpenFolder(.spotify.desktop.logs_esperanto.proto.OpenFolderRequest) returns (.spotify.desktop.logs_esperanto.proto.OpenFolderResponse);
+  rpc CreateStudioDebugLogsArchive(.spotify.desktop.logs_esperanto.proto.CreateStudioDebugLogsArchiveRequest) returns (.spotify.desktop.logs_esperanto.proto.CreateStudioDebugLogsArchiveResponse);
+}

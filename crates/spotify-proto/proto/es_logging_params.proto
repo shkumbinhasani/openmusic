@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package spotify.player.esperanto.proto;
+
+import "es_optional.proto";
+import "stream_reporting_attribution.proto";
+
+option java_package = "com.spotify.player.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option objc_class_prefix = "ESP";
+
+message LoggingParams {
+  .spotify.player.esperanto.proto.OptionalInt64 command_initiated_time = 1;
+  .spotify.player.esperanto.proto.OptionalInt64 command_received_time = 2;
+  repeated string page_instance_ids = 3;
+  repeated string interaction_ids = 4;
+  string device_identifier = 5;
+  optional string command_id = 6;
+  .spotify.stream_reporting_attribution.proto.StreamReportingAttribution stream_reporting_attribution = 7;
+}

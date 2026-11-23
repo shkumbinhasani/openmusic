@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package spotify.connectgroup.v1;
+
+import "devices.proto";
+
+option optimize_for = CODE_SIZE;
+
+message GroupData {
+  message Capabilities {
+    uint32 max_group_size = 1;
+  }
+  string spotify_device_id = 1;
+  string group_identifier = 2;
+  string group_instance = 3;
+  repeated .spotify.connectgroup.v1.GroupedDevice grouped_devices = 4;
+  repeated .spotify.connectgroup.v1.GroupableDevice groupable_devices = 5;
+  .spotify.connectgroup.v1.GroupData.Capabilities capabilities = 6;
+  int64 timestamp_ms = 7;
+}
+
+message GroupedDevice {
+  message Capabilities {
+    bool removable = 1;
+    bool removal_dissolves_group = 2;
+  }
+  string group_device_identifier = 1;
+  string display_name = 2;
+  .spotify.connectstate.devices.DeviceType device_type = 3;
+  optional string spotify_connect_device_id = 4;
+  string model_display_name = 5;
+  .spotify.connectgroup.v1.GroupedDevice.Capabilities capabilities = 6;
+}
+
+message GroupableDevice {
+  message Capabilities {
+  }
+  string group_device_identifier = 1;
+  string display_name = 2;
+  .spotify.connectstate.devices.DeviceType device_type = 3;
+  optional string spotify_connect_device_id = 4;
+  string model_display_name = 5;
+  .spotify.connectgroup.v1.GroupableDevice.Capabilities capabilities = 6;
+}
+
+message GroupDeviceVolume {
+  string spotify_device_id = 1;
+  string group_instance = 2;
+  string group_device_identifier = 3;
+  uint32 volume = 4;
+  int32 volume_steps = 5;
+  int64 timestamp_ms = 6;
+}
+
+message PutGroupDataRequest {
+  repeated .spotify.connectgroup.v1.GroupData group_data = 1;
+  bool full_state = 2;
+  string spotify_device_id = 3;
+}
+
+message PutGroupDataResponse {
+}
+
+message PutGroupDeviceVolumeRequest {
+  repeated .spotify.connectgroup.v1.GroupDeviceVolume group_device_volumes = 1;
+  bool full_state = 2;
+  string spotify_device_id = 3;
+}
+
+message PutGroupDeviceVolumeResponse {
+}
+
+message DeleteGroupInstancesRequest {
+  string spotify_device_id = 1;
+  repeated string group_instances = 2;
+}
+
+message DeleteGroupInstancesResponse {
+}

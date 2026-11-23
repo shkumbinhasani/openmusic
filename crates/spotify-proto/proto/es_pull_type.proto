@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package spotify.connect.esperanto.proto;
+
+option java_package = "com.spotify.connect.esperanto.proto";
+option optimize_for = CODE_SIZE;
+
+enum PullType {
+  PULL_TYPE_UNSPECIFIED = 0;
+  PULL_TYPE_START_PLAYBACK = 1;
+  PULL_TYPE_MOVE_PLAYBACK = 2;
+}

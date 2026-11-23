@@ -1,0 +1,26 @@
+syntax = "proto2";
+
+package spotify.cosmos_util.proto;
+
+import "played_state/playability_restriction.proto";
+
+option java_package = "com.spotify.cosmos.util.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "SPTCosmosUtil";
+
+message ShowPlayState {
+  enum Label {
+    UNKNOWN_LABEL = 0;
+    NOT_STARTED = 1;
+    IN_PROGRESS = 2;
+    COMPLETED = 3;
+  }
+  optional string latest_played_episode_link = 1;
+  optional uint64 played_time = 2;
+  optional bool is_playable = 3;
+  optional .spotify.cosmos_util.proto.PlayabilityRestriction playability_restriction = 4 [default = UNKNOWN];
+  optional .spotify.cosmos_util.proto.ShowPlayState.Label label = 5;
+  optional uint32 played_percentage = 6;
+  optional string resume_episode_link = 7;
+}

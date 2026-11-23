@@ -1,0 +1,10 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ClientAllowlistCheckNonAuth {
+  optional string error = 1;
+  repeated string thumbprints = 2;
+}

@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package spotify.collection.proto;
+
+option optimize_for = CODE_SIZE;
+
+message BucketDataSyncState {
+  string uri = 1;
+  bool sync_is_complete = 2;
+}

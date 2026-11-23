@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package spotify.cosmos_util.proto;
+
+option java_package = "com.spotify.cosmos.util.policy.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message AlbumDecorationPolicy {
+  bool link = 1;
+  bool name = 2;
+  bool covers = 4;
+  bool year = 5;
+  reserved 3, 6, 7, 8, 9, 10;
+  reserved "copyrights", "num_discs", "num_tracks", "playability", "is_premium_only", "content_access";
+}
+
+message AlbumCollectionDecorationPolicy {
+  reserved 1, 2, 3;
+  reserved "collection_link", "num_tracks_in_collection", "complete";
+}
+
+message AlbumSyncDecorationPolicy {
+  bool inferred_offline = 1;
+  bool offline_state = 2;
+  bool sync_progress = 3;
+}

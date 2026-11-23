@@ -1,0 +1,208 @@
+syntax = "proto3";
+
+package spotify.desktop.super_connect.proto;
+
+option optimize_for = CODE_SIZE;
+
+message GetOrchestratorTokenRequest {
+}
+
+message GetOrchestratorTokenResponse {
+  string token = 1;
+  int32 orchestrator_port = 2;
+  bool externally_managed = 3;
+}
+
+message PermissionEvent {
+  oneof event {
+    .spotify.desktop.super_connect.proto.PermissionRequest request = 1;
+    .spotify.desktop.super_connect.proto.PermissionResolved resolved = 2;
+  }
+}
+
+message PermissionRequest {
+  string request_id = 1;
+  string command = 2;
+  string permission_type = 3;
+  string origin = 4;
+}
+
+message PermissionResolved {
+  string request_id = 1;
+  optional bool granted = 2;
+}
+
+message ResolvePermissionRequest {
+  string request_id = 1;
+  optional bool granted = 2;
+}
+
+message ResolvePermissionResponse {
+  bool success = 1;
+}
+
+message SubscribePermissionRequestsRequest {
+}
+
+message GetVersionsRequest {
+}
+
+message GetVersionsResponse {
+  string super_connect_version = 1;
+  string upload_to_spotify_version = 2;
+  string super_connect_version_hash = 3;
+}
+
+message CheckStudioInstalledRequest {
+}
+
+message CheckStudioInstalledResponse {
+  bool installed = 1;
+  string install_path = 2;
+  bool unsupported_architecture = 3;
+}
+
+message SubscribeStudioInstallStatusRequest {
+}
+
+message OpenStudioRequest {
+}
+
+message OpenStudioResponse {
+  enum Status {
+    FAILED = 0;
+    LAUNCHED = 1;
+    NOT_INSTALLED = 3;
+  }
+  .spotify.desktop.super_connect.proto.OpenStudioResponse.Status status = 1;
+  string error = 2;
+}
+
+message SandboxReadinessSnapshot {
+  uint32 readiness_contract_version = 1;
+  .spotify.desktop.super_connect.proto.SandboxReadinessState readiness_state = 2;
+  .spotify.desktop.super_connect.proto.SandboxRequiredAction required_action = 3;
+  bool elevation_expected = 4;
+  optional string failure_code = 5;
+  uint64 launch_generation = 6;
+  uint64 fact_revision = 7;
+  optional string ready_transition_id = 8;
+}
+
+message CheckSandboxStatusRequest {
+  uint32 readiness_contract_version = 1;
+}
+
+message CheckSandboxStatusResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    NOT_APPLICABLE = 1;
+    NOT_SET_UP = 2;
+    SET_UP = 3;
+  }
+  .spotify.desktop.super_connect.proto.CheckSandboxStatusResponse.Status status = 1;
+  bool warmup_pending = 2;
+  .spotify.desktop.super_connect.proto.SandboxReadinessCompatibility compatibility = 3;
+  uint32 requested_readiness_contract_version = 4;
+  uint32 native_readiness_contract_version = 5;
+  optional .spotify.desktop.super_connect.proto.SandboxReadinessSnapshot snapshot = 6;
+}
+
+message RunSandboxSetupRequest {
+  uint32 readiness_contract_version = 1;
+  uint64 launch_generation = 2;
+  uint64 fact_revision = 3;
+  .spotify.desktop.super_connect.proto.SandboxRequiredAction required_action = 4;
+}
+
+message RunSandboxSetupEvent {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    RUNNING = 1;
+    SUCCEEDED = 2;
+    FAILED = 3;
+    USER_CANCELLED = 4;
+  }
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    ACCOUNT_SETUP = 1;
+    WARMUP = 2;
+    PROVISIONING = 3;
+  }
+  .spotify.desktop.super_connect.proto.RunSandboxSetupEvent.Status status = 1;
+  string error = 2;
+  .spotify.desktop.super_connect.proto.RunSandboxSetupEvent.Phase phase = 3;
+}
+
+message InstallStudioRequest {
+}
+
+message InstallStudioEvent {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    DOWNLOADING = 1;
+    EXTRACTING = 2;
+    INSTALLING = 3;
+    SUCCEEDED = 4;
+    ALREADY_INSTALLED = 5;
+    FAILED = 6;
+    UNSUPPORTED_ARCHITECTURE = 7;
+  }
+  .spotify.desktop.super_connect.proto.InstallStudioEvent.Status status = 1;
+  int64 bytes_received = 2;
+  int64 bytes_total = 3;
+  string error = 4;
+}
+
+message GetKeepAwakeStatusRequest {
+}
+
+message GetKeepAwakeStatusResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    SUPPORTED = 1;
+    MANAGED_DISABLED = 2;
+    UNSUPPORTED = 3;
+  }
+  .spotify.desktop.super_connect.proto.GetKeepAwakeStatusResponse.Status status = 1;
+}
+
+enum SandboxReadinessCompatibility {
+  SANDBOX_READINESS_COMPATIBILITY_UNSPECIFIED = 0;
+  SANDBOX_READINESS_MATCH = 1;
+  SANDBOX_READINESS_INCOMPATIBLE = 2;
+}
+
+enum SandboxReadinessState {
+  SANDBOX_READINESS_STATE_UNSPECIFIED = 0;
+  SANDBOX_READINESS_NOT_APPLICABLE = 1;
+  SANDBOX_READINESS_SETUP_REQUIRED = 2;
+  SANDBOX_READINESS_SETUP_RUNNING = 3;
+  SANDBOX_READINESS_AUTOMATIC_PREPARING = 4;
+  SANDBOX_READINESS_EXTERNAL_SOURCE_REQUIRED = 5;
+  SANDBOX_READINESS_EXTERNAL_SOURCE_PREPARING = 6;
+  SANDBOX_READINESS_PROFILE_RECONCILIATION_REQUIRED = 7;
+  SANDBOX_READINESS_WARMUP_PENDING = 8;
+  SANDBOX_READINESS_READY = 9;
+  SANDBOX_READINESS_BLOCKED = 10;
+}
+
+enum SandboxRequiredAction {
+  SANDBOX_REQUIRED_ACTION_NONE = 0;
+  SANDBOX_REQUIRED_ACTION_RUN_SETUP = 1;
+  SANDBOX_REQUIRED_ACTION_START_EXTERNAL_SOURCE = 2;
+}
+
+service DesktopSuperConnect {
+  rpc GetOrchestratorToken(.spotify.desktop.super_connect.proto.GetOrchestratorTokenRequest) returns (.spotify.desktop.super_connect.proto.GetOrchestratorTokenResponse);
+  rpc SubscribePermissionRequests(.spotify.desktop.super_connect.proto.SubscribePermissionRequestsRequest) returns (stream .spotify.desktop.super_connect.proto.PermissionEvent);
+  rpc ResolvePermission(.spotify.desktop.super_connect.proto.ResolvePermissionRequest) returns (.spotify.desktop.super_connect.proto.ResolvePermissionResponse);
+  rpc GetVersions(.spotify.desktop.super_connect.proto.GetVersionsRequest) returns (.spotify.desktop.super_connect.proto.GetVersionsResponse);
+  rpc CheckStudioInstalled(.spotify.desktop.super_connect.proto.CheckStudioInstalledRequest) returns (.spotify.desktop.super_connect.proto.CheckStudioInstalledResponse);
+  rpc SubscribeStudioInstallStatus(.spotify.desktop.super_connect.proto.SubscribeStudioInstallStatusRequest) returns (stream .spotify.desktop.super_connect.proto.CheckStudioInstalledResponse);
+  rpc InstallStudio(.spotify.desktop.super_connect.proto.InstallStudioRequest) returns (stream .spotify.desktop.super_connect.proto.InstallStudioEvent);
+  rpc OpenStudio(.spotify.desktop.super_connect.proto.OpenStudioRequest) returns (.spotify.desktop.super_connect.proto.OpenStudioResponse);
+  rpc CheckSandboxStatus(.spotify.desktop.super_connect.proto.CheckSandboxStatusRequest) returns (.spotify.desktop.super_connect.proto.CheckSandboxStatusResponse);
+  rpc RunSandboxSetup(.spotify.desktop.super_connect.proto.RunSandboxSetupRequest) returns (stream .spotify.desktop.super_connect.proto.RunSandboxSetupEvent);
+  rpc GetKeepAwakeStatus(.spotify.desktop.super_connect.proto.GetKeepAwakeStatusRequest) returns (.spotify.desktop.super_connect.proto.GetKeepAwakeStatusResponse);
+}

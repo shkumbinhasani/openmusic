@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package spotify.desktop.issue_reporter_esperanto.proto;
+
+option optimize_for = CODE_SIZE;
+
+message FileAttachment {
+  string name = 1;
+  string base64 = 2;
+}
+
+message SubmitIssueRequest {
+  string summary = 1;
+  string description = 2;
+  string project_key = 3;
+  string feature = 4;
+  repeated string labels = 5;
+  repeated .spotify.desktop.issue_reporter_esperanto.proto.FileAttachment files = 6;
+}
+
+message SubmitIssueResponse {
+  string ticket_key = 1;
+  optional string error = 2;
+  bool success = 3;
+}
+
+service DesktopIssueReporter {
+  rpc SubmitIssue(.spotify.desktop.issue_reporter_esperanto.proto.SubmitIssueRequest) returns (.spotify.desktop.issue_reporter_esperanto.proto.SubmitIssueResponse);
+}

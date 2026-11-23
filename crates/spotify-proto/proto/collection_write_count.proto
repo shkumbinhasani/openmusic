@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package spotify.collection.proto;
+
+option optimize_for = CODE_SIZE;
+
+message CollectionWriteCount {
+  uint32 track_count = 1;
+  uint32 episode_count = 2;
+}

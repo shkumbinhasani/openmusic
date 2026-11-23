@@ -1,0 +1,31 @@
+[package]
+name = "spotify-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+flate2 = "1"
+futures = "0.3"
+prost = "0.14"
+rand = "0.9"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spotify-proto = { path = "../spotify-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+url = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSData", "NSURL", "NSError", "NSArray", "NSDictionary", "NSValue", "NSObject"] }
+objc2-av-foundation = { version = "0.3.2", features = ["AVPlayer", "AVPlayerItem", "AVAsset", "AVAssetResourceLoader", "AVContentKeySession", "AVBase", "block2", "dispatch2", "objc2-core-media"] }
+objc2-core-media = { version = "0.3.2", features = ["CMTime"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3.2", features = ["NSRunLoop", "NSDate"] }

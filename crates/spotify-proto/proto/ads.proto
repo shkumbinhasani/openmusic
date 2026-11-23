@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package spotify.ads.esperanto.proto;
+
+import "ad_common.proto";
+
+option java_package = "com.spotify.ads.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "ESP";
+
+message GetAdsRequest {
+  string slot_id = 1;
+  map<string, string> targeting = 2;
+}
+
+message GetAdsResponse {
+  map<string, .spotify.ads.esperanto.proto.AdQueue> ad_package = 1;
+  optional string error = 2;
+  string request_id = 3;
+}
+
+service Ads {
+  rpc GetAds(.spotify.ads.esperanto.proto.GetAdsRequest) returns (.spotify.ads.esperanto.proto.GetAdsResponse);
+}

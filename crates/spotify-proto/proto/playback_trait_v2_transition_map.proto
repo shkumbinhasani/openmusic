@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package spotify.contentagnostic.v2;
+
+option java_package = "com.spotify.contentagnostic.v2";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message TransitionMap {
+  repeated bytes from_id = 1;
+  repeated bytes to_id = 2;
+  optional .spotify.contentagnostic.v2.TransitionDirection direction = 3;
+  repeated .spotify.contentagnostic.v2.TimeMap time_maps = 4;
+}
+
+message TimeMap {
+  .spotify.contentagnostic.v2.Durations from_t = 1;
+  .spotify.contentagnostic.v2.Durations to_t = 2;
+}
+
+message Durations {
+  repeated sint64 values = 1;
+  uint32 timescale = 2;
+}
+
+enum TransitionDirection {
+  TRANSITION_DIRECTION_UNSPECIFIED = 0;
+  TRANSITION_DIRECTION_BIDIRECTIONAL = 1;
+  TRANSITION_DIRECTION_FORWARD = 2;
+}

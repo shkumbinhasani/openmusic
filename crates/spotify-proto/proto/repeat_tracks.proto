@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package spotify.restrictions.impl.proto;
+
+import "google/protobuf/timestamp.proto";
+
+option optimize_for = CODE_SIZE;
+
+message RepeatTracks {
+  message Entry {
+    .google.protobuf.Timestamp timestamp = 1;
+  }
+  repeated .spotify.restrictions.impl.proto.RepeatTracks.Entry entries = 1;
+}

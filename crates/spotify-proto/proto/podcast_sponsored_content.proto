@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package spotify.sponsoredcontentlistener.v1;
+
+option optimize_for = CODE_SIZE;
+
+message SponsoredContentListenerPayload {
+  bool contains_sponsored_content = 1;
+}

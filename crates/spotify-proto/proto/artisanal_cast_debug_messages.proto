@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package spotify.connect.discovery.cast.esperanto.proto;
+
+option optimize_for = CODE_SIZE;
+option objc_class_prefix = "SPTArtisanalCastDebugEsperanto";
+
+message ArtisanalCastEndpoint {
+  string discovery_device_id = 1;
+  string cast_endpoint_id = 2;
+  optional string receiver_side_id = 3;
+  string discovery_name = 4;
+  string ip = 5;
+  uint32 port = 6;
+}
+
+message ArtisanalCastSessionEvent {
+  uint64 sequence = 1;
+  int64 monotonic_timestamp_ms = 2;
+  bool retained = 3;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastReleaseReason release_reason = 4;
+  uint64 generation = 5;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastEndpoint endpoint = 6;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastSessionEventType type = 7;
+  string receiver_session_id = 8;
+  int64 request_id = 9;
+  string detail = 10;
+  string receiver_transport_id = 11;
+  string application_id = 12;
+}
+
+message ArtisanalCastMultizoneMutation {
+  int64 request_id = 1;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneMutationOperation operation = 2;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneMutationStatus status = 3;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneMutationError error = 4;
+  string target_device_id = 5;
+  string normalized_target_device_id = 6;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneSessionEndpoint target_endpoint = 7;
+}
+
+message ArtisanalCastMultizoneMutationRequest {
+  string device_id = 1;
+  string session_name = 2;
+}
+
+message ArtisanalCastMultizoneMutationStartResult {
+  int64 request_id = 1;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneMutationError error = 2;
+}
+
+message ArtisanalCastMultizoneDevice {
+  string device_id = 1;
+  string normalized_device_id = 2;
+  string friendly_name = 3;
+  uint64 capabilities = 4;
+  double volume_level = 5;
+  bool muted = 6;
+  string ip_address = 7;
+  uint32 port = 8;
+  bool removable = 9;
+  bool audio_channel = 10;
+}
+
+message ArtisanalCastPlaybackSession {
+  string session_id = 1;
+  string session_name = 2;
+  bool has_video_content = 3;
+  bool stream_transfer_supported = 4;
+  bool app_allows_grouping = 5;
+}
+
+message ArtisanalCastMultizoneSessionEndpoint {
+  string device_id = 1;
+  string normalized_device_id = 2;
+  string session_id = 3;
+  string ip_address = 4;
+  uint32 port = 5;
+  string local_device_id = 6;
+}
+
+message ArtisanalCastMultizoneState {
+  uint64 generation = 1;
+  bool has_status = 2;
+  string receiver_transport_id = 3;
+  string receiver_session_id = 4;
+  repeated .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneDevice devices = 5;
+  repeated .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneDevice multichannel_devices = 6;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastPlaybackSession playback_session = 7;
+  int64 last_request_id = 8;
+  repeated string changed_device_ids = 9;
+  repeated string failed_device_ids = 10;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneSessionEndpoint session_endpoint = 11;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneProtocolError latest_error = 12;
+  repeated .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneDevice groupable_devices = 13;
+}
+
+message ArtisanalCastSessionSnapshot {
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastConnectionState state = 1;
+  uint64 generation = 2;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastEndpoint endpoint = 3;
+  repeated .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastSessionEvent events = 4;
+  bool artisanal_cast_enabled = 5;
+  bool multizone_enabled = 6;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneState multizone = 7;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastMultizoneMutation mutation = 8;
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastEndpoint target_endpoint = 9;
+}
+
+message ArtisanalCastDebugResponse {
+  enum Result {
+    OK = 0;
+    NOT_FOUND = 1;
+  }
+  .spotify.connect.discovery.cast.esperanto.proto.ArtisanalCastDebugResponse.Result result = 1;
+}
+
+enum ArtisanalCastConnectionState {
+  ARTISANAL_CAST_CONNECTION_STATE_IDLE = 0;
+  ARTISANAL_CAST_CONNECTION_STATE_CONNECTED = 1;
+  ARTISANAL_CAST_CONNECTION_STATE_MIGRATING = 2;
+  ARTISANAL_CAST_CONNECTION_STATE_RECOVERING = 3;
+  ARTISANAL_CAST_CONNECTION_STATE_ADOPTING = 4;
+}
+
+enum ArtisanalCastReleaseReason {
+  ARTISANAL_CAST_RELEASE_REASON_NONE = 0;
+  ARTISANAL_CAST_RELEASE_REASON_REPLACED = 1;
+  ARTISANAL_CAST_RELEASE_REASON_LOGOUT = 2;
+  ARTISANAL_CAST_RELEASE_REASON_RESET = 3;
+  ARTISANAL_CAST_RELEASE_REASON_CONNECTION_ENDED = 4;
+  ARTISANAL_CAST_RELEASE_REASON_ERROR = 5;
+}
+
+enum ArtisanalCastSessionEventType {
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_SESSION_RETAINED = 0;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_SESSION_RELEASED = 1;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ENDPOINT_UPDATE_RECEIVED = 2;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ENDPOINT_UPDATE_IGNORED = 3;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_MIGRATION_STARTED = 4;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_REPLACEMENT_CONNECTED = 5;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECEIVER_JOIN_STARTED = 6;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_REPLACEMENT_READY = 7;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_MIGRATION_COMPLETED = 8;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_MIGRATION_CANCELLED = 9;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_MIGRATION_FAILED = 10;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ACTIVE_ENDPOINT_ENDED = 11;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_REPLACEMENT_RESOLVED = 12;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ADOPTION_STARTED = 13;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ADOPTION_CONNECTED = 14;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_APPLICATION_JOIN_STARTED = 15;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ADOPTION_READY = 16;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ADOPTION_COMPLETED = 17;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ADOPTION_FAILED = 18;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ADOPTION_CANCELLED = 19;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ACTIVE_CAST_DEVICE_OBSERVED = 20;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ENDPOINT_RESOLUTION_FAILED = 21;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ENDPOINT_RESOLUTION_AMBIGUOUS = 22;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ENDPOINT_CANDIDATE = 23;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_ENDPOINT_RESOLVED = 24;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECEIVER_STATUS_RECEIVED = 25;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECEIVER_APPLICATION_REPORTED = 26;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECEIVER_APPLICATION_SELECTED = 27;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECEIVER_APPLICATION_NOT_FOUND = 28;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECOVERY_STARTED = 29;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECOVERY_COMPLETED = 30;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECOVERY_FAILED = 31;
+  ARTISANAL_CAST_SESSION_EVENT_TYPE_RECOVERY_CANCELLED = 32;
+}
+
+enum ArtisanalCastMultizoneProtocolError {
+  ARTISANAL_CAST_MULTIZONE_PROTOCOL_ERROR_NONE = 0;
+  ARTISANAL_CAST_MULTIZONE_PROTOCOL_ERROR_MALFORMED_MESSAGE = 1;
+  ARTISANAL_CAST_MULTIZONE_PROTOCOL_ERROR_INVALID_REQUEST = 2;
+  ARTISANAL_CAST_MULTIZONE_PROTOCOL_ERROR_SEND_FAILED = 3;
+}
+
+enum ArtisanalCastMultizoneMutationOperation {
+  ARTISANAL_CAST_MULTIZONE_MUTATION_OPERATION_NONE = 0;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_OPERATION_ADD_DEVICE = 1;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_OPERATION_REMOVE_DEVICE = 2;
+}
+
+enum ArtisanalCastMultizoneMutationStatus {
+  ARTISANAL_CAST_MULTIZONE_MUTATION_STATUS_IDLE = 0;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_STATUS_PENDING = 1;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_STATUS_ACCEPTED = 2;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_STATUS_COMPLETED = 3;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_STATUS_FAILED = 4;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_STATUS_MIGRATING = 5;
+}
+
+enum ArtisanalCastMultizoneMutationError {
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_NONE = 0;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_DISABLED = 1;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_NO_ACTIVE_SESSION = 2;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_BUSY = 3;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_TARGET_NOT_FOUND = 4;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_OPERATION_NOT_ALLOWED = 5;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_TIMEOUT = 6;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_RECEIVER_REJECTED = 7;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_INTERNAL = 8;
+  ARTISANAL_CAST_MULTIZONE_MUTATION_ERROR_MIGRATION_FAILED = 9;
+}

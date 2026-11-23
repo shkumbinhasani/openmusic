@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package spotify.socialgraph_esperanto.proto;
+
+import "socialgraph_response_status.proto";
+
+option java_package = "spotify.socialgraph.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "ESP";
+
+message FollowRequest {
+  repeated string username = 1;
+  bool follow = 2;
+}
+
+message FollowRequestV4 {
+  string username = 1;
+  bool follow = 2;
+}
+
+message FollowResponse {
+  .spotify.socialgraph_esperanto.proto.ResponseStatus status = 1;
+}

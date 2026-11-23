@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package spotify.contentagnostic.v2;
+
+import "image.proto";
+import "video.proto";
+
+option java_package = "com.spotify.contentagnostic.v2";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message VisualIdentityTrait {
+  .spotify.contentagnostic.v2.Image square_cover_image = 1;
+  optional .spotify.contentagnostic.v2.Image sixteen_by_nine_cover_image = 2;
+  optional .spotify.contentagnostic.v2.Image nine_by_sixteen_cover_image = 3;
+  optional .spotify.contentagnostic.v2.Image square_full_bleed_image = 5;
+  optional .spotify.contentagnostic.v2.Image wide_full_bleed_image = 6;
+  optional .spotify.contentagnostic.v2.Video nine_by_sixteen_cover_video = 4;
+  optional .spotify.contentagnostic.v2.ColorSetContrastOptions curated_color = 7;
+}

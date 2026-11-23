@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package spotify.offline.internal;
+
+option optimize_for = CODE_SIZE;
+
+message DownloadWork {
+  uint64 tracks = 1;
+  uint64 bytes = 2;
+}
+
+message DownloadSessionRecord {
+  uint32 version = 1;
+  string uri = 2;
+  int32 start_reason = 3;
+  int32 status = 4;
+  int32 failure_reason = 5;
+  optional int64 last_updated_at_ms = 6;
+  .spotify.offline.internal.DownloadWork completed = 7;
+  .spotify.offline.internal.DownloadWork queued = 8;
+}

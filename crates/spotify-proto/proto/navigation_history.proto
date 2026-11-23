@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package spotify.navhistory.v1;
+
+option optimize_for = CODE_SIZE;
+
+message Record {
+  uint32 version = 1;
+  uint32 flags = 2;
+  bytes entries = 3;
+  bool short_list = 15;
+}

@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package spotify.ads.esperanto.proto;
+
+import "google/protobuf/empty.proto";
+
+option java_package = "com.spotify.ads.esperanto.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "ESP";
+
+message AddPlaytimeRequest {
+  uint32 seconds = 1;
+}
+
+message SetAlwaysEligibleForAdBreakRequest {
+  bool enabled = 1;
+}
+
+message InsertAdsRequest {
+  string ads_json = 1;
+}
+
+message InsertAdsResponse {
+  enum Status {
+    OK = 0;
+    FAILED = 1;
+  }
+  .spotify.ads.esperanto.proto.InsertAdsResponse.Status status = 1;
+}
+
+service Testing {
+  rpc AddPlaytime(.spotify.ads.esperanto.proto.AddPlaytimeRequest) returns (.google.protobuf.Empty);
+  rpc InsertAds(.spotify.ads.esperanto.proto.InsertAdsRequest) returns (.spotify.ads.esperanto.proto.InsertAdsResponse);
+  rpc SetAlwaysEligibleForAdBreak(.spotify.ads.esperanto.proto.SetAlwaysEligibleForAdBreakRequest) returns (.google.protobuf.Empty);
+}

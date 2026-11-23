@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package spotify.your_library.proto;
+
+option optimize_for = CODE_SIZE;
+
+message SetFilterOrderRequest {
+  repeated string filter_uri = 1;
+}
+
+message SetFilterOrderResponse {
+  uint32 status_code = 98;
+  string error = 99;
+}

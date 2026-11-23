@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message Os {
+  string name = 1;
+  string version = 2;
+}

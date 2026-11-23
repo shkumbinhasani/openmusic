@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package spotify.list_player.proto;
+
+option optimize_for = CODE_SIZE;
+
+message MftResumptionEntry {
+  string skip_to_uid = 1;
+  string skip_to_uri = 2;
+  int64 seek_to_position_ms = 3;
+  int64 timestamp_ms = 4;
+}
+
+message MftResumptionState {
+  map<string, .spotify.list_player.proto.MftResumptionEntry> entries = 1;
+}

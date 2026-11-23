@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package spotify.list.v1.model;
+
+import "google/protobuf/descriptor.proto";
+import "google/protobuf/timestamp.proto";
+import "spotify/list/v1/model/attribute_extension.proto";
+import "spotify/list/v1/model/attributes/ai_curation.proto";
+import "spotify/list/v1/model/attributes/capabilities.proto";
+import "spotify/list/v1/model/attributes/format_list_attributes.proto";
+import "spotify/list/v1/model/attributes/geoblock.proto";
+import "spotify/list/v1/model/attributes/item_id_algorithm.proto";
+import "spotify/list/v1/model/attributes/picture_size.proto";
+import "spotify/list/v1/model/attributes/recommendation_info.proto";
+import "spotify/list/v1/model/attributes/signals_list.proto";
+import "spotify/list/v1/model/lenses.proto";
+
+option java_package = "com.spotify.list.v1.model";
+option java_outer_classname = "AttributesProto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message Attributes {
+  optional string uri = 1;
+  optional string name = 3 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional string description = 4 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .google.protobuf.Timestamp updated_at = 5 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional string added_by_username = 6;
+  optional string owner_username = 7 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .google.protobuf.Timestamp created_at = 8 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .spotify.list.v1.model.attributes.Capabilities capabilities = 9 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .spotify.list.v1.model.attributes.Geoblock geoblock = 10;
+  optional .google.protobuf.Timestamp seen_at = 11;
+  optional bool abuse_reporting_enabled = 12 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true];
+  optional int64 approximate_length = 13;
+  optional .spotify.list.v1.model.attributes.SignalsList available_signals = 14;
+  optional bool published_to_profile = 15;
+  optional .spotify.list.v1.model.attributes.RecommendationInfo recommendation_info = 16;
+  optional .spotify.list.v1.model.attributes.AiCuration ai_curation = 17;
+  optional .google.protobuf.Timestamp added_at = 18 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional bool deleted_by_owner = 19 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional bytes picture_file_id = 20 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .spotify.list.v1.model.attributes.PictureSizes picture_sizes = 21 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional string client_id = 22 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional string format = 23 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .spotify.list.v1.model.attributes.FormatListAttributes format_list_attributes = 24 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true, (spotify.list.v1.model.expose_list_metadata_v1_ext) = true];
+  optional .spotify.list.v1.model.attributes.ItemIdAlgorithm item_id_algorithm = 25;
+  optional bool recoverable = 26;
+  optional .spotify.list.v1.model.Lens source_lens = 27;
+  optional bool is_user_created = 29 [(spotify.list.v1.model.expose_list_metadata_v2_ext) = true];
+  optional bool resolve_prompt_format_attributes = 30;
+  optional bytes tag_manifest = 31;
+  optional bytes tags = 32;
+  optional bytes sort_manifest = 33;
+  optional bytes sort_values = 34;
+  reserved 2;
+}

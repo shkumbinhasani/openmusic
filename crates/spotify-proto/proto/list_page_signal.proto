@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package spotify.list_player.list_page_signal_proto;
+
+option optimize_for = CODE_SIZE;
+
+message HistoryItem {
+  string uri = 1;
+}
+
+message CurrentItem {
+  string uri = 1;
+}
+
+message PlayHistory {
+  optional .spotify.list_player.list_page_signal_proto.CurrentItem current = 1;
+  repeated .spotify.list_player.list_page_signal_proto.HistoryItem history = 2;
+}
+
+message AutoplayClientData {
+  .spotify.list_player.list_page_signal_proto.PlayHistory play_history = 1;
+}

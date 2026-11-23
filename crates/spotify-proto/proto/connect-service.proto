@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package spotify.connectstate;
+
+import "connect.proto";
+
+option java_package = "com.spotify.connectstate.model";
+option optimize_for = CODE_SIZE;
+
+message PutVolumeRequest {
+  string device_id = 1;
+  int32 volume = 2;
+  optional string last_command_sent_by_device_id = 3;
+  optional uint32 last_command_message_id = 4;
+  uint64 report_timestamp = 5;
+}
+
+message TransferRequest {
+  string source_device_id = 1;
+  string target_device_id = 2;
+  .spotify.connectstate.TransferParameters transfer_parameters = 3;
+  string forwarded_for_service = 4;
+}
+
+message TransferParameters {
+  enum DodoPolicy {
+    DODO_0 = 0;
+    DODO_1 = 1;
+    DODO_2 = 2;
+    DODO_3 = 3;
+  }
+  .spotify.connectstate.TransferOptions transfer_options = 1;
+  bool without_active_device = 2;
+  .spotify.connectstate.TargetAlias target_alias = 3;
+  string transfer_intent_id = 4;
+  string interaction_id = 5;
+  optional string command_id = 6;
+  optional .spotify.connectstate.TransferParameters.DodoPolicy dodo = 7;
+  optional .spotify.connectstate.DodoSource dodo2 = 8;
+}
+
+message DodoSource {
+  oneof source {
+    string dodo = 1;
+    string dodo2 = 2;
+  }
+}
+
+message TargetAlias {
+  int32 id = 1;
+}
+
+message TransferOptions {
+  .spotify.connectstate.RestorePaused restore_paused = 1;
+  .spotify.connectstate.RestorePosition restore_position = 2;
+  .spotify.connectstate.RestoreTrack restore_track = 3;
+  string license = 4;
+}
+
+message PutStateRequestWrapper {
+  string device_id = 1;
+  string connection_id = 2;
+  bool ignore_response = 3;
+  .spotify.connectstate.PutStateRequest put_state_request = 4;
+  optional bool wake_devices = 5;
+}
+
+message SetDeviceInactiveRequest {
+  string device_id = 1;
+  optional bool notify_others = 2;
+  uint64 client_side_timestamp = 3;
+}
+
+message SetDoDoRequest {
+  string dodo1 = 1;
+  string dodo2 = 2;
+}
+
+message CloseDoDoRequest {
+  string dodo = 1;
+  string dodo2 = 2;
+}
+
+message UpdateLocalDevicesRequest {
+  string reporting_device_id = 1 [json_name = "reporting_device_id"];
+  repeated .spotify.connectstate.LocalDevice local_devices = 2 [json_name = "local_devices"];
+}
+
+message UpdateLocalDevicesResponse {
+}
+
+enum RestorePaused {
+  UNKNOWN_RESTORE_PAUSED = 0;
+  RESTORE = 1;
+  PAUSE = 2;
+  RESUME = 3;
+}
+
+enum RestorePosition {
+  UNKNOWN_RESTORE_POSITION = 0;
+  EXTRAPOLATE = 1;
+  LAST_KNOWN = 2;
+}
+
+enum RestoreTrack {
+  UNKNOWN_RESTORE_TRACK = 0;
+  ONLY_CURRENT = 1;
+  ALWAYS_PLAY_SOMETHING = 2;
+}

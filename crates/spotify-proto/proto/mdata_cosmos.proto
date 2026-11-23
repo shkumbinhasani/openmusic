@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package spotify.mdata_cosmos.proto;
+
+import "extension_kind.proto";
+
+option java_package = "com.spotify.mdata.cosmos.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option cc_enable_arenas = true;
+
+message InvalidateCacheRequest {
+  .spotify.extendedmetadata.ExtensionKind extension_kind = 1;
+  repeated string entity_uri = 2;
+}
+
+message InvalidateCacheResponse {
+}

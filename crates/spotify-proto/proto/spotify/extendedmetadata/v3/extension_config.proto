@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package spotify.extendedmetadata.v3;
+
+option java_package = "com.spotify.extendedmetadata.v3";
+option optimize_for = SPEED;
+option java_multiple_files = true;
+
+message ExtensionConfig {
+  optional .spotify.extendedmetadata.v3.CdnConfig cdn_config = 3;
+}
+
+message CdnConfig {
+  bytes partition_key = 1;
+  string url_template = 2;
+  repeated string entity_uri_prefixes = 3;
+}

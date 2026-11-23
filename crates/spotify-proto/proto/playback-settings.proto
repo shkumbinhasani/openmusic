@@ -1,0 +1,188 @@
+syntax = "proto3";
+
+package spotify.playbacksettings;
+
+import "media.proto";
+
+option java_package = "com.spotify.playbacksettings.model";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+
+message GetDeviceSettingsRequest {
+  repeated .spotify.playbacksettings.Device devices = 1;
+}
+
+message GetDeviceSettingsResponse {
+  repeated .spotify.playbacksettings.Device devices = 1;
+  repeated .spotify.playbacksettings.DeviceSettings device_settings = 2 [json_name = "device_settings"];
+}
+
+message WriteDeviceValueRequest {
+  .spotify.playbacksettings.DeviceDescriptor device_descriptor = 1 [json_name = "device_descriptor"];
+  repeated .spotify.playbacksettings.Field field = 2;
+}
+
+message WriteDeviceValueResponse {
+}
+
+message Device {
+  .spotify.playbacksettings.DeviceDescriptor device_descriptor = 1 [json_name = "device_descriptor"];
+  optional .spotify.playbacksettings.DeviceCapabilities device_capabilities = 2 [json_name = "device_capabilities"];
+}
+
+message DeviceDescriptor {
+  string device_id = 1 [json_name = "device_id"];
+  string device_name = 2 [json_name = "device_name"];
+  string client_id = 3 [json_name = "client_id"];
+  string device_model = 4 [json_name = "device_model"];
+}
+
+message DeviceSettings {
+  .spotify.common.media.AudioQuality audio_quality = 1 [json_name = "audio_quality"];
+  bool social_discoverable = 2 [json_name = "social_discoverable"];
+  .spotify.playbacksettings.MediaMode media_mode = 7 [json_name = "media_mode"];
+  bool normalize = 12;
+  int32 normalize_level = 13 [json_name = "normalize_level"];
+  bool equalizer_enabled = 14 [json_name = "equalizer_enabled"];
+  float equalizer_low_shelf_gain = 15 [json_name = "equalizer_low_shelf_gain"];
+  float equalizer_low_peak_gain = 16 [json_name = "equalizer_low_peak_gain"];
+  float equalizer_low_mid_peak_gain = 17 [json_name = "equalizer_low_mid_peak_gain"];
+  float equalizer_high_mid_peak_gain = 18 [json_name = "equalizer_high_mid_peak_gain"];
+  float equalizer_high_peak_gain = 19 [json_name = "equalizer_high_peak_gain"];
+  float equalizer_high_shelf_gain = 20 [json_name = "equalizer_high_shelf_gain"];
+}
+
+message GetContentSettingsRequest {
+  repeated string content_identifiers = 1 [json_name = "content_identifiers"];
+  optional .spotify.playbacksettings.DeviceCapabilities device_capabilities = 2 [json_name = "device_capabilities"];
+}
+
+message GetContentSettingsResponse {
+  repeated string content_identifiers = 1 [json_name = "content_identifiers"];
+  repeated .spotify.playbacksettings.ContentSettings content_settings = 2 [json_name = "content_settings"];
+}
+
+message WriteContentValueRequest {
+  string content_identifier = 1 [json_name = "content_identifier"];
+  repeated .spotify.playbacksettings.Field field = 2;
+}
+
+message WriteContentValueResponse {
+}
+
+message GetAllStoredContentValuesRequest {
+  uint32 limit = 1;
+}
+
+message GetAllStoredContentValuesResponse {
+  message Fields {
+    repeated .spotify.playbacksettings.FieldId ids = 1;
+    repeated .spotify.playbacksettings.FieldValue values = 2;
+  }
+  repeated string content_identifiers = 1 [json_name = "content_identifiers"];
+  repeated .spotify.playbacksettings.GetAllStoredContentValuesResponse.Fields stored_fields = 2 [json_name = "stored_fields"];
+}
+
+message ContentSettings {
+  float playback_speed = 3 [json_name = "playback_speed"];
+  bool shuffle = 4;
+  .spotify.playbacksettings.ContextEnhancement context_enhancement = 5 [json_name = "context_enhancement"];
+  bool skip_finished_episodes = 8 [json_name = "skip_finished_episodes"];
+  string translation_language = 21 [json_name = "translation_language"];
+}
+
+message WriteUserSettingValueRequest {
+  repeated .spotify.playbacksettings.Field user_settings = 1 [json_name = "user_settings"];
+}
+
+message WriteUserSettingValueResponse {
+}
+
+message UserSettings {
+  bool disable_smart_shuffle = 6 [json_name = "disable_smart_shuffle"];
+  bool gapless = 9;
+  bool crossfade = 10;
+  int32 crossfade_duration_ms = 11 [json_name = "crossfade_duration_ms"];
+  string audio_language = 22 [json_name = "audio_language"];
+  string subtitle_language = 23 [json_name = "subtitle_language"];
+}
+
+message GetSettingsDeviceSelectionRequest {
+  optional .spotify.playbacksettings.DeviceCapabilities device_capabilities = 1 [json_name = "device_capabilities"];
+  repeated .spotify.playbacksettings.FieldId requested_setting_fields = 2 [json_name = "requested_setting_fields"];
+  optional .spotify.playbacksettings.DeviceDescriptor device_descriptor = 3 [json_name = "device_descriptor"];
+  repeated string content_identifiers = 4 [json_name = "content_identifiers"];
+  optional bool include_user_settings = 5 [json_name = "include_user_settings"];
+}
+
+message GetSettingsDeviceSelectionResponse {
+  optional .spotify.playbacksettings.DeviceSettings device_settings = 1 [json_name = "device_settings"];
+  map<string, .spotify.playbacksettings.ContentSettings> content_settings = 2 [json_name = "content_settings"];
+  optional .spotify.playbacksettings.UserSettings user_settings = 3 [json_name = "user_settings"];
+}
+
+message DeviceCapabilities {
+  .spotify.common.media.AudioQuality supported_audio_quality = 1 [json_name = "supported_audio_quality"];
+  bool supports_playback_speed = 2 [json_name = "supports_playback_speed"];
+}
+
+message FieldValue {
+  oneof value {
+    string string_value = 1 [json_name = "string_value"];
+    bool bool_value = 2 [json_name = "bool_value"];
+    int32 int_value = 3 [json_name = "int_value"];
+    float float_value = 4 [json_name = "float_value"];
+  }
+}
+
+message Field {
+  .spotify.playbacksettings.FieldId id = 1;
+  .spotify.playbacksettings.FieldValue value = 2;
+}
+
+enum MediaMode {
+  DEFAULT = 0;
+  AUDIO = 1;
+  VIDEO = 2;
+}
+
+enum ContextEnhancement {
+  NOT_ENHANCED = 0;
+  RECOMMENDATION = 1;
+}
+
+enum FieldId {
+  UNKNOWN_FIELD_ID = 0;
+  AUDIO_QUALITY = 1;
+  SOCIAL_DISCOVERABLE = 2;
+  PLAYBACK_SPEED = 3;
+  SHUFFLE = 4;
+  CONTEXT_ENHANCEMENT = 5;
+  DISABLE_SMART_SHUFFLE = 6;
+  MEDIA_MODE = 7;
+  SKIP_FINISHED_EPISODES = 8;
+  GAPLESS = 9;
+  CROSSFADE = 10;
+  CROSSFADE_DURATION_MS = 11;
+  NORMALIZE = 12;
+  NORMALIZE_LEVEL = 13;
+  EQUALIZER_ENABLED = 14;
+  EQUALIZER_LOW_SHELF_GAIN = 15;
+  EQUALIZER_LOW_PEAK_GAIN = 16;
+  EQUALIZER_LOW_MID_PEAK_GAIN = 17;
+  EQUALIZER_HIGH_MID_PEAK_GAIN = 18;
+  EQUALIZER_HIGH_PEAK_GAIN = 19;
+  EQUALIZER_HIGH_SHELF_GAIN = 20;
+  TRANSLATION_LANGUAGE = 21;
+  AUDIO_LANGUAGE = 22;
+  SUBTITLE_LANGUAGE = 23;
+}
+
+service PlaybackSettingsService {
+  rpc GetDeviceSettings(.spotify.playbacksettings.GetDeviceSettingsRequest) returns (.spotify.playbacksettings.GetDeviceSettingsResponse);
+  rpc WriteDeviceValue(.spotify.playbacksettings.WriteDeviceValueRequest) returns (.spotify.playbacksettings.WriteDeviceValueResponse);
+  rpc GetContentSettings(.spotify.playbacksettings.GetContentSettingsRequest) returns (.spotify.playbacksettings.GetContentSettingsResponse);
+  rpc WriteContentValue(.spotify.playbacksettings.WriteContentValueRequest) returns (.spotify.playbacksettings.WriteContentValueResponse);
+  rpc GetAllStoredContentValues(.spotify.playbacksettings.GetAllStoredContentValuesRequest) returns (.spotify.playbacksettings.GetAllStoredContentValuesResponse);
+  rpc GetSettingsDeviceSelection(.spotify.playbacksettings.GetSettingsDeviceSelectionRequest) returns (.spotify.playbacksettings.GetSettingsDeviceSelectionResponse);
+}

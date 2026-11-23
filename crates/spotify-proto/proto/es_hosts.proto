@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package spotify.connectivity.hosts.esperanto.proto;
+
+option java_package = "com.spotify.connectivity.hosts.esperanto.proto";
+option optimize_for = CODE_SIZE;
+
+message Hosts {
+  string backendStreamingHost = 1;
+  string backendRpcGlobalHost = 3;
+  string backendRpcRegionalHost = 4;
+}

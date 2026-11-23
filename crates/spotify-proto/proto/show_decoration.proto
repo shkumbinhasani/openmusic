@@ -1,0 +1,12 @@
+syntax = "proto2";
+
+package spotify.context_mdata.proto;
+
+import "metadata.proto";
+
+option optimize_for = CODE_SIZE;
+
+message ShowDecoration {
+  optional string publisher = 66;
+  optional .spotify.metadata.ImageGroup cover_image = 69;
+}

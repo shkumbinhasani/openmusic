@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package spotify.playlist.proto;
+
+option optimize_for = CODE_SIZE;
+
+message PlayOptions {
+  message SkipTo {
+    optional string uid = 1;
+    string uri = 2;
+    optional uint32 track_index = 3;
+    optional string provider = 4;
+  }
+  message SeekTo {
+    optional int64 position_ms = 1;
+  }
+  enum Trigger {
+    IMMEDIATELY = 0;
+    ADVANCED_PAST_TRACK = 1;
+    ADVANCED_PAST_CONTEXT = 2;
+  }
+  .spotify.playlist.proto.PlayOptions.SkipTo skip_to = 1;
+  .spotify.playlist.proto.PlayOptions.SeekTo seek_to = 2;
+  bool should_start = 3;
+  string license = 4;
+  optional bool shuffle_list = 5;
+  optional bool repeat_list = 6;
+  optional bool repeat_item = 7;
+  optional float playback_speed = 8;
+  repeated string lenses = 9;
+  optional string session_id = 10;
+  optional string original_session_id = 11;
+  optional bool is_video_first = 12;
+  optional string focus_uid = 13;
+  optional .spotify.playlist.proto.AudioStream audio_stream = 14;
+  .spotify.playlist.proto.PlayOptions.Trigger trigger = 15;
+  optional int64 seek_to_creator_timestamp_ms = 16;
+  optional int64 restore_transfer_state_timestamp_ms = 17;
+  optional bool restored_starts_on_item = 18;
+  optional int64 seek_to_ingested_timestamp_ms = 19;
+}
+
+enum AudioStream {
+  AUDIO_STREAM_DEFAULT = 0;
+  AUDIO_STREAM_ALARM = 1;
+}

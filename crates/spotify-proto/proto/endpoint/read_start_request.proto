@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package spotify.read_reporting_esperanto.proto;
+
+import "endpoint/read_interval.proto";
+import "endpoint/reason_start.proto";
+
+option java_package = "com.spotify.read_reporting_esperanto.proto";
+option optimize_for = CODE_SIZE;
+option java_multiple_files = true;
+option objc_class_prefix = "ESP";
+
+message ReadStartRequest {
+  string content_uri = 1;
+  .spotify.read_reporting_esperanto.proto.ReadInterval interval = 2;
+  int64 wall_timestamp_ms = 4;
+  int64 monotonic_timestamp_ms = 5;
+  .spotify.read_reporting_esperanto.proto.ReasonStart reason_start = 6;
+  int64 total_length = 7;
+  optional bool is_visible = 8;
+}

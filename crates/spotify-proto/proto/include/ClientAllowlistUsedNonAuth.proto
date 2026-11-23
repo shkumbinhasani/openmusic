@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package spotify.event_sender.proto;
+
+option optimize_for = CODE_SIZE;
+
+message ClientAllowlistUsedNonAuth {
+  optional string source = 1;
+  optional int64 version = 2;
+  optional int64 fallback_version = 3;
+}

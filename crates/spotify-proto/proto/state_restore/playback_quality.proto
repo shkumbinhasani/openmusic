@@ -1,0 +1,55 @@
+syntax = "proto2";
+
+package spotify.player.proto.state_restore;
+
+option optimize_for = CODE_SIZE;
+
+message PlaybackQuality {
+  enum BitrateLevel {
+    UNKNOWN_BITRATE_LEVEL = 0;
+    LOW = 1;
+    NORMAL = 2;
+    HIGH = 3;
+    VERY_HIGH = 4;
+    HI_FI = 5;
+    HI_FI24 = 6;
+    PETREL = 7;
+  }
+  enum BitrateStrategy {
+    UNKNOWN_BITRATE_STRATEGY = 0;
+    BEST_MATCHING = 1;
+    BACKEND_ADVISED = 2;
+    OFFLINED_FILE = 3;
+    CACHED_FILE = 4;
+    LOCAL_FILE = 5;
+  }
+  enum HiFiStatus {
+    NONE = 0;
+    OFF = 1;
+    ON = 2;
+  }
+  enum FileOrigin {
+    UNKNOWN_FILE_ORIGIN = 0;
+    INTERNAL = 1;
+    EXTERNAL = 2;
+    LOCAL = 3;
+    GENERATED = 4;
+  }
+  enum QualityRestrictionReason {
+    NO_RESTRICTION = 0;
+    HARDWARE_SAMPLE_RATE = 1;
+  }
+  optional .spotify.player.proto.state_restore.PlaybackQuality.BitrateLevel bitrate_level = 1;
+  optional .spotify.player.proto.state_restore.PlaybackQuality.BitrateStrategy strategy = 2;
+  optional .spotify.player.proto.state_restore.PlaybackQuality.BitrateLevel target_bitrate_level = 3;
+  optional bool target_bitrate_available = 4;
+  optional .spotify.player.proto.state_restore.PlaybackQuality.HiFiStatus hifi_status = 5;
+  optional .spotify.player.proto.state_restore.PlaybackQuality.BitrateLevel highest_available_quality = 6;
+  optional .spotify.player.proto.state_restore.PlaybackQuality.FileOrigin file_origin = 7;
+  optional int32 playing_sample_rate_hz = 8;
+  optional int32 hardware_sample_rate_hz = 9;
+  optional bool is_resampled = 11;
+  optional .spotify.player.proto.state_restore.PlaybackQuality.QualityRestrictionReason restriction_reason = 10;
+  optional bool source_is_lossless = 12;
+  optional int32 playing_bit_depth = 13;
+}
