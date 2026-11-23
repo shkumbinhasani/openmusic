@@ -114,9 +114,9 @@ git push origin v0.2.0
 | `APPLE_API_KEY` | App Store Connect API key for notarization, as a base64 `.p8` |
 | `APPLE_API_KEY_ID` | ID of that key |
 | `APPLE_API_ISSUER` | Issuer ID of that key |
-| `HOMEBREW_TAP_TOKEN` | Fine-grained token with write access to the tap repository |
+| `TAP_DEPLOY_KEY` | Private half of a deploy key with write access to the tap repository |
 
-Without a certificate the workflow still publishes, but signs ad hoc. macOS then treats each version as a new app, so the Keychain asks again for access to the sign-in after every upgrade. Without the tap token it skips the Homebrew step. The cask goes to `Casks/openmusic.rb` in `<owner>/homebrew-tap`, next to your other casks; set the `HOMEBREW_TAP` repository variable to use another tap. The cask template is `packaging/homebrew/openmusic.rb`; the workflow fills in the version and checksums, and drops the quarantine step when the build is notarized.
+Without a certificate the workflow still publishes, but signs ad hoc. macOS then treats each version as a new app, so the Keychain asks again for access to the sign-in after every upgrade. Without the deploy key it skips the Homebrew step. The cask goes to `Casks/openmusic.rb` in `<owner>/homebrew-tap`, next to your other casks; set the `HOMEBREW_TAP` repository variable to use another tap. The cask template is `packaging/homebrew/openmusic.rb`; the workflow fills in the version and checksums, and drops the quarantine step when the build is notarized.
 
 ## How playback works
 

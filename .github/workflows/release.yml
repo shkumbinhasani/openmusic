@@ -123,12 +123,12 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     env:
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
       TAP_REPOSITORY: ${{ vars.HOMEBREW_TAP || format('{0}/homebrew-tap', github.repository_owner) }}
     steps:
-      - name: Check for tap token
+      - name: Check for tap deploy key
         id: token
-        run: echo "present=$([ -n "$TAP_TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        run: echo "present=$([ -n "$TAP_DEPLOY_KEY" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v5
         if: steps.token.outputs.present == 'true'
@@ -139,7 +139,7 @@ jobs:
         if: steps.token.outputs.present == 'true'
         with:
           repository: ${{ env.TAP_REPOSITORY }}
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
           path: tap
 
       - name: Update cask

@@ -265,7 +265,7 @@ Recommendation: ship the GitHub check now and add Sparkle after Developer ID sig
 
 1. Use the existing `<owner>/homebrew-tap`. If it should run checks, the workflows `brew tap-new` generates are a starting point: delete `publish.yml`, keep the tap-syntax checks in `tests.yml` and the daily `autobump.yml`, and pin `Homebrew/actions` to a release SHA.
 2. Add `Casks/openmusic.rb` as in section 2. Fix `packaging/homebrew/openmusic.rb` to use `depends_on macos: :ventura` (or the final minimum) instead of the deprecated string form.
-3. In `release.yml`, push the rendered cask with a fine-grained token limited to the tap repo with Contents read and write. Store it as `HOMEBREW_TAP_TOKEN`. A deploy key or a GitHub App token also works.
+3. In `release.yml`, push the rendered cask with a write deploy key on the tap repo, stored as `TAP_DEPLOY_KEY`, as the reviewpad release already does. A fine-grained token or a GitHub App token limited to the tap repo also works.
 4. Sign the release builds with one stable identity, not ad hoc. Until a Developer ID exists, that means importing the Apple Development certificate into CI. It keeps the designated requirement the same between releases, so Homebrew carries the user's **Open Anyway** approval to each new version. The cost: a development private key sits in CI secrets, and Gatekeeper still rejects the app on first launch. If we decide against that, tell users to expect the Gatekeeper prompt after every upgrade.
 5. Document the install command, the trust step it implies, and the **Open Anyway** step in the README and in `caveats`.
 6. Add the GitHub "latest release" check in the app. Leave out `auto_updates`.
@@ -283,7 +283,7 @@ Recommendation: ship the GitHub check now and add Sparkle after Developer ID sig
    | `APPLE_API_KEY` | App Store Connect API private key (`.p8`), base64 |
    | `APPLE_API_KEY_ID` | Its key ID |
    | `APPLE_API_ISSUER` | Its issuer ID (UUID) |
-   | `HOMEBREW_TAP_TOKEN` | Write access to the tap repo (unchanged) |
+   | `TAP_DEPLOY_KEY` | Write deploy key for the tap repo (unchanged) |
    | `SPARKLE_ED_PRIVATE_KEY` | Only if Sparkle is adopted |
 
    GitHub's guide uses the same pattern with different names: a base64 `.p12`, its password and a random keychain password. It imports into a temporary keychain with `security create-keychain`, `import` and `set-key-partition-list`. ([GitHub Docs: Installing an Apple certificate on macOS runners](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)) Our workflow generates the keychain password at run time, so it needs no secret for it.
