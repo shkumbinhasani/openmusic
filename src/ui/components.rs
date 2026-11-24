@@ -1,16 +1,19 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnimationExt, Context, Div, FontWeight, Image, ObjectFit, Pixels, Stateful, div, img,
-    prelude::*, px, rgb, rgba, svg,
+    AnimationExt, Context, Div, FontWeight, Image, MouseButton, ObjectFit, Pixels, Stateful, div,
+    img, prelude::*, px, rgb, rgba, svg,
 };
 use spotify_client::Track;
 
-use super::Palette;
+use super::{
+    Palette,
+    menu::{Surface, Target},
+};
 use crate::{
     app::{OpenMusic, Page},
     icons,
-    overlay::{self, Action, Label},
+    overlay::{self, Action, ButtonSpec, Label},
 };
 
 pub fn icon(path: &'static str, size: f32, color: u32) -> impl IntoElement {
@@ -225,7 +228,13 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.glass_control(key, label, prominent, !self.modal_open(), palette, cx)
+        let spec = ButtonSpec {
+            label,
+            prominent,
+            enabled: true,
+            tooltip: None,
+        };
+        self.glass_control(key, spec, !self.modal_open(), palette, cx)
     }
 
     pub fn dock_control(
@@ -236,14 +245,37 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        self.glass_control(key, label, prominent, true, palette, cx)
+        let spec = ButtonSpec {
+            label,
+            prominent,
+            enabled: true,
+            tooltip: None,
+        };
+        self.glass_control(key, spec, true, palette, cx)
+    }
+
+    pub fn menu_button(
+        &self,
+        key: &'static str,
+        name: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let spec = ButtonSpec {
+            label: Label::Symbol("ellipsis"),
+            prominent: false,
+            enabled: true,
+            tooltip: Some(format!("More options for {name}")),
+        };
+        self.glass_control(key, spec, !self.modal_open(), palette, cx)
+            .size(px(36.))
+            .child(overlay::anchor(key))
     }
 
     fn glass_control(
         &self,
         key: &'static str,
-        label: Label,
-        prominent: bool,
+        spec: ButtonSpec,
         visible: bool,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -257,25 +289,28 @@ impl OpenMusic {
             .items_center()
             .justify_center();
         if overlay::available() {
-            return slot.when(visible, |slot| {
-                slot.child(overlay::button(key, label, prominent))
-            });
+            return slot.when(visible, |slot| slot.child(overlay::button(key, spec)));
         }
+        let label = spec.label;
         slot.rounded_full()
-            .bg(rgba(if prominent {
+            .bg(rgba(if spec.prominent {
                 palette.accent << 8 | 0xff
             } else {
                 palette.fill
             }))
             .border_1()
             .border_color(rgba(palette.rim))
-            .cursor_pointer()
-            .hover(move |button| button.opacity(0.85))
             .text_size(px(13.))
             .font_weight(FontWeight::SEMIBOLD)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.handle_control(Action::Press(key), window, cx)
-            }))
+            .when(!spec.enabled, |button| button.opacity(0.5))
+            .when(spec.enabled, |button| {
+                button
+                    .cursor_pointer()
+                    .hover(move |button| button.opacity(0.85))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.handle_control(Action::Press(key), window, cx)
+                    }))
+            })
             .map(|button| match label {
                 Label::Symbol(name) => button.child(icon(fallback_icon(name), 20., palette.text)),
                 Label::Text(text) => button.child(text),
@@ -330,6 +365,8 @@ impl OpenMusic {
             .children(tracks.iter().enumerate().skip(start).map(|(index, track)| {
                 let queue = queue.clone();
                 let context = context.clone();
+                let menu_queue = queue.clone();
+                let menu_context = context.clone();
                 let selected = self.is_current(&track.uri);
                 let artist_uri = track.artist_uri.clone();
                 let album_uri = track.album_uri.clone();
@@ -342,12 +379,26 @@ impl OpenMusic {
                     .px_2()
                     .rounded(px(10.))
                     .cursor_pointer()
-                    .when(selected, |row| row.bg(rgba(palette.press)))
+                    .when(selected || self.menu_row((prefix, index)), |row| {
+                        row.bg(rgba(palette.press))
+                    })
                     .hover(move |row| row.bg(rgba(palette.press)))
                     .on_click(cx.listener(move |this, _, _, cx| match &context {
                         Some(context) => this.play_context(context, &queue, index, cx),
                         None => this.play(&queue, index, cx),
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_menu(
+                            Some((prefix, index)),
+                            move |_| {
+                                let track = menu_queue.get(index)?.clone();
+                                let context = menu_context.as_deref().map(str::to_owned);
+                                Some(Target::track(track, context, Surface::Row))
+                            },
+                            cx,
+                        ),
+                    )
                     .map(|row| {
                         if numbered {
                             row.child(
@@ -440,7 +491,7 @@ impl OpenMusic {
             .flex_wrap()
             .gap_4()
             .children(items.into_iter().enumerate().map(
-                move |(index, (_, title, subtitle, cover, page))| {
+                move |(index, (uri, title, subtitle, cover, page))| {
                     let image = cover.as_ref().and_then(|url| self.covers.get(url));
                     let radius = if round { card_side / 2. } else { px(12.) };
                     div()
@@ -473,6 +524,10 @@ impl OpenMusic {
                             this.navigate(page.clone());
                             cx.notify();
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            self.on_menu(None, move |_| Target::for_uri(&uri), cx),
+                        )
                 },
             ))
     }

@@ -1,9 +1,12 @@
 use std::path::Path;
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 
 use super::worker::Event;
-use crate::app::{OpenMusic, Page};
+use crate::{
+    app::{OpenMusic, Page},
+    menus::Handle,
+};
 
 pub fn load(_app: &mut OpenMusic, _page: &Page) {}
 
@@ -34,3 +37,5 @@ pub fn debug(
 pub fn state_fragment(_app: &OpenMusic) -> String {
     String::new()
 }
+
+pub fn register_actions(_cx: &mut App, _handle: &Handle) {}

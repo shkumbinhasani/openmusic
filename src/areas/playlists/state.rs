@@ -1,10 +1,13 @@
 use std::{collections::HashSet, path::Path};
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use spotify_client::catalog::Collection;
 
 use super::worker::{Command, Event};
-use crate::app::{OpenMusic, Page};
+use crate::{
+    app::{OpenMusic, Page},
+    menus::Handle,
+};
 
 #[derive(Default)]
 pub struct State {
@@ -69,3 +72,5 @@ pub fn debug(
 pub fn state_fragment(_app: &OpenMusic) -> String {
     String::new()
 }
+
+pub fn register_actions(_cx: &mut App, _handle: &Handle) {}

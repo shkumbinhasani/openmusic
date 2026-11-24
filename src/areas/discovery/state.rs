@@ -1,10 +1,13 @@
 use std::{collections::HashSet, path::Path};
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use spotify_client::{Track, catalog::Artist, engine::NowPlaying};
 
 use super::worker::{Command, Discovery, Event, Mix};
-use crate::app::{OpenMusic, Page, Session};
+use crate::{
+    app::{OpenMusic, Page, Session, intent::Intent},
+    menus::{self, FocusSearch, Handle},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SearchTab {
@@ -240,4 +243,10 @@ pub fn debug(
 
 pub fn state_fragment(_app: &OpenMusic) -> String {
     String::new()
+}
+
+pub fn register_actions(cx: &mut App, handle: &Handle) {
+    menus::route(cx, handle, |_: &FocusSearch, app, window, cx| {
+        app.perform(Intent::FocusSearch, window, cx)
+    });
 }

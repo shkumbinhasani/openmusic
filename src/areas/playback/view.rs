@@ -6,6 +6,7 @@ use crate::{
     ui::{
         Palette,
         components::{ROW_RADIUS, icon},
+        menu::{Group, MenuItem, Target},
     },
 };
 
@@ -107,4 +108,8 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
+}
+
+pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
 }

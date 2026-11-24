@@ -1,8 +1,12 @@
-use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb, rgba};
 
 use crate::{
     app::OpenMusic,
-    ui::{Palette, components::bone},
+    ui::{
+        Palette,
+        components::bone,
+        menu::{Group, MenuItem, Surface, Target},
+    },
 };
 
 impl OpenMusic {
@@ -54,7 +58,15 @@ impl OpenMusic {
                         div()
                             .text_color(rgb(palette.muted))
                             .truncate()
-                            .child(heading),
+                            .child(heading)
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                self.on_menu(
+                                    None,
+                                    |app| app.now_playing_target(Surface::Header),
+                                    cx,
+                                ),
+                            ),
                     )
                     .when_some(status, |header, status| {
                         header.child(
@@ -174,4 +186,8 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
+}
+
+pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
 }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, Div, FontWeight, Pixels, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
 use spotify_client::Track;
 
 use super::state::{SearchTab, SectionSource};
@@ -9,6 +9,7 @@ use crate::{
     ui::{
         Palette,
         components::{artwork, bone, skeleton_header, skeleton_rows},
+        menu::{Group, MenuItem, Surface, Target},
     },
 };
 
@@ -32,10 +33,19 @@ impl OpenMusic {
             )
             .when_some(mix, |page, mix| {
                 let featured = &mix.tracks[0];
+                let hero_track = featured.clone();
                 let hero = div()
                     .flex()
                     .items_center()
                     .gap_6()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_menu(
+                            None,
+                            move |_| Some(Target::track(hero_track.clone(), None, Surface::Header)),
+                            cx,
+                        ),
+                    )
                     .child(
                         artwork(self.cover_for(featured), px(176.), px(16.), palette).shadow_lg(),
                     )
@@ -198,6 +208,7 @@ impl OpenMusic {
                             .take(4)
                             .map(|(index, track)| {
                                 let queue = queue.clone();
+                                let card_track = track.clone();
                                 div()
                                     .id(("mix-card", index))
                                     .flex_1()
@@ -209,6 +220,20 @@ impl OpenMusic {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.play(&queue, index, cx)
                                     }))
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        self.on_menu(
+                                            None,
+                                            move |_| {
+                                                Some(Target::track(
+                                                    card_track.clone(),
+                                                    None,
+                                                    Surface::Card,
+                                                ))
+                                            },
+                                            cx,
+                                        ),
+                                    )
                                     .child(
                                         artwork(self.cover_for(track), card_side, px(12.), palette)
                                             .shadow_md(),
@@ -330,10 +355,26 @@ impl OpenMusic {
             Err(error) => return page.child(self.page_status(error.clone(), palette)),
         };
         let image = artist.image.as_ref().and_then(|url| self.covers.get(url));
+        let has_menu = self.has_menu(&Target::Artist {
+            uri: loaded.clone(),
+        });
+        let header_uri = loaded.clone();
         let header = div()
             .flex()
             .items_center()
             .gap_6()
+            .on_mouse_down(
+                MouseButton::Right,
+                self.on_menu(
+                    None,
+                    move |_| {
+                        Some(Target::Artist {
+                            uri: header_uri.clone(),
+                        })
+                    },
+                    cx,
+                ),
+            )
             .child(
                 div()
                     .size(px(176.))
@@ -367,10 +408,20 @@ impl OpenMusic {
                             .child(artist.name.clone()),
                     )
                     .child(
-                        div().mt_3().child(
-                            self.text_control("play-artist", "Play", true, palette, cx)
-                                .w(px(96.)),
-                        ),
+                        div()
+                            .mt_3()
+                            .child(
+                                self.text_control("play-artist", "Play", true, palette, cx)
+                                    .w(px(96.)),
+                            )
+                            .when(has_menu, |actions| {
+                                actions.flex().gap_2().child(self.menu_button(
+                                    "more-artist",
+                                    &artist.name,
+                                    palette,
+                                    cx,
+                                ))
+                            }),
                     ),
             );
         let releases = artist.releases.clone();
@@ -527,4 +578,8 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
+}
+
+pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
 }

@@ -20,7 +20,11 @@ use gpui_component::{
 
 use crate::{
     areas::{account, audio, content, details, discovery, library, playback, playlists, system},
-    debug, overlay, ui,
+    debug, menus, overlay,
+    ui::{
+        self,
+        menu::{Menus, Target},
+    },
     worker::{Command, Event},
 };
 use intent::Intent;
@@ -51,6 +55,7 @@ pub struct OpenMusic {
     pub toast: Option<Toast>,
     pub settings: Settings,
     pub saved: Saved,
+    pub menus: Menus,
     pub account: account::state::State,
     pub content: content::state::State,
     pub discovery: discovery::state::State,
@@ -95,6 +100,7 @@ impl OpenMusic {
             toast: None,
             settings: settings::load(),
             saved: Saved::default(),
+            menus: Menus::default(),
             account: Default::default(),
             content: Default::default(),
             discovery: Default::default(),
@@ -114,6 +120,8 @@ impl OpenMusic {
         let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
         let _ = self.shared_debug(verb, rest, directory, window, cx)
+            || ui::menu::debug(self, verb, rest, directory, window, cx)
+            || menus::debug(self, verb, rest, directory, window, cx)
             || account::state::debug(self, verb, rest, directory, window, cx)
             || audio::state::debug(self, verb, rest, directory, window, cx)
             || content::state::debug(self, verb, rest, directory, window, cx)
@@ -238,6 +246,14 @@ impl OpenMusic {
                     .filter_map(|part| part.parse::<f32>().ok());
                 if let (Some(width), Some(height)) = (parts.next(), parts.next()) {
                     window.resize(size(px(width), px(height)));
+                }
+            }
+            "nudge" => {
+                let mut parts = rest
+                    .split_whitespace()
+                    .filter_map(|part| part.parse::<f64>().ok());
+                if let (Some(dx), Some(dy)) = (parts.next(), parts.next()) {
+                    overlay::nudge_window(dx, dy);
                 }
             }
             "state" => {
@@ -393,7 +409,19 @@ impl OpenMusic {
                     self.play_context(&uri, &tracks, 0, cx);
                 }
             }
+            overlay::Action::Press(key @ ("more-collection" | "more-artist")) => {
+                let target = match &self.page {
+                    Page::Collection(uri) | Page::Artist(uri) => Target::for_uri(uri),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    self.open_menu_under(target, key);
+                }
+            }
             overlay::Action::Press(_) => {}
+            overlay::Action::Menu(_)
+            | overlay::Action::MenuClosed
+            | overlay::Action::BarMenu(_) => self.menu_action(action, window, cx),
             overlay::Action::Seek(fraction) => {
                 if let Some(duration) = self.duration() {
                     let position = (fraction * duration.saturating_sub(1) as f32) as u32;

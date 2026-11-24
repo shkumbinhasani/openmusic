@@ -1,10 +1,11 @@
-use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb, rgba};
 
 use crate::{
     app::{OpenMusic, Page},
     ui::{
         Palette,
         components::{ROW_RADIUS, artwork, bone},
+        menu::{Group, MenuItem, Target},
     },
 };
 
@@ -61,6 +62,7 @@ impl OpenMusic {
                             let selected = self.page == page;
                             let image =
                                 playlist.cover.as_ref().and_then(|url| self.covers.get(url));
+                            let uri = playlist.uri.clone();
                             div()
                                 .id(("playlist", index))
                                 .h(px(36.))
@@ -74,6 +76,17 @@ impl OpenMusic {
                                     item.bg(rgba(palette.press))
                                         .font_weight(FontWeight::SEMIBOLD)
                                 })
+                                .when(self.menu_row(("playlist", index)), |item| {
+                                    item.bg(rgba(palette.press))
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    self.on_menu(
+                                        Some(("playlist", index)),
+                                        move |_| Target::for_uri(&uri),
+                                        cx,
+                                    ),
+                                )
                                 .hover(move |item| item.bg(rgba(palette.press)))
                                 .child(artwork(image, px(26.), px(5.), palette))
                                 .child(
@@ -122,4 +135,8 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
+}
+
+pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
 }

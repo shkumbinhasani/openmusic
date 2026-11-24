@@ -1,5 +1,7 @@
 mod app;
 mod app_icon;
+#[cfg(target_os = "macos")]
+mod appkit;
 mod areas;
 mod debug;
 mod glass;
@@ -56,7 +58,7 @@ fn main() {
                     let (controls, mut presses) = unbounded_channel();
                     overlay::set_handler(overlay::handler(controls));
                     let player = cx.new(|cx| OpenMusic::new(commands, initial_track, window, cx));
-                    menus::connect(&player, window, cx);
+                    menus::connect(player.downgrade(), window.window_handle(), cx);
                     areas::system::state::window_opened(window, cx);
                     window.focus(&player.read(cx).focus);
                     player.update(cx, |this, cx| {

@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-use gpui::{Image, IntoElement, Styled, canvas};
+use gpui::{Bounds, Image, IntoElement, Pixels, Point, Styled, canvas, point, px};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Copy, Debug)]
@@ -8,12 +8,47 @@ pub enum Action {
     Press(&'static str),
     Seek(f32),
     Volume(f32),
+    Menu(u32),
+    MenuClosed,
+    BarMenu(u32),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Label {
     Symbol(&'static str),
     Text(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ButtonSpec {
+    pub label: Label,
+    pub prominent: bool,
+    pub enabled: bool,
+    pub tooltip: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry {
+    Item {
+        title: String,
+        id: u32,
+        enabled: bool,
+        checked: bool,
+        symbol: Option<&'static str>,
+        key: Option<&'static str>,
+        alternate: Option<(String, u32)>,
+        subtitle: Option<String>,
+    },
+    Note(String),
+    Header(String),
+    Separator,
+    Submenu {
+        title: String,
+        symbol: Option<&'static str>,
+        entries: Vec<Entry>,
+        search: Option<&'static str>,
+        id: Option<u32>,
+    },
 }
 
 #[derive(Clone)]
@@ -26,17 +61,89 @@ pub struct NowPlaying {
     pub duration_ms: u32,
 }
 
-pub use native::{available, progress, set_handler};
+thread_local! {
+    static ANCHORS: RefCell<HashMap<&'static str, Bounds<Pixels>>> = RefCell::default();
+}
 
-pub fn button(key: &'static str, label: Label, prominent: bool) -> impl IntoElement {
+#[cfg(target_os = "macos")]
+pub use native::dock_artwork;
+pub use native::{
+    available, bar_menu, bar_menu_tree, close_menu, filter_menu, menu_bar_tree, menu_tree,
+    nudge_window, pick, progress, right_click, set_handler, update_menu,
+};
+
+pub fn button(key: &'static str, spec: ButtonSpec) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| native::button(key, label, prominent, bounds, window),
+        move |bounds, _, window, _| native::button(key, &spec, bounds, window),
     )
     .absolute()
     .top_0()
     .left_0()
     .size_full()
+}
+
+pub fn anchor(key: &'static str) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, _, _| {
+            ANCHORS.with_borrow_mut(|anchors| anchors.insert(key, bounds));
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+pub fn context_menu(entries: Vec<Entry>, at: Point<Pixels>) -> bool {
+    native::popup(entries, at)
+}
+
+pub fn menu_at(anchor: &'static str, entries: Vec<Entry>) -> bool {
+    let Some(bounds) = ANCHORS.with_borrow(|anchors| anchors.get(anchor).copied()) else {
+        return false;
+    };
+    native::popup(entries, point(bounds.origin.x, bounds.bottom() + px(4.)))
+}
+
+pub fn key(name: &str) -> Option<&'static str> {
+    native::key(name)
+        .or_else(|| ANCHORS.with_borrow(|anchors| anchors.keys().copied().find(|key| *key == name)))
+}
+
+pub fn describe() -> String {
+    let mut lines = native::describe();
+    #[cfg(target_os = "macos")]
+    if let Some(art) = dock_artwork() {
+        let frame = art.frame();
+        let sublayers = art
+            .layer()
+            .and_then(|layer| unsafe { layer.sublayers() })
+            .map_or(0, |layers| layers.count());
+        lines.push(format!(
+            "artwork frame={},{},{},{} image={} sublayers={sublayers}",
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+            art.image().is_some(),
+        ));
+    }
+    ANCHORS.with_borrow(|anchors| {
+        let mut anchors: Vec<_> = anchors.iter().collect();
+        anchors.sort_by_key(|(key, _)| **key);
+        for (key, bounds) in anchors {
+            lines.push(format!(
+                "anchor {key} x={} y={} w={} h={}",
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ));
+        }
+    });
+    lines.join("\n")
 }
 
 pub fn now_playing(state: NowPlaying) -> impl IntoElement {
@@ -77,45 +184,87 @@ pub fn handler(sender: UnboundedSender<Action>) -> impl Fn(Action) + 'static {
 mod native {
     use std::{cell::RefCell, collections::HashMap};
 
-    use gpui::{Bounds, Pixels, Window};
+    use gpui::{Bounds, Pixels, Point, Window};
     use objc2::{
-        AllocAnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+        AllocAnyThread, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
         rc::Retained,
-        runtime::{AnyObject, NSObject},
+        runtime::{AnyObject, NSObject, ProtocolObject, Sel},
         sel,
     };
     use objc2_app_kit::{
-        NSApplication, NSBezelStyle, NSButton, NSColor, NSControl, NSControlBorderShape,
-        NSControlSize, NSEvent, NSEventType, NSFont, NSFontWeightSemibold, NSGlassEffectView,
-        NSImage, NSImageScaling, NSImageSymbolConfiguration, NSImageView, NSLineBreakMode,
-        NSSlider, NSTextAlignment, NSTextField, NSView, NSWindowOrderingMode,
+        NSApplication, NSBezelStyle, NSButton, NSCellImagePosition, NSColor, NSControl,
+        NSControlBorderShape, NSControlSize, NSControlStateValueOn, NSEvent, NSEventModifierFlags,
+        NSEventTrackingRunLoopMode, NSEventType, NSGlassEffectView, NSImage, NSImageScaling,
+        NSImageView, NSMenu, NSMenuDelegate, NSMenuItem, NSResponder, NSSearchField, NSSlider,
+        NSTextAlignment, NSTextField, NSView, NSWindowOrderingMode,
     };
-    use objc2_foundation::{NSData, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSArray, NSData, NSObjectProtocol, NSPoint, NSRect};
 
-    use super::{Action, Label, NowPlaying};
-    use crate::ui::components::timestamp;
+    use super::{Action, ButtonSpec, Entry, Label, NowPlaying};
+    use crate::{
+        appkit::{
+            self, Target, container, dispatch, frame, label, rect, sized_symbol, string, symbol,
+        },
+        ui::components::timestamp,
+    };
 
     define_class!(
         #[unsafe(super(NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[name = "OpenMusicControlTarget"]
-        struct Target;
+        #[name = "OpenMusicMenuDelegate"]
+        struct MenuDelegate;
 
-        unsafe impl NSObjectProtocol for Target {}
+        unsafe impl NSObjectProtocol for MenuDelegate {}
 
-        impl Target {
-            #[unsafe(method(activate:))]
-            fn activate(&self, sender: &NSControl) {
-                if sender.tag() == SEEK && dragging() {
-                    preview(sender.doubleValue());
-                    return;
+        unsafe impl NSMenuDelegate for MenuDelegate {
+            #[unsafe(method(menuWillOpen:))]
+            fn menu_will_open(&self, menu: &NSMenu) {
+                will_open(self, menu);
+            }
+
+            #[unsafe(method(menuDidClose:))]
+            fn menu_did_close(&self, menu: &NSMenu) {
+                did_close(menu);
+            }
+
+            #[unsafe(method(menuNeedsUpdate:))]
+            fn menu_needs_update(&self, menu: &NSMenu) {
+                needs_update(menu);
+            }
+        }
+
+        impl MenuDelegate {
+            #[unsafe(method(menuItem:))]
+            fn menu_item(&self, sender: &NSMenuItem) {
+                dispatch(Action::Menu(sender.tag() as u32));
+            }
+
+            #[unsafe(method(barMenuItem:))]
+            fn bar_menu_item(&self, sender: &NSMenuItem) {
+                dispatch(Action::BarMenu(sender.tag() as u32));
+            }
+
+            #[unsafe(method(showMenu:))]
+            fn show_menu(&self, _: Option<&AnyObject>) {
+                show_pending();
+            }
+
+            #[unsafe(method(filter:))]
+            fn filter(&self, sender: &NSSearchField) {
+                filter_field(sender);
+            }
+
+            #[unsafe(method(focusField:))]
+            fn focus_field(&self, field: &NSSearchField) {
+                if let Some(window) = field.window() {
+                    let responder: &NSResponder = field;
+                    window.makeFirstResponder(Some(responder));
                 }
-                dispatch(sender.tag(), sender.doubleValue());
             }
         }
     );
 
-    impl Target {
+    impl MenuDelegate {
         fn new(mtm: MainThreadMarker) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(());
             unsafe { msg_send![super(this), init] }
@@ -124,6 +273,7 @@ mod native {
 
     const SEEK: isize = -1;
     const VOLUME: isize = -2;
+    const NO_MATCH: isize = -1;
 
     struct Dock {
         glass: Retained<NSGlassEffectView>,
@@ -148,18 +298,33 @@ mod native {
 
     struct Control {
         button: Retained<NSButton>,
+        label: Label,
         symbol: (&'static str, u32),
+        prominent: bool,
+        tooltip: Option<String>,
         placed: bool,
+    }
+
+    #[derive(Default)]
+    struct Built {
+        submenus: HashMap<u32, Retained<NSMenu>>,
+        searches: Vec<(Retained<NSMenu>, Retained<NSSearchField>)>,
     }
 
     #[derive(Default)]
     struct Overlay {
         target: Option<Retained<Target>>,
-        handler: Option<Box<dyn Fn(Action)>>,
+        delegate: Option<Retained<MenuDelegate>>,
         keys: Vec<&'static str>,
         buttons: HashMap<&'static str, Control>,
         dock: Option<Dock>,
         volume: Option<Volume>,
+        pending: Option<(Vec<Entry>, Point<Pixels>)>,
+        context: Option<Retained<NSMenu>>,
+        tracking: Option<Retained<NSMenu>>,
+        built: Built,
+        bar_entries: Vec<Entry>,
+        bar: Option<Retained<NSMenu>>,
     }
 
     thread_local! {
@@ -171,7 +336,11 @@ mod native {
     }
 
     pub fn set_handler(handler: impl Fn(Action) + 'static) {
-        OVERLAY.with_borrow_mut(|overlay| overlay.handler = Some(Box::new(handler)));
+        appkit::set_handler(handler);
+    }
+
+    pub fn key(name: &str) -> Option<&'static str> {
+        OVERLAY.with_borrow(|overlay| overlay.keys.iter().copied().find(|key| *key == name))
     }
 
     fn dragging() -> bool {
@@ -198,65 +367,28 @@ mod native {
         });
     }
 
-    fn dispatch(tag: isize, value: f64) {
-        if tag == SEEK {
-            OVERLAY.with_borrow_mut(|overlay| {
+    fn activate(sender: &NSControl) {
+        if sender.tag() == SEEK && dragging() {
+            preview(sender.doubleValue());
+            return;
+        }
+        press(sender.tag(), sender.doubleValue());
+    }
+
+    fn press(tag: isize, value: f64) {
+        let action = OVERLAY.with_borrow_mut(|overlay| match tag {
+            SEEK => {
                 if let Some(dock) = overlay.dock.as_mut() {
                     dock.scrubbing = false;
                 }
-            });
-        }
-        OVERLAY.with_borrow(|overlay| {
-            let action = match tag {
-                SEEK => Some(Action::Seek(value as f32)),
-                VOLUME => Some(Action::Volume(value as f32)),
-                tag => overlay.keys.get(tag as usize).copied().map(Action::Press),
-            };
-            if let (Some(action), Some(handler)) = (action, &overlay.handler) {
-                handler(action);
+                Some(Action::Seek(value as f32))
             }
+            VOLUME => Some(Action::Volume(value as f32)),
+            tag => overlay.keys.get(tag as usize).copied().map(Action::Press),
         });
-    }
-
-    fn string(text: &str) -> Retained<NSString> {
-        NSString::from_str(text)
-    }
-
-    fn symbol(name: &str) -> Option<Retained<NSImage>> {
-        NSImage::imageWithSystemSymbolName_accessibilityDescription(&string(name), None)
-    }
-
-    fn sized_symbol(name: &str, size: f64) -> Option<Retained<NSImage>> {
-        let configuration =
-            NSImageSymbolConfiguration::configurationWithPointSize_weight(size, unsafe {
-                NSFontWeightSemibold
-            });
-        symbol(name)?.imageWithSymbolConfiguration(&configuration)
-    }
-
-    fn label(text: &str, size: f64, bold: bool, mtm: MainThreadMarker) -> Retained<NSTextField> {
-        let field = NSTextField::labelWithString(&string(text), mtm);
-        let font = if bold {
-            NSFont::boldSystemFontOfSize(size)
-        } else {
-            NSFont::systemFontOfSize(size)
-        };
-        field.setFont(Some(&font));
-        field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-        field
-    }
-
-    fn frame(container: &NSView, bounds: Bounds<Pixels>) -> NSRect {
-        let height = container.bounds().size.height;
-        let x = f64::from(f32::from(bounds.origin.x));
-        let y = f64::from(f32::from(bounds.origin.y));
-        let width = f64::from(f32::from(bounds.size.width));
-        let tall = f64::from(f32::from(bounds.size.height));
-        NSRect::new(NSPoint::new(x, height - y - tall), NSSize::new(width, tall))
-    }
-
-    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
-        NSRect::new(NSPoint::new(x, y), NSSize::new(width.max(0.), height))
+        if let Some(action) = action {
+            dispatch(action);
+        }
     }
 
     fn visible(bounds: Bounds<Pixels>, window: &Window) -> bool {
@@ -271,15 +403,17 @@ mod native {
         Some(container)
     }
 
-    fn container() -> Option<Retained<NSView>> {
-        let host = crate::glass::host()?;
-        unsafe { host.superview() }
-    }
-
     fn target(overlay: &mut Overlay, mtm: MainThreadMarker) -> Retained<Target> {
         overlay
             .target
-            .get_or_insert_with(|| Target::new(mtm))
+            .get_or_insert_with(|| Target::new(mtm, activate))
+            .clone()
+    }
+
+    fn delegate(overlay: &mut Overlay, mtm: MainThreadMarker) -> Retained<MenuDelegate> {
+        overlay
+            .delegate
+            .get_or_insert_with(|| MenuDelegate::new(mtm))
             .clone()
     }
 
@@ -296,13 +430,23 @@ mod native {
         NSEvent::pressedMouseButtons() != 0
     }
 
-    pub fn button(
-        key: &'static str,
-        label: Label,
-        prominent: bool,
-        bounds: Bounds<Pixels>,
-        window: &Window,
-    ) {
+    fn show_label(button: &NSButton, label: Label) {
+        match label {
+            Label::Symbol(_) => {
+                button.setTitle(&string(""));
+                button.setImagePosition(NSCellImagePosition::ImageOnly);
+                button.setBorderShape(NSControlBorderShape::Circle);
+            }
+            Label::Text(title) => {
+                button.setImage(None);
+                button.setImagePosition(NSCellImagePosition::NoImage);
+                button.setTitle(&string(title));
+                button.setBorderShape(NSControlBorderShape::Capsule);
+            }
+        }
+    }
+
+    pub fn button(key: &'static str, spec: &ButtonSpec, bounds: Bounds<Pixels>, window: &Window) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -312,7 +456,7 @@ mod native {
                 let target = target(overlay, mtm);
                 let receiver: &AnyObject = &target;
                 let button = unsafe {
-                    match label {
+                    match spec.label {
                         Label::Symbol(name) => NSButton::buttonWithImage_target_action(
                             &symbol(name).unwrap_or_default(),
                             Some(receiver),
@@ -328,13 +472,13 @@ mod native {
                     }
                 };
                 button.setBezelStyle(NSBezelStyle::Glass);
-                button.setBorderShape(match label {
+                button.setBorderShape(match spec.label {
                     Label::Symbol(_) => NSControlBorderShape::Circle,
                     Label::Text(_) => NSControlBorderShape::Capsule,
                 });
                 button.setControlSize(NSControlSize::Large);
                 button.setImageScaling(NSImageScaling::ScaleNone);
-                if prominent {
+                if spec.prominent {
                     button.setBezelColor(Some(&NSColor::controlAccentColor()));
                 }
                 button.setTag(overlay.keys.len() as isize);
@@ -346,7 +490,10 @@ mod native {
                     key,
                     Control {
                         button,
+                        label: spec.label,
                         symbol: ("", 0),
+                        prominent: spec.prominent,
+                        tooltip: None,
                         placed: false,
                     },
                 );
@@ -361,13 +508,31 @@ mod native {
                 return;
             }
             let rect = frame(&container, bounds);
-            if let Label::Symbol(name) = label {
+            if control.label != spec.label {
+                show_label(&control.button, spec.label);
+                control.label = spec.label;
+                control.symbol = ("", 0);
+            }
+            if let Label::Symbol(name) = spec.label {
                 let size = (rect.size.height * 0.34).clamp(13., 22.);
                 let key = (name, size.round() as u32);
                 if control.symbol != key {
                     control.button.setImage(sized_symbol(name, size).as_deref());
                     control.symbol = key;
                 }
+            }
+            if control.prominent != spec.prominent {
+                let accent = spec.prominent.then(NSColor::controlAccentColor);
+                control.button.setBezelColor(accent.as_deref());
+                control.prominent = spec.prominent;
+            }
+            if control.button.isEnabled() != spec.enabled {
+                control.button.setEnabled(spec.enabled);
+            }
+            if control.tooltip != spec.tooltip {
+                let tip = spec.tooltip.as_deref().map(string);
+                control.button.setToolTip(tip.as_deref());
+                control.tooltip = spec.tooltip.clone();
             }
             control.button.setFrame(rect);
         });
@@ -445,6 +610,7 @@ mod native {
                     scrubbing: false,
                     placed: false,
                 });
+                attach_bar(overlay, mtm);
             }
             let Some(container) = container() else {
                 return;
@@ -518,6 +684,10 @@ mod native {
                 dock.cover = cover;
             }
         });
+    }
+
+    pub fn dock_artwork() -> Option<Retained<NSImageView>> {
+        OVERLAY.with_borrow(|overlay| overlay.dock.as_ref().map(|dock| dock.art.clone()))
     }
 
     pub fn volume(fraction: f32, corner: f32, bounds: Bounds<Pixels>, window: &Window) {
@@ -626,13 +796,624 @@ mod native {
             }
         });
     }
+
+    pub fn popup(entries: Vec<Entry>, at: Point<Pixels>) -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return false;
+        };
+        if container().is_none() {
+            return false;
+        }
+        let delegate = OVERLAY.with_borrow_mut(|overlay| {
+            overlay.pending = Some((entries, at));
+            delegate(overlay, mtm)
+        });
+        unsafe {
+            let _: () = msg_send![
+                &*delegate,
+                performSelector: sel!(showMenu:),
+                withObject: None::<&AnyObject>,
+                afterDelay: 0.0f64
+            ];
+        }
+        true
+    }
+
+    fn show_pending() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(view) = container() else {
+            return;
+        };
+        let Some((entries, at, delegate)) = OVERLAY.with_borrow_mut(|overlay| {
+            let (entries, at) = overlay.pending.take()?;
+            Some((entries, at, delegate(overlay, mtm)))
+        }) else {
+            return;
+        };
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        let mut built = Built::default();
+        populate(
+            &menu,
+            &entries,
+            None,
+            &delegate,
+            sel!(menuItem:),
+            &mut built,
+            mtm,
+        );
+        OVERLAY.with_borrow_mut(|overlay| {
+            overlay.context = Some(menu.clone());
+            overlay.built = built;
+        });
+        let location = NSPoint::new(
+            f64::from(f32::from(at.x)),
+            view.bounds().size.height - f64::from(f32::from(at.y)),
+        );
+        menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&view));
+        OVERLAY.with_borrow_mut(|overlay| {
+            if overlay.context.as_ref() == Some(&menu) {
+                overlay.context = None;
+                overlay.built = Built::default();
+            }
+        });
+    }
+
+    pub fn update_menu(id: u32, entries: Vec<Entry>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let found = OVERLAY.with_borrow_mut(|overlay| {
+            if let Some((pending, _)) = overlay.pending.as_mut()
+                && replace(pending, id, &entries)
+            {
+                return None;
+            }
+            let menu = overlay.built.submenus.get(&id)?.clone();
+            let search = overlay
+                .built
+                .searches
+                .iter()
+                .find(|(owner, _)| *owner == menu)
+                .map(|(_, field)| field.clone());
+            Some((menu, search, delegate(overlay, mtm)))
+        });
+        let Some((menu, search, delegate)) = found else {
+            return;
+        };
+        let keep = isize::from(search.is_some());
+        while menu.numberOfItems() > keep {
+            menu.removeItemAtIndex(keep);
+        }
+        let mut built = Built::default();
+        populate(
+            &menu,
+            &entries,
+            search.as_deref(),
+            &delegate,
+            sel!(menuItem:),
+            &mut built,
+            mtm,
+        );
+        OVERLAY.with_borrow_mut(|overlay| {
+            overlay.built.submenus.extend(built.submenus);
+            overlay.built.searches.extend(built.searches);
+        });
+    }
+
+    fn replace(entries: &mut [Entry], id: u32, fresh: &[Entry]) -> bool {
+        entries.iter_mut().any(|entry| match entry {
+            Entry::Submenu {
+                id: Some(found),
+                entries,
+                ..
+            } if *found == id => {
+                *entries = fresh.to_vec();
+                true
+            }
+            Entry::Submenu { entries, .. } => replace(entries, id, fresh),
+            _ => false,
+        })
+    }
+
+    pub fn bar_menu(entries: Vec<Entry>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        OVERLAY.with_borrow_mut(|overlay| {
+            overlay.bar_entries = entries;
+            attach_bar(overlay, mtm);
+        });
+    }
+
+    fn attach_bar(overlay: &mut Overlay, mtm: MainThreadMarker) {
+        let delegate = delegate(overlay, mtm);
+        let menu = overlay
+            .bar
+            .get_or_insert_with(|| {
+                let menu = NSMenu::new(mtm);
+                menu.setAutoenablesItems(false);
+                menu.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+                menu
+            })
+            .clone();
+        let Some(dock) = overlay.dock.as_ref() else {
+            return;
+        };
+        let menu = (!overlay.bar_entries.is_empty()).then_some(menu);
+        unsafe { dock.glass.setMenu(menu.as_deref()) };
+    }
+
+    fn will_open(delegate: &MenuDelegate, menu: &NSMenu) {
+        let field = OVERLAY.with_borrow_mut(|overlay| {
+            if unsafe { menu.supermenu() }.is_none() {
+                overlay.tracking = Some(menu.retain());
+            }
+            overlay
+                .built
+                .searches
+                .iter()
+                .find(|(owner, _)| **owner == *menu)
+                .map(|(_, field)| field.clone())
+        });
+        let Some(field) = field else {
+            return;
+        };
+        let modes = NSArray::from_slice(&[unsafe { NSEventTrackingRunLoopMode }]);
+        unsafe {
+            let _: () = msg_send![
+                delegate,
+                performSelector: sel!(focusField:),
+                withObject: &*field,
+                afterDelay: 0.0f64,
+                inModes: &*modes
+            ];
+        }
+    }
+
+    fn did_close(menu: &NSMenu) {
+        let closed = OVERLAY.with_borrow_mut(|overlay| {
+            if overlay.tracking.as_deref() == Some(menu) {
+                overlay.tracking = None;
+            }
+            overlay.context.as_deref() == Some(menu)
+        });
+        if closed {
+            dispatch(Action::MenuClosed);
+        }
+    }
+
+    fn needs_update(menu: &NSMenu) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some((entries, delegate)) = OVERLAY.with_borrow_mut(|overlay| {
+            (overlay.bar.as_deref() == Some(menu))
+                .then(|| (overlay.bar_entries.clone(), delegate(overlay, mtm)))
+        }) else {
+            return;
+        };
+        menu.removeAllItems();
+        let mut built = Built::default();
+        populate(
+            menu,
+            &entries,
+            None,
+            &delegate,
+            sel!(barMenuItem:),
+            &mut built,
+            mtm,
+        );
+        OVERLAY.with_borrow_mut(|overlay| overlay.built = built);
+    }
+
+    fn key_equivalent(key: &str) -> (String, NSEventModifierFlags) {
+        let mut parts: Vec<&str> = key.split('-').collect();
+        let name = parts.pop().unwrap_or_default();
+        let mut mask = NSEventModifierFlags::empty();
+        for modifier in parts {
+            mask |= match modifier {
+                "alt" => NSEventModifierFlags::Option,
+                "ctrl" => NSEventModifierFlags::Control,
+                "shift" => NSEventModifierFlags::Shift,
+                "cmd" => NSEventModifierFlags::Command,
+                _ => NSEventModifierFlags::empty(),
+            };
+        }
+        let name = match name {
+            "backspace" => "\u{8}".to_owned(),
+            "delete" => "\u{7f}".to_owned(),
+            "enter" => "\r".to_owned(),
+            "space" => " ".to_owned(),
+            name => name.to_lowercase(),
+        };
+        (name, mask)
+    }
+
+    fn menu_item(
+        title: &str,
+        tag: isize,
+        key: Option<&str>,
+        delegate: &MenuDelegate,
+        action: Sel,
+        mtm: MainThreadMarker,
+    ) -> (Retained<NSMenuItem>, NSEventModifierFlags) {
+        let (equivalent, mask) = key
+            .map(key_equivalent)
+            .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &string(title),
+                Some(action),
+                &string(&equivalent),
+            )
+        };
+        item.setKeyEquivalentModifierMask(mask);
+        let receiver: &AnyObject = delegate;
+        unsafe { item.setTarget(Some(receiver)) };
+        item.setTag(tag);
+        (item, mask)
+    }
+
+    fn note(text: &str, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+        let item = NSMenuItem::new(mtm);
+        item.setTitle(&string(text));
+        item.setEnabled(false);
+        item
+    }
+
+    fn search_item(
+        placeholder: &str,
+        delegate: &MenuDelegate,
+        mtm: MainThreadMarker,
+    ) -> (Retained<NSMenuItem>, Retained<NSSearchField>) {
+        let field =
+            NSSearchField::initWithFrame(NSSearchField::alloc(mtm), rect(14., 4., 236., 22.));
+        field.setPlaceholderString(Some(&string(placeholder)));
+        field.setSendsSearchStringImmediately(true);
+        let receiver: &AnyObject = delegate;
+        unsafe {
+            field.setTarget(Some(receiver));
+            field.setAction(Some(sel!(filter:)));
+        }
+        let holder = NSView::initWithFrame(NSView::alloc(mtm), rect(0., 0., 264., 30.));
+        holder.addSubview(&field);
+        let item = NSMenuItem::new(mtm);
+        item.setView(Some(&holder));
+        (item, field)
+    }
+
+    fn populate(
+        menu: &NSMenu,
+        entries: &[Entry],
+        search: Option<&NSSearchField>,
+        delegate: &MenuDelegate,
+        action: Sel,
+        built: &mut Built,
+        mtm: MainThreadMarker,
+    ) {
+        for entry in entries {
+            match entry {
+                Entry::Item {
+                    title,
+                    id,
+                    enabled,
+                    checked,
+                    symbol: image,
+                    key,
+                    alternate,
+                    subtitle,
+                } => {
+                    let (item, mask) = menu_item(title, *id as isize, *key, delegate, action, mtm);
+                    item.setEnabled(*enabled);
+                    if *checked {
+                        item.setState(NSControlStateValueOn);
+                    }
+                    if let Some(name) = image {
+                        item.setImage(symbol(name).as_deref());
+                    }
+                    if let Some(subtitle) = subtitle {
+                        item.setSubtitle(Some(&string(subtitle)));
+                    }
+                    menu.addItem(&item);
+                    if let Some((title, id)) = alternate {
+                        let (alternate, _) =
+                            menu_item(title, *id as isize, *key, delegate, action, mtm);
+                        alternate.setKeyEquivalentModifierMask(mask | NSEventModifierFlags::Option);
+                        alternate.setAlternate(true);
+                        alternate.setEnabled(*enabled);
+                        menu.addItem(&alternate);
+                    }
+                }
+                Entry::Note(text) => menu.addItem(&note(text, mtm)),
+                Entry::Header(text) => {
+                    menu.addItem(&NSMenuItem::sectionHeaderWithTitle(&string(text), mtm))
+                }
+                Entry::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),
+                Entry::Submenu {
+                    title,
+                    symbol: image,
+                    entries,
+                    search,
+                    id,
+                } => {
+                    let item = NSMenuItem::new(mtm);
+                    item.setTitle(&string(title));
+                    if let Some(name) = image {
+                        item.setImage(symbol(name).as_deref());
+                    }
+                    let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &string(title));
+                    submenu.setAutoenablesItems(false);
+                    submenu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
+                    let field = search.map(|placeholder| {
+                        let (item, field) = search_item(placeholder, delegate, mtm);
+                        submenu.addItem(&item);
+                        built.searches.push((submenu.clone(), field.clone()));
+                        field
+                    });
+                    populate(
+                        &submenu,
+                        entries,
+                        field.as_deref(),
+                        delegate,
+                        action,
+                        built,
+                        mtm,
+                    );
+                    item.setSubmenu(Some(&submenu));
+                    menu.addItem(&item);
+                    if let Some(id) = id {
+                        built.submenus.insert(*id, submenu);
+                    }
+                }
+            }
+        }
+        if let Some(field) = search {
+            let empty = note("No matches", mtm);
+            empty.setTag(NO_MATCH);
+            menu.addItem(&empty);
+            apply_filter(menu, &field.stringValue().to_string());
+        }
+    }
+
+    fn filter_field(field: &NSSearchField) {
+        let menu = OVERLAY.with_borrow(|overlay| {
+            overlay
+                .built
+                .searches
+                .iter()
+                .find(|(_, owned)| **owned == *field)
+                .map(|(menu, _)| menu.clone())
+        });
+        if let Some(menu) = menu {
+            apply_filter(&menu, &field.stringValue().to_string());
+        }
+    }
+
+    fn apply_filter(menu: &NSMenu, text: &str) {
+        let text = text.trim().to_lowercase();
+        let mut matched = false;
+        let mut empty = None;
+        for index in 0..menu.numberOfItems() {
+            let Some(item) = menu.itemAtIndex(index) else {
+                continue;
+            };
+            if item.view().is_some() {
+                continue;
+            }
+            if item.tag() == NO_MATCH && !item.isEnabled() {
+                empty = Some(item);
+                continue;
+            }
+            let show = text.is_empty()
+                || !item.isSeparatorItem()
+                    && item.title().to_string().to_lowercase().contains(&text);
+            item.setHidden(!show);
+            matched |= show && !item.isSeparatorItem();
+        }
+        if let Some(empty) = empty {
+            empty.setHidden(matched);
+        }
+    }
+
+    fn describe_item(
+        item: &NSMenuItem,
+        searches: &[(Retained<NSMenu>, Retained<NSSearchField>)],
+    ) -> String {
+        if item.isSeparatorItem() {
+            return "──".to_owned();
+        }
+        if item.view().is_some() {
+            let text = searches
+                .iter()
+                .find(|(menu, _)| unsafe { item.menu() }.as_deref() == Some(&**menu))
+                .map(|(_, field)| field.stringValue().to_string())
+                .unwrap_or_default();
+            return format!("[search “{text}”]");
+        }
+        let mut line = item.title().to_string();
+        let equivalent = item.keyEquivalent().to_string();
+        if !equivalent.is_empty() {
+            let mask = item.keyEquivalentModifierMask();
+            let mut shortcut = String::new();
+            for (flag, glyph) in [
+                (NSEventModifierFlags::Control, "⌃"),
+                (NSEventModifierFlags::Option, "⌥"),
+                (NSEventModifierFlags::Shift, "⇧"),
+                (NSEventModifierFlags::Command, "⌘"),
+            ] {
+                if mask.contains(flag) {
+                    shortcut.push_str(glyph);
+                }
+            }
+            shortcut.push_str(&match equivalent.as_str() {
+                "\u{8}" => "⌫".to_owned(),
+                key => key.to_uppercase(),
+            });
+            line.push_str(&format!("  {shortcut}"));
+        }
+        if let Some(subtitle) = item.subtitle() {
+            line.push_str(&format!("  — {subtitle}"));
+        }
+        for (flag, mark) in [
+            (item.isSectionHeader(), " #header"),
+            (item.isAlternate(), " (⌥)"),
+            (!item.isEnabled(), " [x]"),
+            (item.state() == NSControlStateValueOn, " ✓"),
+            (item.isHidden(), " (hidden)"),
+            (item.submenu().is_some(), " ▸"),
+        ] {
+            if flag {
+                line.push_str(mark);
+            }
+        }
+        line
+    }
+
+    fn tree(menu: &NSMenu, depth: usize, out: &mut Vec<String>) {
+        let searches = OVERLAY.with_borrow(|overlay| overlay.built.searches.clone());
+        for index in 0..menu.numberOfItems() {
+            let Some(item) = menu.itemAtIndex(index) else {
+                continue;
+            };
+            out.push(format!(
+                "{}{index}: {}",
+                "  ".repeat(depth),
+                describe_item(&item, &searches)
+            ));
+            if let Some(submenu) = item.submenu() {
+                tree(&submenu, depth + 1, out);
+            }
+        }
+    }
+
+    pub fn menu_tree() -> Option<String> {
+        let menu = OVERLAY.with_borrow(|overlay| overlay.tracking.clone())?;
+        let mut lines = Vec::new();
+        tree(&menu, 0, &mut lines);
+        Some(lines.join("\n"))
+    }
+
+    pub fn bar_menu_tree() -> Option<String> {
+        let menu = OVERLAY
+            .with_borrow(|overlay| overlay.dock.as_ref().and_then(|dock| dock.glass.menu()))?;
+        needs_update(&menu);
+        let mut lines = Vec::new();
+        tree(&menu, 0, &mut lines);
+        Some(lines.join("\n"))
+    }
+
+    pub fn menu_bar_tree() -> Option<String> {
+        let mtm = MainThreadMarker::new()?;
+        let menu = NSApplication::sharedApplication(mtm).mainMenu()?;
+        let mut lines = Vec::new();
+        tree(&menu, 0, &mut lines);
+        Some(lines.join("\n"))
+    }
+
+    pub fn pick(path: &str) -> bool {
+        let Some(mut menu) = OVERLAY.with_borrow(|overlay| overlay.tracking.clone()) else {
+            return false;
+        };
+        let root = menu.clone();
+        let indices: Vec<isize> = path
+            .split('.')
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        let Some((last, walk)) = indices.split_last() else {
+            return false;
+        };
+        for index in walk {
+            let Some(submenu) = menu.itemAtIndex(*index).and_then(|item| item.submenu()) else {
+                return false;
+            };
+            menu = submenu;
+        }
+        if *last >= menu.numberOfItems() {
+            return false;
+        }
+        menu.performActionForItemAtIndex(*last);
+        root.cancelTracking();
+        true
+    }
+
+    pub fn close_menu() -> bool {
+        let Some(menu) = OVERLAY.with_borrow(|overlay| overlay.tracking.clone()) else {
+            return false;
+        };
+        menu.cancelTracking();
+        true
+    }
+
+    pub fn filter_menu(text: &str) -> bool {
+        let Some((menu, field)) =
+            OVERLAY.with_borrow(|overlay| overlay.built.searches.first().cloned())
+        else {
+            return false;
+        };
+        field.setStringValue(&string(text));
+        apply_filter(&menu, text);
+        true
+    }
+
+    pub fn right_click(x: f64, y: f64) -> bool {
+        appkit::right_click(x, y)
+    }
+
+    pub fn nudge_window(dx: f64, dy: f64) -> bool {
+        appkit::nudge_window(dx, dy)
+    }
+
+    pub fn describe() -> Vec<String> {
+        let mut lines = Vec::new();
+        OVERLAY.with_borrow(|overlay| {
+            let mut keys: Vec<_> = overlay.buttons.keys().copied().collect();
+            keys.sort_unstable();
+            for key in keys {
+                let control = &overlay.buttons[key];
+                let frame = control.button.frame();
+                lines.push(format!(
+                    "button {key} label={:?} prominent={} enabled={} tooltip={:?} hidden={} frame={},{},{},{}",
+                    control.label,
+                    control.prominent,
+                    control.button.isEnabled(),
+                    control.tooltip,
+                    control.button.isHidden(),
+                    frame.origin.x,
+                    frame.origin.y,
+                    frame.size.width,
+                    frame.size.height,
+                ));
+            }
+            lines.push(format!(
+                "bar entries={} attached={}",
+                overlay.bar_entries.len(),
+                overlay
+                    .dock
+                    .as_ref()
+                    .is_some_and(|dock| dock.glass.menu().is_some())
+            ));
+            if let Some(dock) = overlay.dock.as_ref() {
+                lines.push(format!(
+                    "dock elapsed={} slider={:.4}",
+                    dock.elapsed.stringValue(),
+                    dock.slider.doubleValue()
+                ));
+            }
+        });
+        lines
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod native {
-    use gpui::{Bounds, Pixels, Window};
+    use gpui::{Bounds, Pixels, Point, Window};
 
-    use super::{Action, Label, NowPlaying};
+    use super::{Action, ButtonSpec, Entry, NowPlaying};
 
     pub fn available() -> bool {
         false
@@ -640,7 +1421,11 @@ mod native {
 
     pub fn set_handler(_: impl Fn(Action) + 'static) {}
 
-    pub fn button(_: &'static str, _: Label, _: bool, _: Bounds<Pixels>, _: &Window) {}
+    pub fn key(_: &str) -> Option<&'static str> {
+        None
+    }
+
+    pub fn button(_: &'static str, _: &ButtonSpec, _: Bounds<Pixels>, _: &Window) {}
 
     pub fn now_playing(_: &NowPlaying, _: Bounds<Pixels>, _: &Window) {}
 
@@ -649,4 +1434,48 @@ mod native {
     pub fn finish() {}
 
     pub fn progress(_: u32, _: u32) {}
+
+    pub fn popup(_: Vec<Entry>, _: Point<Pixels>) -> bool {
+        false
+    }
+
+    pub fn update_menu(_: u32, _: Vec<Entry>) {}
+
+    pub fn bar_menu(_: Vec<Entry>) {}
+
+    pub fn menu_tree() -> Option<String> {
+        None
+    }
+
+    pub fn bar_menu_tree() -> Option<String> {
+        None
+    }
+
+    pub fn menu_bar_tree() -> Option<String> {
+        None
+    }
+
+    pub fn pick(_: &str) -> bool {
+        false
+    }
+
+    pub fn close_menu() -> bool {
+        false
+    }
+
+    pub fn filter_menu(_: &str) -> bool {
+        false
+    }
+
+    pub fn right_click(_: f64, _: f64) -> bool {
+        false
+    }
+
+    pub fn nudge_window(_: f64, _: f64) -> bool {
+        false
+    }
+
+    pub fn describe() -> Vec<String> {
+        Vec::new()
+    }
 }

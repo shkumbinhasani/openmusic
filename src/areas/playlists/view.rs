@@ -1,10 +1,11 @@
-use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
 
 use crate::{
     app::{OpenMusic, Page},
     ui::{
         Palette,
         components::{artwork, link, skeleton_header, skeleton_rows},
+        menu::{Group, MenuItem, Target},
     },
 };
 
@@ -40,11 +41,17 @@ impl OpenMusic {
             .as_ref()
             .and_then(|url| self.covers.get(url));
         let artist_page = collection.artist_uri.clone().map(Page::Artist);
+        let has_menu = Target::for_uri(loaded).is_some_and(|target| self.has_menu(&target));
+        let header_uri = loaded.clone();
         page.child(
             div()
                 .flex()
                 .items_center()
                 .gap_6()
+                .on_mouse_down(
+                    MouseButton::Right,
+                    self.on_menu(None, move |_| Target::for_uri(&header_uri), cx),
+                )
                 .child(artwork(image, px(184.), px(16.), palette).shadow_lg())
                 .child(
                     div()
@@ -78,10 +85,20 @@ impl OpenMusic {
                             cx,
                         )))
                         .child(
-                            div().mt_3().child(
-                                self.text_control("play-collection", "Play", true, palette, cx)
-                                    .w(px(96.)),
-                            ),
+                            div()
+                                .mt_3()
+                                .child(
+                                    self.text_control("play-collection", "Play", true, palette, cx)
+                                        .w(px(96.)),
+                                )
+                                .when(has_menu, |actions| {
+                                    actions.flex().gap_2().child(self.menu_button(
+                                        "more-collection",
+                                        &collection.name,
+                                        palette,
+                                        cx,
+                                    ))
+                                }),
                         ),
                 ),
         )
@@ -111,4 +128,8 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
+}
+
+pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
 }

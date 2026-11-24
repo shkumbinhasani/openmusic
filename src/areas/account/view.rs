@@ -3,7 +3,10 @@ use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px};
 use super::state::ProfileListKind;
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
-    ui::Palette,
+    ui::{
+        Palette,
+        menu::{Group, MenuItem, Target},
+    },
 };
 
 impl OpenMusic {
@@ -110,4 +113,8 @@ impl OpenMusic {
     ) -> Option<AnyElement> {
         None
     }
+}
+
+pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
 }

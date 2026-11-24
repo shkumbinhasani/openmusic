@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path, time::Duration};
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::{
     Track,
@@ -9,7 +9,10 @@ use spotify_client::{
 };
 
 use super::worker::{Command, Event};
-use crate::app::{OpenMusic, Page};
+use crate::{
+    app::{OpenMusic, Page},
+    menus::Handle,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -181,3 +184,5 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         app.repeat_mode()
     )
 }
+
+pub fn register_actions(_cx: &mut App, _handle: &Handle) {}

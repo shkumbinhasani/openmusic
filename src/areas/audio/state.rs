@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 
 use super::worker::Event;
-use crate::app::OpenMusic;
+use crate::{app::OpenMusic, menus::Handle};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -37,3 +37,5 @@ pub fn debug(
 pub fn state_fragment(_app: &OpenMusic) -> String {
     String::new()
 }
+
+pub fn register_actions(_cx: &mut App, _handle: &Handle) {}

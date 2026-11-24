@@ -1,11 +1,15 @@
 use std::path::Path;
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::account::AccountInfo;
 
 use super::worker::Event;
-use crate::app::{OpenMusic, Page};
+use crate::{
+    app::{OpenMusic, Page},
+    menus::{self, Handle, SignOut},
+    worker,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,4 +92,10 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             .filter(|product| !product.is_empty())
             .unwrap_or("unknown")
     )
+}
+
+pub fn register_actions(cx: &mut App, handle: &Handle) {
+    menus::route(cx, handle, |_: &SignOut, app, _, _| {
+        app.send(worker::Command::SignOut)
+    });
 }

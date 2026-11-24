@@ -1,11 +1,14 @@
 use std::{collections::HashSet, path::Path};
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::{catalog::Playlist, library::Recent};
 
 use super::worker::{Command, Event};
-use crate::app::{OpenMusic, Page};
+use crate::{
+    app::{OpenMusic, Page},
+    menus::Handle,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -73,3 +76,5 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     format!("recents={}", app.recent_contexts().len())
 }
+
+pub fn register_actions(_cx: &mut App, _handle: &Handle) {}

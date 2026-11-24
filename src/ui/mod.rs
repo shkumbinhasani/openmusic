@@ -1,5 +1,6 @@
 pub mod components;
 mod dock;
+pub mod menu;
 mod sidebar;
 
 use gpui::{
@@ -291,6 +292,7 @@ impl OpenMusic {
 impl Render for OpenMusic {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.modal = window.has_active_dialog(cx) || window.has_active_sheet(cx);
+        self.refresh_bar_menu();
         let palette = Palette::for_window(window.appearance());
         let content_width = window.viewport_size().width - px(248.);
         let card_side =
