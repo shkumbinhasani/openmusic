@@ -1,7 +1,9 @@
-mod playback;
-mod remote;
+pub mod playback;
+pub mod remote;
 
 use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -14,7 +16,11 @@ use tokio::sync::{mpsc, watch};
 use crate::{
     api::{Api, Body},
     catalog::Track,
-    connect::{self, Remote},
+    clienttoken,
+    connect::{
+        self, Allowed, ConnectDevice, PlayOptions, Playback, QueueItem, QueueKey, Repeat, Restore,
+        Shuffle, SleepState,
+    },
     dealer::{self, DealerEvent, Message},
     oauth::{self, Token},
     player::Player,
@@ -23,6 +29,16 @@ use playback::Playing;
 
 const CLIENT_VERSION: &str = "harmony:4.67.0-887cfb0c3";
 const GAIA_VOLUME: f32 = 65535.;
+const DEVICE_IDS: &str = "device-ids.json";
+
+pub fn is_push(uri: &str) -> bool {
+    uri.starts_with("hm://collection/")
+        || uri.starts_with("hm://playlist/v2/")
+        || uri.ends_with("social-connect/v2/session_update")
+        || uri.contains("playback-settings/")
+        || uri.contains("spotify:user:attributes:mutated")
+        || uri.starts_with("ap://product-state-update")
+}
 
 #[derive(Clone, Debug)]
 pub enum Control {
@@ -34,6 +50,8 @@ pub enum Control {
         uri: String,
         index: usize,
         track_uri: Option<String>,
+        origin: &'static str,
+        options: PlayOptions,
     },
     SetPlaying(bool),
     Next,
@@ -42,6 +60,8 @@ pub enum Control {
     Volume(u16),
     PlayHere,
     SignOut,
+    Remote(remote::Control),
+    Audio(playback::Control),
 }
 
 #[derive(Clone, Debug)]
@@ -53,6 +73,14 @@ pub struct NowPlaying {
     pub device: Option<String>,
     pub local: bool,
     pub volume: u16,
+    pub context_uri: Option<String>,
+    pub uid: Option<String>,
+    pub provider: Option<String>,
+    pub shuffle: Shuffle,
+    pub repeat: Repeat,
+    pub speed: f32,
+    pub episode: bool,
+    pub sleep: SleepState,
 }
 
 impl Default for NowPlaying {
@@ -65,6 +93,14 @@ impl Default for NowPlaying {
             device: None,
             local: false,
             volume: u16::MAX,
+            context_uri: None,
+            uid: None,
+            provider: None,
+            shuffle: Shuffle::Off,
+            repeat: Repeat::Off,
+            speed: 1.,
+            episode: false,
+            sleep: SleepState::Off,
         }
     }
 }
@@ -88,6 +124,9 @@ impl NowPlaying {
 pub enum Update {
     Ready,
     Now(Box<NowPlaying>),
+    Playback(Box<Playback>),
+    Push(Message),
+    Audio(playback::Update),
     Notice(String),
     RefreshToken(String),
     Ended(Option<String>),
@@ -96,6 +135,7 @@ pub enum Update {
 pub struct Handle {
     controls: mpsc::UnboundedSender<Control>,
     pub api: Api,
+    pub device_id: String,
 }
 
 impl Handle {
@@ -112,12 +152,15 @@ pub fn start(
 ) -> (Handle, mpsc::UnboundedReceiver<Update>) {
     let (controls, control_receiver) = mpsc::unbounded_channel();
     let (updates, update_receiver) = mpsc::unbounded_channel();
+    let device_id = stable_device_id(device_ids_path().as_deref(), &device_name);
     let engine_api = api.clone();
+    let engine_device = device_id.clone();
     tokio::spawn(async move {
         let reason = run(
             http,
             engine_api,
             token,
+            engine_device,
             device_name,
             control_receiver,
             &updates,
@@ -125,7 +168,59 @@ pub fn start(
         .await;
         let _ = updates.send(Update::Ended(reason.err().map(|error| error.to_string())));
     });
-    (Handle { controls, api }, update_receiver)
+    (
+        Handle {
+            controls,
+            api,
+            device_id,
+        },
+        update_receiver,
+    )
+}
+
+fn device_ids_path() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join("Library/Application Support/OpenMusic")
+            .join(DEVICE_IDS),
+    )
+}
+
+fn new_device_id() -> String {
+    (0..20)
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
+        .collect()
+}
+
+fn valid_device_id(id: &str) -> bool {
+    id.len() == 40 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn stable_device_id(path: Option<&Path>, name: &str) -> String {
+    let Some(path) = path else {
+        return new_device_id();
+    };
+    let mut ids: BTreeMap<String, String> = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    if let Some(id) = ids.get(name).filter(|id| valid_device_id(id)) {
+        return id.clone();
+    }
+    let id = new_device_id();
+    ids.insert(name.to_owned(), id.clone());
+    let _ = save_device_ids(path, &ids);
+    id
+}
+
+fn save_device_ids(path: &Path, ids: &BTreeMap<String, String>) -> Result<()> {
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    let temporary = path.with_extension("tmp");
+    clienttoken::write_private(&temporary, &serde_json::to_vec_pretty(ids)?)?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 struct Engine {
@@ -140,12 +235,13 @@ struct Engine {
     volume: u16,
     generation: u64,
     playing: Option<Playing>,
-    remote: Option<Remote>,
+    playback: Option<Playback>,
     certificate: Option<Arc<Vec<u8>>>,
     license_url: Option<(String, Instant)>,
     last_report: Option<Value>,
     volume_due: Option<tokio::time::Instant>,
     published: Option<(PublishedKey, u32, Instant)>,
+    published_playback: Option<PlaybackKey>,
 }
 
 #[derive(PartialEq)]
@@ -158,6 +254,50 @@ struct PublishedKey {
     device: Option<String>,
     local: bool,
     volume: u16,
+    context_uri: Option<String>,
+    uid: Option<String>,
+    provider: Option<String>,
+    shuffle: Shuffle,
+    repeat: Repeat,
+    speed: u32,
+    sleep: SleepState,
+}
+
+#[derive(PartialEq)]
+struct PlaybackKey {
+    active: Option<String>,
+    context_uri: Option<String>,
+    context_title: Option<String>,
+    current: Option<QueueKey>,
+    shuffle: Shuffle,
+    repeat: Repeat,
+    speed: u32,
+    allowed: Allowed,
+    revision: String,
+    devices: Vec<ConnectDevice>,
+    signals: Vec<String>,
+    sleep: SleepState,
+    jam: Option<String>,
+}
+
+impl PlaybackKey {
+    fn of(playback: &Playback) -> Self {
+        Self {
+            active: playback.active_device_id.clone(),
+            context_uri: playback.context_uri.clone(),
+            context_title: playback.context_title.clone(),
+            current: playback.queue.current.as_ref().map(QueueItem::key),
+            shuffle: playback.shuffle,
+            repeat: playback.repeat,
+            speed: playback.playback_speed.to_bits(),
+            allowed: playback.allowed,
+            revision: playback.queue.revision.clone(),
+            devices: playback.devices.clone(),
+            signals: playback.signals.clone(),
+            sleep: playback.sleep_timer,
+            jam: playback.jam_mode.clone(),
+        }
+    }
 }
 
 const POSITION_DRIFT_MS: u32 = 1500;
@@ -166,6 +306,7 @@ async fn run(
     http: reqwest::Client,
     api: Api,
     mut token: Token,
+    device_id: String,
     device_name: String,
     mut controls: mpsc::UnboundedReceiver<Control>,
     updates: &mpsc::UnboundedSender<Update>,
@@ -179,9 +320,6 @@ async fn run(
         http.clone(),
         tokio::runtime::Handle::current(),
     );
-    let device_id: String = (0..20)
-        .map(|_| format!("{:02x}", rand::random::<u8>()))
-        .collect();
     let mut engine = Engine {
         api,
         http: http.clone(),
@@ -194,12 +332,13 @@ async fn run(
         volume: u16::MAX,
         generation: 0,
         playing: None,
-        remote: None,
+        playback: None,
         certificate: None,
         license_url: None,
         last_report: None,
         volume_due: None,
         published: None,
+        published_playback: None,
     };
     let mut refresh_at = tokio::time::Instant::from_std(token.refresh_due());
 
@@ -235,6 +374,9 @@ async fn run(
                         }
                         engine.observe().await;
                         engine.publish(updates);
+                    }
+                    DealerEvent::Message(message) if is_push(&message.uri) => {
+                        let _ = updates.send(Update::Push(message));
                     }
                     DealerEvent::Message(message) => {
                         engine.message(message).await;
@@ -315,16 +457,27 @@ impl Engine {
     fn is_active_here(&self) -> bool {
         self.playing.is_some()
             && self
-                .remote
+                .playback
                 .as_ref()
-                .and_then(|remote| remote.device_id.as_deref())
+                .and_then(|playback| playback.active_device_id.as_deref())
                 .is_none_or(|active| active == self.device_id)
     }
 
     fn remote_target(&self) -> Option<String> {
-        let remote = self.remote.as_ref()?;
-        let active = remote.device_id.clone()?;
+        let playback = self.playback.as_ref()?;
+        let active = playback.active_device_id.clone()?;
         (active != self.device_id).then_some(active)
+    }
+
+    fn playback_here(&self) -> Option<&Playback> {
+        self.playback
+            .as_ref()
+            .filter(|playback| playback.active_device_id.as_deref() == Some(&self.device_id))
+    }
+
+    async fn send_command(&mut self, target: &str, command: Value) -> Result<Option<String>> {
+        let (to, alias) = connect::device_target(target);
+        connect::command(&self.api, &self.device_id, to, command, alias).await
     }
 
     async fn register(&mut self) -> Result<()> {
@@ -387,14 +540,35 @@ impl Engine {
             return;
         };
         if let Ok(cluster) = connect::observe(&self.api, &self.device_id, &connection_id).await {
-            self.remote = Some(connect::remote_state(&cluster));
+            self.playback = Some(connect::playback(&cluster, &self.device_id));
         }
     }
 
     fn now(&self) -> NowPlaying {
         if let Some(playing) = self.playing.as_ref().filter(|_| self.is_active_here()) {
+            let track = playing.metadata();
+            let here = self.playback_here();
+            let (shuffle, repeat) = here
+                .map(|playback| (playback.shuffle, playback.repeat))
+                .unwrap_or_else(|| playing.options());
+            let provider = here
+                .filter(|playback| {
+                    playback.track.as_ref().map(|track| &track.uri)
+                        == track.as_ref().map(|track| &track.uri)
+                })
+                .and_then(|playback| playback.provider.clone());
             return NowPlaying {
-                track: playing.metadata(),
+                context_uri: here
+                    .and_then(|playback| playback.context_uri.clone())
+                    .or_else(|| playing.context_uri()),
+                uid: track.as_ref().and_then(|track| track.uid.clone()),
+                provider,
+                shuffle,
+                repeat,
+                speed: 1.,
+                episode: track.as_ref().is_some_and(is_episode),
+                sleep: here.map_or(SleepState::Off, |playback| playback.sleep_timer),
+                track,
                 playing: !playing.paused,
                 position_ms: playing.position_ms,
                 observed: Instant::now(),
@@ -403,21 +577,36 @@ impl Engine {
                 volume: self.volume,
             };
         }
-        let Some(remote) = &self.remote else {
+        let Some(playback) = &self.playback else {
             return NowPlaying::default();
         };
         NowPlaying {
-            track: remote.track.clone(),
-            playing: remote.playing,
-            position_ms: remote.position_ms,
+            track: playback.track.clone(),
+            playing: playback.playing,
+            position_ms: playback.position_ms,
             observed: Instant::now(),
-            device: remote.device_name.clone(),
+            device: playback.active_device_name.clone(),
             local: false,
-            volume: remote.volume.unwrap_or(u16::MAX),
+            volume: playback.active_volume.unwrap_or(u16::MAX),
+            context_uri: playback.context_uri.clone(),
+            uid: playback.track.as_ref().and_then(|track| track.uid.clone()),
+            provider: playback.provider.clone(),
+            shuffle: playback.shuffle,
+            repeat: playback.repeat,
+            speed: playback.playback_speed,
+            episode: playback.track.as_ref().is_some_and(is_episode),
+            sleep: playback.sleep_timer,
         }
     }
 
     fn publish(&mut self, updates: &mpsc::UnboundedSender<Update>) {
+        if let Some(playback) = &self.playback {
+            let key = PlaybackKey::of(playback);
+            if self.published_playback.as_ref() != Some(&key) {
+                self.published_playback = Some(key);
+                let _ = updates.send(Update::Playback(Box::new(playback.clone())));
+            }
+        }
         let now = self.now();
         let key = PublishedKey {
             track: now.track.as_ref().map(|track| track.uri.clone()),
@@ -428,6 +617,13 @@ impl Engine {
             device: now.device.clone(),
             local: now.local,
             volume: now.volume,
+            context_uri: now.context_uri.clone(),
+            uid: now.uid.clone(),
+            provider: now.provider.clone(),
+            shuffle: now.shuffle,
+            repeat: now.repeat,
+            speed: now.speed.to_bits(),
+            sleep: now.sleep,
         };
         if let Some((last, position, at)) = &self.published {
             let elapsed = if now.playing {
@@ -447,13 +643,13 @@ impl Engine {
     async fn message(&mut self, message: Message) {
         if message.uri.starts_with(connect::CLUSTER_URI) {
             if let Some(cluster) = connect::cluster_from(&message) {
-                let remote = connect::remote_state(&cluster);
-                let moved_away = remote
-                    .device_id
+                let playback = connect::playback(&cluster, &self.device_id);
+                let moved_away = playback
+                    .active_device_id
                     .as_deref()
                     .is_some_and(|active| active != self.device_id)
                     && self.playing.is_some();
-                self.remote = Some(remote);
+                self.playback = Some(playback);
                 if moved_away {
                     self.player.stop();
                     self.playing = None;
@@ -494,6 +690,11 @@ impl Engine {
     }
 
     async fn control(&mut self, control: Control) -> Result<()> {
+        let control = match control {
+            Control::Remote(control) => return self.remote_control(control).await,
+            Control::Audio(control) => return self.audio(control).await,
+            control => control,
+        };
         if let Some(target) = self.remote_target().filter(|_| {
             !matches!(
                 control,
@@ -502,34 +703,34 @@ impl Engine {
         }) {
             return self.remote(target, control).await;
         }
+        let own = self.device_id.clone();
         match control {
             Control::PlayTracks { uris, index } => {
-                connect::command(
-                    &self.api,
-                    &self.device_id,
-                    &self.device_id,
-                    connect::play_command(&uris, index, 0),
-                )
-                .await
-                .context("Spotify didn’t start playback.")?;
+                self.send_command(&own, connect::play_command(&uris, index, 0))
+                    .await
+                    .context("Spotify didn’t start playback.")?;
             }
             Control::PlayContext {
                 uri,
                 index,
                 track_uri,
+                origin,
+                options,
             } => {
-                connect::command(
-                    &self.api,
-                    &self.device_id,
-                    &self.device_id,
-                    connect::play_context_command(&uri, index, track_uri.as_deref()),
-                )
-                .await
-                .context("Spotify didn’t start playback.")?;
+                let command = connect::play_context_command(
+                    &uri,
+                    index,
+                    track_uri.as_deref(),
+                    origin,
+                    &options,
+                );
+                self.send_command(&own, command)
+                    .await
+                    .context("Spotify didn’t start playback.")?;
             }
             Control::PlayHere => {
                 if let Some(target) = self.remote_target() {
-                    connect::transfer(&self.api, &target, &self.device_id)
+                    connect::transfer(&self.api, &target, &own, Restore::Resume, None)
                         .await
                         .context("Spotify didn’t move playback to OpenMusic.")?;
                 } else if self.playing.is_none() {
@@ -576,26 +777,92 @@ impl Engine {
                 self.player.set_volume(f32::from(volume) / GAIA_VOLUME);
                 self.volume_due = Some(tokio::time::Instant::now() + Duration::from_secs(1));
             }
-            Control::SignOut => {}
+            Control::SignOut | Control::Remote(_) | Control::Audio(_) => {}
         }
         Ok(())
     }
 
     async fn resume_last(&mut self) -> Result<()> {
-        let Some(remote) = &self.remote else {
+        let Some(playback) = &self.playback else {
             return Ok(());
         };
-        let Some(track) = remote.track.clone() else {
+        let Some(track) = playback.track.clone() else {
             return Ok(());
         };
-        let position = remote.position_ms;
-        connect::command(
-            &self.api,
-            &self.device_id,
-            &self.device_id,
-            connect::play_command(&[track.uri], 0, position),
-        )
-        .await
-        .context("Spotify didn’t start playback.")
+        let position = playback.position_ms;
+        let own = self.device_id.clone();
+        self.send_command(&own, connect::play_command(&[track.uri], 0, position))
+            .await
+            .context("Spotify didn’t start playback.")?;
+        Ok(())
+    }
+}
+
+fn is_episode(track: &Track) -> bool {
+    track.uri.starts_with("spotify:episode:")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routes_pushes_by_topic() {
+        for uri in [
+            "hm://collection/collection/someone/json",
+            "hm://collection/artist/someone/json",
+            "hm://playlist/v2/user/someone/rootlist",
+            "hm://playlist/v2/playlist/37i9dQZF1DXcBWIGoYBM5M",
+            "hm://social-connect/v2/session_update",
+            "social-connect/v2/session_update",
+            "hm://playback-settings/user-settings-update",
+            "playback-settings/content-settings-update",
+            "spotify:user:attributes:mutated",
+            "hm://spotify:user:attributes:mutated",
+            "ap://product-state-update",
+        ] {
+            assert!(is_push(uri), "{uri}");
+        }
+        for uri in [
+            "hm://connect-state/v1/cluster",
+            "hm://track-playback/v1/command",
+            "hm://play-token/lost",
+            "hm://pusher/v1/connections/abc",
+            "hm://social-connect/v2/session_update/extra",
+        ] {
+            assert!(!is_push(uri), "{uri}");
+        }
+    }
+
+    #[test]
+    fn keeps_one_device_id_per_name() {
+        let directory =
+            std::env::temp_dir().join(format!("openmusic-device-ids-{}", new_device_id()));
+        let path = directory.join(DEVICE_IDS);
+        let first = stable_device_id(Some(&path), "OpenMusic");
+        assert!(valid_device_id(&first));
+        assert_eq!(stable_device_id(Some(&path), "OpenMusic"), first);
+        let other = stable_device_id(Some(&path), "OpenMusic Dev");
+        assert_ne!(other, first);
+        assert_eq!(stable_device_id(Some(&path), "OpenMusic Dev"), other);
+        let saved: BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.len(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::write(&path, b"{\"OpenMusic\":\"short\"}").unwrap();
+        let replaced = stable_device_id(Some(&path), "OpenMusic");
+        assert!(valid_device_id(&replaced));
+        assert_ne!(replaced, first);
+        assert_eq!(stable_device_id(Some(&path), "OpenMusic"), replaced);
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_ne!(
+            stable_device_id(None, "OpenMusic"),
+            stable_device_id(None, "OpenMusic")
+        );
     }
 }

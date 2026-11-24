@@ -3,16 +3,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use reqwest::Method;
 use serde_json::{Value, json};
 
 use super::{Engine, GAIA_VOLUME};
 use crate::{
     api::Body,
-    catalog::{Track, image_url},
+    catalog::{LocalTrack, Track, image_url},
+    connect::{Repeat, Shuffle},
     player::{Media, PlayerEvent},
 };
+
+#[derive(Clone, Debug)]
+pub enum Control {
+    PlayLocal {
+        tracks: Vec<LocalTrack>,
+        index: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum Update {}
 
 pub(super) struct Playing {
     machine: Value,
@@ -97,9 +109,47 @@ impl Playing {
         let index = transition["state_index"].as_u64()? as usize;
         Some((index, transition["paused"].as_bool().unwrap_or(false)))
     }
+
+    pub(super) fn context_uri(&self) -> Option<String> {
+        self.track()?["metadata"]["context_uri"]
+            .as_str()
+            .filter(|uri| !uri.is_empty())
+            .map(str::to_owned)
+    }
+
+    pub(super) fn options(&self) -> (Shuffle, Repeat) {
+        let options = self
+            .state()
+            .map(|state| &state["options"])
+            .filter(|options| options.is_object())
+            .unwrap_or(&self.machine["attributes"]["options"]);
+        let flag = |key: &str| options[key].as_bool().unwrap_or(false);
+        let shuffle = match (
+            flag("shuffling_context"),
+            options["modes"]["context_enhancement"].as_str(),
+        ) {
+            (true, Some("RECOMMENDATION")) => Shuffle::Smart,
+            (true, _) => Shuffle::On,
+            _ => Shuffle::Off,
+        };
+        let repeat = if flag("repeating_track") {
+            Repeat::Track
+        } else if flag("repeating_context") {
+            Repeat::Context
+        } else {
+            Repeat::Off
+        };
+        (shuffle, repeat)
+    }
 }
 
 impl Engine {
+    pub(super) async fn audio(&mut self, control: Control) -> Result<()> {
+        match control {
+            Control::PlayLocal { .. } => bail!("Local files can’t play yet."),
+        }
+    }
+
     pub(super) fn state_payload(&self, state_ref: Option<Value>, source: &str) -> Value {
         let sub_state = self.playing.as_ref().map(|playing| {
             json!({

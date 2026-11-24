@@ -58,6 +58,16 @@ impl Track {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LocalTrack {
+    pub path: std::path::PathBuf,
+    pub uri: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: u32,
+}
+
 pub fn image_url(id: &str) -> String {
     if id.starts_with("https://") {
         return id.to_owned();

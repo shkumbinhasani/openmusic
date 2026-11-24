@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use spotify_client::{
     Api, Track, catalog,
     catalog::{Artist, Collection, Lyrics, Playlist},
+    connect::{self, PlayOptions},
     engine::{self, Control, NowPlaying, Update},
     oauth::{self, Token},
 };
@@ -279,7 +280,13 @@ async fn connected(
                         pages.spawn(playlists::worker::collection(handle.api.clone(), uri));
                     }
                     Command::PlayContext { uri, index, track_uri } => {
-                        handle.send(Control::PlayContext { uri, index, track_uri });
+                        handle.send(Control::PlayContext {
+                            uri,
+                            index,
+                            track_uri,
+                            origin: connect::ORIGIN,
+                            options: PlayOptions::default(),
+                        });
                     }
                     Command::PlayTracks { tracks, index } => {
                         handle.send(Control::PlayTracks { uris: tracks, index });
@@ -321,6 +328,8 @@ async fn connected(
                         }
                         let _ = events.send(Event::NowPlaying(*now));
                     }
+                    Update::Playback(_) | Update::Push(_) => {}
+                    Update::Audio(update) => match update {},
                     Update::Notice(message) => {
                         let _ = events.send(Event::Notice(message));
                     }

@@ -298,7 +298,7 @@ fn save(path: &Path, grant: &Grant) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::{
         io::Write,
         os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -316,7 +316,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes)?;
     Ok(())
 }

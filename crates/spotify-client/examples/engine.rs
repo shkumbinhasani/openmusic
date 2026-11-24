@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use spotify_client::{
-    Api, catalog,
+    Api, catalog, connect,
     engine::{self, Control, Update},
     oauth,
 };
@@ -72,6 +72,8 @@ async fn scenario() -> Result<()> {
                             uri: context,
                             index: 2,
                             track_uri: None,
+                            origin: connect::ORIGIN,
+                            options: connect::PlayOptions::default(),
                         });
                     } else {
                         let uris: Vec<String> = found
@@ -141,6 +143,21 @@ async fn scenario() -> Result<()> {
                     handle.send(Control::SignOut);
                 }
             }
+            Update::Playback(playback) => println!(
+                "[{:>4.1}s] playback: active={:?} context={:?} shuffle={:?} repeat={:?} devices={}",
+                started.elapsed().as_secs_f32(),
+                playback.active_device_name,
+                playback.context_uri,
+                playback.shuffle,
+                playback.repeat,
+                playback.devices.len()
+            ),
+            Update::Push(message) => println!(
+                "[{:>4.1}s] push: {}",
+                started.elapsed().as_secs_f32(),
+                message.uri
+            ),
+            Update::Audio(update) => match update {},
             Update::Notice(message) => println!(
                 "[{:>4.1}s] notice: {message}",
                 started.elapsed().as_secs_f32()
