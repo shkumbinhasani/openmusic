@@ -83,6 +83,12 @@ impl Playing {
                 .and_then(|author| author["uri"].as_str())
                 .map(str::to_owned),
             album_uri: metadata["group_uri"].as_str().map(str::to_owned),
+            uid: self
+                .state()
+                .and_then(|state| state["track_uid"].as_str())
+                .filter(|uid| !uid.is_empty())
+                .map(str::to_owned),
+            ..Track::default()
         })
     }
 

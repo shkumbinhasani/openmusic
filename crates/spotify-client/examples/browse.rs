@@ -35,7 +35,8 @@ async fn main() -> Result<()> {
             .map(|track| (&track.title, &track.artist_uri))
     );
 
-    let playlists = catalog::playlists(&api).await?;
+    let user = catalog::username(&api).await?;
+    let playlists = catalog::playlists(&api, &user).await?;
     let with_cover = playlists
         .iter()
         .filter(|playlist| playlist.cover.is_some())

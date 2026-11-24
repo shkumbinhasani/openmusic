@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::catalog::{Track, strip_tags};
+use crate::catalog::{Link, Track, strip_tags};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
@@ -121,6 +121,29 @@ fn artist_names(data: &Value) -> Vec<String> {
     if found.is_empty() {
         found = names(&data["firstArtist"]["items"], &["profile", "name"]);
         found.extend(names(&data["otherArtists"]["items"], &["profile", "name"]));
+    }
+    found
+}
+
+fn links(items: &Value) -> Vec<Link> {
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(Link {
+                uri: text(&item["uri"])?.to_owned(),
+                name: text(&item["profile"]["name"])?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn artist_links(data: &Value) -> Vec<Link> {
+    let mut found = links(&data["artists"]["items"]);
+    if found.is_empty() {
+        found = links(&data["firstArtist"]["items"]);
+        found.extend(links(&data["otherArtists"]["items"]));
     }
     found
 }
@@ -390,20 +413,29 @@ pub fn track(value: &Value) -> Option<Track> {
                 cover: pick_image(&album["coverArt"]["sources"], CARD_IMAGE),
                 artist_uri: first_artist_uri(data),
                 album_uri: text(&album["uri"]).map(str::to_owned),
+                artists: artist_links(data),
+                explicit: explicit(data),
                 uri,
+                ..Track::default()
             })
         }
         "Episode" => {
             let show = &data["podcastV2"]["data"];
+            let show_link = text(&show["uri"])
+                .zip(text(&show["name"]))
+                .map(|(uri, name)| Link {
+                    uri: uri.to_owned(),
+                    name: name.to_owned(),
+                });
             Some(Track {
                 title,
                 artist: text(&show["name"]).unwrap_or_default().to_owned(),
-                album: String::new(),
                 duration_ms: duration_ms(data),
                 cover: pick_image(&data["coverArt"]["sources"], CARD_IMAGE),
-                artist_uri: None,
-                album_uri: None,
+                artists: show_link.into_iter().collect(),
+                explicit: explicit(data),
                 uri,
+                ..Track::default()
             })
         }
         _ => None,
@@ -486,6 +518,12 @@ mod tests {
                 cover: Some("https://i.scdn.co/image/creep-300".into()),
                 artist_uri: Some("spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".into()),
                 album_uri: Some("spotify:album:3gBVdu4a1MMJVMy6vwPEb8".into()),
+                artists: vec![Link {
+                    uri: "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".into(),
+                    name: "Radiohead".into(),
+                }],
+                explicit: true,
+                ..Track::default()
             }
         );
     }
@@ -506,6 +544,19 @@ mod tests {
             track.artist_uri.as_deref(),
             Some("spotify:artist:5Pwc4xIPtQLFEnJriah9YJ")
         );
+        let artists: Vec<(&str, &str)> = track
+            .artists
+            .iter()
+            .map(|link| (link.uri.as_str(), link.name.as_str()))
+            .collect();
+        assert_eq!(
+            artists,
+            [
+                ("spotify:artist:5Pwc4xIPtQLFEnJriah9YJ", "OneRepublic"),
+                ("spotify:artist:x", "Guest")
+            ]
+        );
+        assert!(!track.explicit);
     }
 
     #[test]
@@ -603,6 +654,13 @@ mod tests {
         assert_eq!(
             (track.artist.as_str(), track.duration_ms),
             ("Show", 3_611_237)
+        );
+        assert_eq!(
+            track.artists,
+            [Link {
+                uri: "spotify:show:5CfCWKI5pZ28U0uOzXkDHe".into(),
+                name: "Show".into(),
+            }]
         );
 
         let book = json!({"__typename": "AudiobookResponseWrapper", "data": {

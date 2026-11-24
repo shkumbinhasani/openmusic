@@ -16,15 +16,18 @@ pub struct Mix {
 }
 
 pub async fn search(api: Api, query: String) -> Event {
-    match catalog::parse_track_input(&query) {
+    match catalog::parse_link(&query) {
         Err(error) => Event::SearchDone(Err(error.to_string())),
-        Ok(Some(uri)) => Event::DirectTrack(
+        Ok(Some(uri)) if uri.starts_with("spotify:track:") => Event::DirectTrack(
             catalog::tracks(&api, &[uri])
                 .await
                 .ok()
                 .and_then(|mut tracks| tracks.pop())
                 .ok_or_else(|| "Could not load this song from Spotify.".to_owned()),
         ),
+        Ok(Some(_)) => Event::SearchDone(Err(
+            "Paste a Spotify song link. Albums and playlists aren’t supported yet.".to_owned(),
+        )),
         Ok(None) => Event::SearchDone(
             catalog::search(&api, &query)
                 .await
@@ -63,25 +66,4 @@ async fn mix(api: &Api, seed: &Track) -> Option<Mix> {
         seed: seed.title.clone(),
         tracks,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use spotify_client::catalog::parse_track_input;
-
-    #[test]
-    fn distinguishes_tracks_from_search_queries() {
-        let id = "4uLU6hMCjMI75M1A2tKUQC";
-        let uri = format!("spotify:track:{id}");
-        for input in [
-            uri.clone(),
-            format!("https://open.spotify.com/track/{id}?si=123"),
-            format!("https://open.spotify.com/intl-de/track/{id}"),
-        ] {
-            assert_eq!(parse_track_input(&input).unwrap().unwrap(), uri);
-        }
-        assert!(parse_track_input("Nina Simone").unwrap().is_none());
-        assert!(parse_track_input("spotify:track:broken").is_err());
-        assert!(parse_track_input("https://open.spotify.com/album/abc").is_err());
-    }
 }

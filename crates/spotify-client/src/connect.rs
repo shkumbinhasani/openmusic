@@ -113,6 +113,8 @@ pub fn remote_state(cluster: &Cluster) -> Remote {
                 .map(|image| image_url(image)),
             artist_uri: (!provided.artist_uri.is_empty()).then(|| provided.artist_uri.clone()),
             album_uri: (!provided.album_uri.is_empty()).then(|| provided.album_uri.clone()),
+            uid: (!provided.uid.is_empty()).then(|| provided.uid.clone()),
+            ..Track::default()
         })
     });
     Remote {

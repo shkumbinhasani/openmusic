@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use prost::Message;
 use reqwest::Method;
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use spotify_proto::{
     extendedmetadata::{
@@ -13,9 +13,15 @@ use spotify_proto::{
     metadata::{self, ImageGroup},
 };
 
-use crate::api::Api;
+use crate::api::{Api, Body};
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Link {
+    pub uri: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Track {
     pub uri: String,
     pub title: String,
@@ -25,19 +31,21 @@ pub struct Track {
     pub cover: Option<String>,
     pub artist_uri: Option<String>,
     pub album_uri: Option<String>,
+    #[serde(default)]
+    pub artists: Vec<Link>,
+    #[serde(default)]
+    pub uid: Option<String>,
+    #[serde(default)]
+    pub added_at: Option<i64>,
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 impl Track {
     pub fn placeholder(uri: &str) -> Self {
         Self {
             uri: uri.to_owned(),
-            title: String::new(),
-            artist: String::new(),
-            album: String::new(),
-            duration_ms: 0,
-            cover: None,
-            artist_uri: None,
-            album_uri: None,
+            ..Self::default()
         }
     }
 
@@ -97,7 +105,7 @@ fn largest(images: &[metadata::Image], target: i32) -> Option<String> {
         .map(|(_, id)| image_url(&hex(id)))
 }
 
-async fn extended(
+pub(crate) async fn extended(
     api: &Api,
     entries: &[(String, ExtensionKind)],
 ) -> Result<Vec<(String, Vec<u8>)>> {
@@ -133,33 +141,131 @@ async fn extended(
         .collect())
 }
 
-pub fn parse_track_input(input: &str) -> Result<Option<String>> {
+const LINK_KINDS: [&str; 6] = ["track", "album", "playlist", "artist", "show", "episode"];
+
+fn base62_id(id: &str) -> bool {
+    id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn plain(part: &str) -> bool {
+    !part.is_empty() && !part.contains(char::is_whitespace)
+}
+
+fn link_uri(parts: &[&str]) -> Result<String> {
+    match parts {
+        [kind, id] if LINK_KINDS.contains(kind) => {
+            if !base62_id(id) {
+                anyhow::bail!("The Spotify {kind} ID is invalid.");
+            }
+            Ok(format!("spotify:{kind}:{id}"))
+        }
+        [kind] if LINK_KINDS.contains(kind) => {
+            anyhow::bail!("The Spotify {kind} link is missing its ID.")
+        }
+        ["user", user, "playlist", id] if plain(user) => link_uri(&["playlist", id]),
+        ["user", user] if plain(user) => Ok(format!("spotify:user:{user}")),
+        ["genre", id] if base62_id(id) => Ok(format!("spotify:page:{id}")),
+        ["genre", id] if plain(id) => Ok(format!("spotify:genre:{id}")),
+        ["page", id] if plain(id) => Ok(format!("spotify:page:{id}")),
+        ["socialsession", token] if plain(token) => Ok(format!("spotify:socialsession:{token}")),
+        _ => anyhow::bail!("OpenMusic can’t open this kind of Spotify link."),
+    }
+}
+
+pub fn parse_link(input: &str) -> Result<Option<String>> {
     let input = input.trim();
-    let id = if let Some(id) = input.strip_prefix("spotify:track:") {
-        id.to_owned()
-    } else if input.starts_with("spotify:") {
-        anyhow::bail!("Paste a Spotify song link. Albums and playlists aren’t supported yet.");
+    let parts: Vec<String> = if let Some(rest) = input.strip_prefix("spotify:") {
+        rest.split(':').map(str::to_owned).collect()
     } else if let Ok(url) = url::Url::parse(input)
         && url.host_str() == Some("open.spotify.com")
     {
-        let mut segments = url
-            .path_segments()
-            .ok_or_else(|| anyhow::anyhow!("Enter a Spotify song link."))?
-            .filter(|segment| !segment.starts_with("intl-"));
-        if segments.next() != Some("track") {
-            anyhow::bail!("Paste a Spotify song link. Albums and playlists aren’t supported yet.");
-        }
-        segments
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("The Spotify song link is missing its track ID."))?
-            .to_owned()
+        url.path_segments()
+            .into_iter()
+            .flatten()
+            .filter(|segment| {
+                !segment.is_empty() && !segment.starts_with("intl-") && *segment != "embed"
+            })
+            .map(str::to_owned)
+            .collect()
     } else {
         return Ok(None);
     };
-    if id.len() != 22 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        anyhow::bail!("The Spotify track ID is invalid.");
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    link_uri(&parts).map(Some)
+}
+
+fn show_link(show: Option<&metadata::Show>) -> Option<Link> {
+    let show = show?;
+    Some(Link {
+        uri: uri_from_gid("show", show.gid.as_deref()?)?,
+        name: show.name.clone()?,
+    })
+}
+
+fn episode_track(uri: String, episode: metadata::Episode) -> Track {
+    Track {
+        title: episode.name.clone().unwrap_or_default(),
+        artist: episode
+            .show
+            .as_ref()
+            .and_then(|show| show.name.clone())
+            .unwrap_or_default(),
+        duration_ms: episode.duration.unwrap_or_default().max(0) as u32,
+        cover: cover(episode.cover_image.as_ref()),
+        artists: show_link(episode.show.as_ref()).into_iter().collect(),
+        explicit: episode.explicit.unwrap_or_default(),
+        uri,
+        ..Track::default()
     }
-    Ok(Some(format!("spotify:track:{id}")))
+}
+
+fn music_track(uri: String, track: metadata::Track) -> Track {
+    let album = track.album.as_ref();
+    Track {
+        title: track.name.clone().unwrap_or_default(),
+        artist: track
+            .artist
+            .iter()
+            .filter_map(|artist| artist.name.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
+        album: album
+            .and_then(|album| album.name.clone())
+            .unwrap_or_default(),
+        duration_ms: track.duration.unwrap_or_default().max(0) as u32,
+        cover: cover(album.and_then(|album| album.cover_group.as_ref())),
+        artist_uri: track
+            .artist
+            .first()
+            .and_then(|artist| artist.gid.as_deref())
+            .and_then(|gid| uri_from_gid("artist", gid)),
+        album_uri: album
+            .and_then(|album| album.gid.as_deref())
+            .and_then(|gid| uri_from_gid("album", gid)),
+        artists: track
+            .artist
+            .iter()
+            .filter_map(|artist| {
+                Some(Link {
+                    uri: uri_from_gid("artist", artist.gid.as_deref()?)?,
+                    name: artist.name.clone()?,
+                })
+            })
+            .collect(),
+        explicit: track.explicit.unwrap_or_default(),
+        uri,
+        ..Track::default()
+    }
+}
+
+fn decode_track(uri: String, bytes: &[u8]) -> Option<Track> {
+    if uri.starts_with("spotify:episode:") {
+        let episode = metadata::Episode::decode(bytes).ok()?;
+        Some(episode_track(uri, episode))
+    } else {
+        let track = metadata::Track::decode(bytes).ok()?;
+        Some(music_track(uri, track))
+    }
 }
 
 pub async fn tracks(api: &Api, uris: &[String]) -> Result<Vec<Track>> {
@@ -177,57 +283,7 @@ pub async fn tracks(api: &Api, uris: &[String]) -> Result<Vec<Track>> {
             })
             .collect();
         for (uri, value) in extended(api, &entries).await? {
-            if uri.starts_with("spotify:episode:") {
-                if let Ok(episode) = metadata::Episode::decode(value.as_slice()) {
-                    found.push(Track {
-                        title: episode.name.unwrap_or_default(),
-                        artist: episode
-                            .show
-                            .as_ref()
-                            .and_then(|show| show.name.clone())
-                            .unwrap_or_default(),
-                        album: String::new(),
-                        duration_ms: episode.duration.unwrap_or_default().max(0) as u32,
-                        cover: cover(episode.cover_image.as_ref()),
-                        artist_uri: None,
-                        album_uri: None,
-                        uri,
-                    });
-                }
-            } else if let Ok(track) = metadata::Track::decode(value.as_slice()) {
-                found.push(Track {
-                    title: track.name.unwrap_or_default(),
-                    artist: track
-                        .artist
-                        .iter()
-                        .filter_map(|artist| artist.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    album: track
-                        .album
-                        .as_ref()
-                        .and_then(|album| album.name.clone())
-                        .unwrap_or_default(),
-                    duration_ms: track.duration.unwrap_or_default().max(0) as u32,
-                    cover: cover(
-                        track
-                            .album
-                            .as_ref()
-                            .and_then(|album| album.cover_group.as_ref()),
-                    ),
-                    artist_uri: track
-                        .artist
-                        .first()
-                        .and_then(|artist| artist.gid.as_deref())
-                        .and_then(|gid| uri_from_gid("artist", gid)),
-                    album_uri: track
-                        .album
-                        .as_ref()
-                        .and_then(|album| album.gid.as_deref())
-                        .and_then(|gid| uri_from_gid("album", gid)),
-                    uri,
-                });
-            }
+            found.extend(decode_track(uri, &value));
         }
     }
     let order: Vec<&String> = uris.iter().collect();
@@ -397,6 +453,32 @@ pub struct Playlist {
     pub description: String,
     pub cover: Option<String>,
     pub length: u32,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub view: bool,
+    pub edit_items: bool,
+    pub edit_metadata: bool,
+    pub administrate: bool,
+    pub publish: bool,
+}
+
+impl Capabilities {
+    pub fn from_playlist(capabilities: &Value) -> Self {
+        let flag = |key: &str| capabilities[key].as_bool().unwrap_or_default();
+        Self {
+            view: flag("canView"),
+            edit_items: flag("canEditItems"),
+            edit_metadata: flag("canEditMetadata"),
+            administrate: flag("canAdministratePermissions"),
+            publish: flag("canPublishToProfile"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -408,6 +490,19 @@ pub struct Collection {
     pub cover: Option<String>,
     pub artist_uri: Option<String>,
     pub tracks: Vec<Track>,
+    pub owner: Option<String>,
+    pub description: String,
+    pub revision: Option<String>,
+    pub format: Option<String>,
+    pub capabilities: Capabilities,
+    pub metadata: HashMap<String, String>,
+}
+
+fn filled(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 fn playlist_cover(attributes: &Value) -> Option<String> {
@@ -430,7 +525,7 @@ fn playlist_cover(attributes: &Value) -> Option<String> {
     Some(image_url(&hex(&bytes)))
 }
 
-async fn username(api: &Api) -> Result<String> {
+pub async fn username(api: &Api) -> Result<String> {
     let value: Value = api
         .get_json("/context-resolve/v1/spotify:collection:tracks")
         .await?;
@@ -441,8 +536,7 @@ async fn username(api: &Api) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Spotify did not report your account."))
 }
 
-pub async fn playlists(api: &Api) -> Result<Vec<Playlist>> {
-    let user = username(api).await?;
+pub async fn playlists(api: &Api, user: &str) -> Result<Vec<Playlist>> {
     let value: Value = api
         .get_json(&format!(
             "/playlist/v2/user/{user}/rootlist?decorate=revision,attributes,length,owner&from=0&length=200"
@@ -469,6 +563,8 @@ pub async fn playlists(api: &Api) -> Result<Vec<Playlist>> {
                 description: strip_tags(attributes["description"].as_str().unwrap_or_default()),
                 cover: playlist_cover(attributes),
                 length: meta["length"].as_u64().unwrap_or_default() as u32,
+                format: filled(&attributes["format"]),
+                owner: filled(&meta["ownerUsername"]),
             })
         })
         .collect())
@@ -479,11 +575,12 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
     if uri.starts_with("spotify:playlist:") {
         let value: Value = api
             .get_json(&format!(
-                "/playlist/v2/playlist/{id}?decorate=attributes,length,owner&from=0&length=0"
+                "/playlist/v2/playlist/{id}?decorate=revision,length,attributes,timestamp,owner,capabilities&from=0&length=0"
             ))
             .await?;
         let attributes = &value["attributes"];
-        let tracks = context_tracks(api, uri, 150).await?;
+        let resolved = resolve(api, uri, 150).await?;
+        let tracks = item_tracks(api, &resolved.items).await?;
         let description = strip_tags(attributes["description"].as_str().unwrap_or_default());
         let count = value["length"].as_u64().unwrap_or(tracks.len() as u64);
         let subtitle = if description.is_empty() {
@@ -499,6 +596,12 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
             cover: playlist_cover(attributes),
             artist_uri: None,
             tracks,
+            owner: filled(&value["ownerUsername"]),
+            description,
+            revision: filled(&value["revision"]),
+            format: filled(&attributes["format"]),
+            capabilities: Capabilities::from_playlist(&value["capabilities"]),
+            metadata: resolved.metadata,
         });
     }
     if uri.starts_with("spotify:album:") {
@@ -508,7 +611,8 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
             .next()
             .and_then(|(_, value)| metadata::Album::decode(value.as_slice()).ok())
             .ok_or_else(|| anyhow::anyhow!("Spotify has no details for this album."))?;
-        let tracks = context_tracks(api, uri, 150).await?;
+        let resolved = resolve(api, uri, 150).await?;
+        let tracks = item_tracks(api, &resolved.items).await?;
         let artist = album.artist.first();
         let year = album.date.and_then(|date| date.year);
         let subtitle = [
@@ -534,13 +638,41 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
                 .and_then(|artist| artist.gid.as_deref())
                 .and_then(|gid| uri_from_gid("artist", gid)),
             tracks,
+            owner: None,
+            description: String::new(),
+            revision: None,
+            format: None,
+            capabilities: Capabilities {
+                view: true,
+                ..Capabilities::default()
+            },
+            metadata: resolved.metadata,
         });
     }
     anyhow::bail!("OpenMusic can only open albums and playlists.")
 }
 
+fn strings<'de, D>(deserializer: D) -> std::result::Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Option::<HashMap<String, Value>>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| match value {
+            Value::String(text) => Some((key, text)),
+            Value::Number(number) => Some((key, number.to_string())),
+            Value::Bool(flag) => Some((key, flag.to_string())),
+            _ => None,
+        })
+        .collect())
+}
+
 #[derive(Deserialize)]
 struct ContextResponse {
+    #[serde(default, deserialize_with = "strings")]
+    metadata: HashMap<String, String>,
     #[serde(default)]
     pages: Vec<ContextPage>,
 }
@@ -559,54 +691,118 @@ struct ContextPage {
 struct ContextTrack {
     #[serde(default)]
     uri: String,
+    #[serde(default)]
+    uid: Option<String>,
+    #[serde(default, deserialize_with = "strings")]
+    metadata: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextItem {
+    pub uri: String,
+    pub uid: Option<String>,
+    pub metadata: HashMap<String, String>,
+}
+
+impl ContextItem {
+    pub fn added_at(&self) -> Option<i64> {
+        self.metadata.get("added_at")?.parse().ok()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Resolved {
+    pub metadata: HashMap<String, String>,
+    pub items: Vec<ContextItem>,
 }
 
 fn page_path(url: &str) -> String {
     url.trim_start_matches("hm://").to_owned()
 }
 
-pub async fn context_uris(api: &Api, context: &str, limit: usize) -> Result<Vec<String>> {
-    let encoded: String = url::form_urlencoded::byte_serialize(context.as_bytes()).collect();
-    let mut response: ContextResponse = api
-        .get_json(&format!(
-            "/context-resolve/v1/{}",
-            encoded.replace("%3A", ":")
-        ))
+fn take_page(
+    page: ContextPage,
+    seen: &mut HashSet<String>,
+    items: &mut Vec<ContextItem>,
+    pending: &mut Vec<String>,
+) {
+    if page.tracks.is_empty() {
+        pending.extend(page.page_url.or(page.next_page_url));
+        return;
+    }
+    for track in page.tracks {
+        if (track.uri.starts_with("spotify:track:") || track.uri.starts_with("spotify:episode:"))
+            && seen.insert(track.uri.clone())
+        {
+            items.push(ContextItem {
+                uri: track.uri,
+                uid: track.uid.filter(|uid| !uid.is_empty()),
+                metadata: track.metadata,
+            });
+        }
+    }
+}
+
+fn parse_lossy<T: DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+    serde_json::from_str(&String::from_utf8_lossy(bytes))
+}
+
+async fn lossy_json<T: DeserializeOwned>(api: &Api, path: &str) -> Result<T> {
+    let bytes = api
+        .request(Method::GET, path, Body::Empty, "application/json")
         .await?;
+    parse_lossy(&bytes).with_context(|| format!("Unreadable reply from {path}."))
+}
+
+pub async fn resolve(api: &Api, context: &str, limit: usize) -> Result<Resolved> {
+    let encoded: String = url::form_urlencoded::byte_serialize(context.as_bytes()).collect();
+    let mut response: ContextResponse = lossy_json(
+        api,
+        &format!("/context-resolve/v1/{}", encoded.replace("%3A", ":")),
+    )
+    .await?;
     let mut seen = HashSet::new();
-    let mut uris = Vec::new();
+    let mut items = Vec::new();
     let mut pending: Vec<String> = Vec::new();
     loop {
         for page in response.pages.drain(..) {
-            if page.tracks.is_empty() {
-                if let Some(url) = page.page_url.or(page.next_page_url) {
-                    pending.push(url);
-                }
-                continue;
-            }
-            for track in page.tracks {
-                if (track.uri.starts_with("spotify:track:")
-                    || track.uri.starts_with("spotify:episode:"))
-                    && seen.insert(track.uri.clone())
-                {
-                    uris.push(track.uri);
-                }
-            }
+            take_page(page, &mut seen, &mut items, &mut pending);
         }
-        if uris.len() >= limit {
+        if items.len() >= limit {
             break;
         }
         let Some(next) = pending.pop() else { break };
-        let page: ContextPage = api.get_json(&page_path(&next)).await?;
+        let page: ContextPage = lossy_json(api, &page_path(&next)).await?;
         response.pages.push(page);
     }
-    uris.truncate(limit);
-    Ok(uris)
+    items.truncate(limit);
+    Ok(Resolved {
+        metadata: response.metadata,
+        items,
+    })
+}
+
+pub async fn context_uris(api: &Api, context: &str, limit: usize) -> Result<Vec<ContextItem>> {
+    Ok(resolve(api, context, limit).await?.items)
+}
+
+pub async fn item_tracks(api: &Api, items: &[ContextItem]) -> Result<Vec<Track>> {
+    let uris: Vec<String> = items.iter().map(|item| item.uri.clone()).collect();
+    let by_uri: HashMap<&str, &ContextItem> =
+        items.iter().map(|item| (item.uri.as_str(), item)).collect();
+    let mut found = tracks(api, &uris).await?;
+    for track in &mut found {
+        if let Some(item) = by_uri.get(track.uri.as_str()) {
+            track.uid = item.uid.clone();
+            track.added_at = item.added_at();
+        }
+    }
+    Ok(found)
 }
 
 pub async fn context_tracks(api: &Api, context: &str, limit: usize) -> Result<Vec<Track>> {
-    let uris = context_uris(api, context, limit).await?;
-    tracks(api, &uris).await
+    let items = context_uris(api, context, limit).await?;
+    item_tracks(api, &items).await
 }
 
 pub async fn search(api: &Api, query: &str) -> Result<Vec<Track>> {
@@ -688,4 +884,295 @@ pub async fn lyrics(api: &Api, track_uri: &str) -> Result<Option<Lyrics>> {
             .unwrap_or_default()
             .to_owned(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const TRACK_ID: &str = "4uLU6hMCjMI75M1A2tKUQC";
+
+    fn uri(input: &str) -> String {
+        parse_link(input).unwrap().unwrap()
+    }
+
+    #[test]
+    fn distinguishes_tracks_from_search_queries() {
+        let track = format!("spotify:track:{TRACK_ID}");
+        for input in [
+            track.clone(),
+            format!("https://open.spotify.com/track/{TRACK_ID}?si=123"),
+            format!("https://open.spotify.com/intl-de/track/{TRACK_ID}"),
+            format!("  https://open.spotify.com/embed/track/{TRACK_ID}  "),
+        ] {
+            assert_eq!(uri(&input), track);
+        }
+        assert!(parse_link("Nina Simone").unwrap().is_none());
+        assert!(parse_link("https://example.com/track/x").unwrap().is_none());
+        assert!(parse_link("spotify:track:broken").is_err());
+        assert!(parse_link("https://open.spotify.com/album/abc").is_err());
+        assert!(parse_link("https://open.spotify.com/track").is_err());
+        assert!(parse_link("https://open.spotify.com/concert/abc").is_err());
+    }
+
+    #[test]
+    fn parses_links_of_every_kind() {
+        for kind in ["album", "playlist", "artist", "show", "episode"] {
+            let expected = format!("spotify:{kind}:{TRACK_ID}");
+            assert_eq!(uri(&expected), expected);
+            assert_eq!(
+                uri(&format!(
+                    "https://open.spotify.com/intl-fr/{kind}/{TRACK_ID}?si=abc"
+                )),
+                expected
+            );
+        }
+        assert_eq!(
+            uri(&format!(
+                "https://open.spotify.com/user/someone/playlist/{TRACK_ID}"
+            )),
+            format!("spotify:playlist:{TRACK_ID}")
+        );
+        assert_eq!(
+            uri("https://open.spotify.com/user/someone"),
+            "spotify:user:someone"
+        );
+        assert_eq!(uri("spotify:user:someone"), "spotify:user:someone");
+        assert_eq!(
+            uri("https://open.spotify.com/genre/0JQ5DAqbMKFDXXwE9BDJAr"),
+            "spotify:page:0JQ5DAqbMKFDXXwE9BDJAr"
+        );
+        assert_eq!(
+            uri("https://open.spotify.com/genre/entertainment_v2_podcasts-page"),
+            "spotify:genre:entertainment_v2_podcasts-page"
+        );
+        assert_eq!(
+            uri("spotify:genre:0JQ5DAqbMKFOOxftoKZxod"),
+            "spotify:page:0JQ5DAqbMKFOOxftoKZxod"
+        );
+        assert_eq!(
+            uri("spotify:page:0JQ5DAt0tbjZptfcdMSKl3"),
+            "spotify:page:0JQ5DAt0tbjZptfcdMSKl3"
+        );
+        assert_eq!(
+            uri("https://open.spotify.com/socialsession/jamtoken123"),
+            "spotify:socialsession:jamtoken123"
+        );
+        assert_eq!(
+            uri("spotify:socialsession:jamtoken123"),
+            "spotify:socialsession:jamtoken123"
+        );
+        assert!(parse_link("spotify:user:").is_err());
+        assert!(parse_link("spotify:collection:tracks").is_err());
+    }
+
+    fn gid(byte: u8) -> Vec<u8> {
+        vec![byte; 16]
+    }
+
+    #[test]
+    fn maps_every_artist_and_the_explicit_flag() {
+        let track = metadata::Track {
+            gid: Some(gid(1)),
+            name: Some("Song".into()),
+            album: Some(metadata::Album {
+                gid: Some(gid(2)),
+                name: Some("Record".into()),
+                ..Default::default()
+            }),
+            artist: vec![
+                metadata::Artist {
+                    gid: Some(gid(3)),
+                    name: Some("First".into()),
+                    ..Default::default()
+                },
+                metadata::Artist {
+                    gid: Some(gid(4)),
+                    name: Some("Second".into()),
+                    ..Default::default()
+                },
+            ],
+            duration: Some(1000),
+            explicit: Some(true),
+            ..Default::default()
+        };
+        let uri = uri_from_gid("track", &gid(1)).unwrap();
+        let mapped = decode_track(uri.clone(), &track.encode_to_vec()).unwrap();
+        assert_eq!(mapped.uri, uri);
+        assert_eq!(mapped.artist, "First, Second");
+        assert_eq!(mapped.album, "Record");
+        assert!(mapped.explicit);
+        assert_eq!(mapped.artist_uri, uri_from_gid("artist", &gid(3)));
+        assert_eq!(mapped.album_uri, uri_from_gid("album", &gid(2)));
+        assert_eq!(
+            mapped.artists,
+            [
+                Link {
+                    uri: uri_from_gid("artist", &gid(3)).unwrap(),
+                    name: "First".into(),
+                },
+                Link {
+                    uri: uri_from_gid("artist", &gid(4)).unwrap(),
+                    name: "Second".into(),
+                },
+            ]
+        );
+        assert_eq!((mapped.uid, mapped.added_at), (None, None));
+
+        let clean = metadata::Track {
+            explicit: None,
+            ..track
+        };
+        assert!(!decode_track(uri, &clean.encode_to_vec()).unwrap().explicit);
+    }
+
+    #[test]
+    fn maps_episodes_to_their_show() {
+        let episode = metadata::Episode {
+            name: Some("Episode".into()),
+            duration: Some(60_000),
+            explicit: Some(true),
+            show: Some(metadata::Show {
+                gid: Some(gid(5)),
+                name: Some("Show".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let uri = uri_from_gid("episode", &gid(6)).unwrap();
+        let mapped = decode_track(uri, &episode.encode_to_vec()).unwrap();
+        assert_eq!(mapped.artist, "Show");
+        assert!(mapped.explicit);
+        assert_eq!(
+            mapped.artists,
+            [Link {
+                uri: uri_from_gid("show", &gid(5)).unwrap(),
+                name: "Show".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn keeps_uids_and_metadata_from_context_pages() {
+        let response: ContextResponse = serde_json::from_value(json!({
+            "uri": "spotify:playlist:x",
+            "metadata": {
+                "format_list_type": "blend",
+                "context_owner": "spotify:user:someone",
+                "count": 3,
+                "nested": {"ignored": true}
+            },
+            "pages": [
+                {"tracks": [
+                    {"uri": "spotify:track:a", "uid": "65346664",
+                     "metadata": {"added_at": "1625150017000", "added_by_username": "someone"}},
+                    {"uri": "spotify:delimiter", "uid": "delimiter0"},
+                    {"uri": "spotify:track:a", "uid": "77777777"},
+                    {"uri": "spotify:episode:b", "uid": "", "metadata": {"added_at": "soon"}},
+                    {"uri": "spotify:track:c"}
+                ]},
+                {"page_url": "hm://context-resolve/v1/page/2"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            response
+                .metadata
+                .get("format_list_type")
+                .map(String::as_str),
+            Some("blend")
+        );
+        assert_eq!(
+            response.metadata.get("count").map(String::as_str),
+            Some("3")
+        );
+        assert!(!response.metadata.contains_key("nested"));
+
+        let (mut seen, mut items, mut pending) = (HashSet::new(), Vec::new(), Vec::new());
+        for page in response.pages {
+            take_page(page, &mut seen, &mut items, &mut pending);
+        }
+        assert_eq!(pending, ["hm://context-resolve/v1/page/2"]);
+        let uris: Vec<&str> = items.iter().map(|item| item.uri.as_str()).collect();
+        assert_eq!(
+            uris,
+            ["spotify:track:a", "spotify:episode:b", "spotify:track:c"]
+        );
+        assert_eq!(items[0].uid.as_deref(), Some("65346664"));
+        assert_eq!(items[0].added_at(), Some(1_625_150_017_000));
+        assert_eq!(
+            items[0]
+                .metadata
+                .get("added_by_username")
+                .map(String::as_str),
+            Some("someone")
+        );
+        assert_eq!((items[1].uid.as_deref(), items[1].added_at()), (None, None));
+        assert!(items[2].metadata.is_empty());
+    }
+
+    #[test]
+    fn tolerates_raw_bytes_in_context_metadata() {
+        let mut body = br#"{"metadata":{"context_description":"Show","image_url":""#.to_vec();
+        body.extend([0xff, 0xfe, b'g', 0x80]);
+        body.extend(br#""},"pages":[{"tracks":[{"uri":"spotify:episode:a"}]}]}"#);
+        let response: ContextResponse = parse_lossy(&body).unwrap();
+        assert_eq!(
+            response
+                .metadata
+                .get("context_description")
+                .map(String::as_str),
+            Some("Show")
+        );
+        assert_eq!(response.pages[0].tracks[0].uri, "spotify:episode:a");
+    }
+
+    #[test]
+    fn reads_playlist_capabilities() {
+        let capabilities = Capabilities::from_playlist(&json!({
+            "canView": true, "canAdministratePermissions": false, "canEditMetadata": true,
+            "canEditItems": true, "listAttributeCapabilities": {}, "canPublishToProfile": true
+        }));
+        assert_eq!(
+            capabilities,
+            Capabilities {
+                view: true,
+                edit_items: true,
+                edit_metadata: true,
+                administrate: false,
+                publish: true,
+            }
+        );
+        assert_eq!(
+            Capabilities::from_playlist(&Value::Null),
+            Capabilities::default()
+        );
+    }
+
+    #[test]
+    fn reads_cache_files_written_before_the_new_fields() {
+        let track: Track = serde_json::from_value(json!({
+            "uri": "spotify:track:a", "title": "Song", "artist": "First", "album": "Record",
+            "duration_ms": 1000, "cover": null, "artist_uri": null, "album_uri": null
+        }))
+        .unwrap();
+        assert_eq!(
+            track,
+            Track {
+                uri: "spotify:track:a".into(),
+                title: "Song".into(),
+                artist: "First".into(),
+                album: "Record".into(),
+                duration_ms: 1000,
+                ..Track::default()
+            }
+        );
+        let playlist: Playlist = serde_json::from_value(json!({
+            "uri": "spotify:playlist:x", "name": "Mix", "description": "", "cover": null, "length": 2
+        }))
+        .unwrap();
+        assert_eq!((playlist.format, playlist.owner), (None, None));
+    }
 }

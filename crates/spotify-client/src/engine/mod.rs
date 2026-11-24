@@ -87,7 +87,7 @@ impl NowPlaying {
 #[derive(Clone, Debug)]
 pub enum Update {
     Ready,
-    Now(NowPlaying),
+    Now(Box<NowPlaying>),
     Notice(String),
     RefreshToken(String),
     Ended(Option<String>),
@@ -441,7 +441,7 @@ impl Engine {
             }
         }
         self.published = Some((key, now.position_ms, Instant::now()));
-        let _ = updates.send(Update::Now(now));
+        let _ = updates.send(Update::Now(Box::new(now)));
     }
 
     async fn message(&mut self, message: Message) {

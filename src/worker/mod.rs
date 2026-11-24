@@ -1,7 +1,7 @@
 mod cache;
 mod keychain;
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use spotify_client::{
     Api, Track, catalog,
@@ -22,6 +22,18 @@ use crate::areas::{
 };
 
 const COVER_RETRY: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Default)]
+pub struct User(Arc<tokio::sync::OnceCell<String>>);
+
+impl User {
+    pub async fn name(&self, api: &Api) -> anyhow::Result<String> {
+        self.0
+            .get_or_try_init(|| catalog::username(api))
+            .await
+            .cloned()
+    }
+}
 
 pub enum Command {
     Restore,
@@ -197,6 +209,7 @@ async fn connected(
     let api = Api::connect(http.clone(), token.access_token.clone()).await;
     let device_name = std::env::var("OPENMUSIC_DEVICE_NAME").unwrap_or_else(|_| "OpenMusic".into());
     let (handle, mut updates) = engine::start(http.clone(), api, token, device_name);
+    let user = User::default();
     let _ = events.send(Event::Connected);
 
     let mut debug_tasks = JoinSet::new();
@@ -257,7 +270,7 @@ async fn connected(
                         }
                     }
                     Command::Playlists => {
-                        pages.spawn(library::worker::playlists(handle.api.clone()));
+                        pages.spawn(library::worker::playlists(handle.api.clone(), user.clone()));
                     }
                     Command::Artist(uri) => {
                         pages.spawn(discovery::worker::artist(handle.api.clone(), uri));
@@ -290,7 +303,9 @@ async fn connected(
                         if let Some(track) = now.track.as_mut() {
                             if let Some(full) = known.get(&track.uri) {
                                 let duration = track.duration_ms;
+                                let uid = track.uid.take();
                                 *track = full.clone();
+                                track.uid = uid;
                                 if duration > 0 {
                                     track.duration_ms = duration;
                                 }
@@ -304,7 +319,7 @@ async fn connected(
                             }
                             request_covers([&*track], http, &mut covers, &mut requested);
                         }
-                        let _ = events.send(Event::NowPlaying(now));
+                        let _ = events.send(Event::NowPlaying(*now));
                     }
                     Update::Notice(message) => {
                         let _ = events.send(Event::Notice(message));
