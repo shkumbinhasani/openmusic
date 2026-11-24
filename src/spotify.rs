@@ -208,6 +208,17 @@ async fn connected(
     let (handle, mut updates) = engine::start(http.clone(), api, token, device_name);
     let _ = events.send(Event::Connected);
 
+    let mut debug_tasks = JoinSet::new();
+    if crate::debug::directory().is_some() {
+        let api = handle.api.clone();
+        debug_tasks.spawn(async move {
+            loop {
+                crate::debug::write_token(&api.token());
+                tokio::time::sleep(Duration::from_secs(300)).await;
+            }
+        });
+    }
+
     let mut search = JoinSet::new();
     let mut discovery = JoinSet::new();
     let mut recommendations = JoinSet::new();

@@ -4,6 +4,27 @@ pub fn directory() -> Option<PathBuf> {
     std::env::var_os("OPENMUSIC_DEBUG_DIR").map(PathBuf::from)
 }
 
+#[cfg(unix)]
+pub fn write_token(token: &str) {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+
+    let Some(path) = directory().map(|directory| directory.join("token")) else {
+        return;
+    };
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path);
+    if let Ok(mut file) = file {
+        let _ = file.write_all(token.as_bytes());
+    }
+}
+
+#[cfg(not(unix))]
+pub fn write_token(_: &str) {}
+
 #[cfg(target_os = "macos")]
 pub fn capture(path: PathBuf, done: impl FnOnce(Result<(), String>) + Send + 'static) {
     use std::sync::{Arc, Mutex};
