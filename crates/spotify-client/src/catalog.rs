@@ -267,7 +267,7 @@ pub struct Artist {
     pub related: Vec<ArtistRef>,
 }
 
-fn strip_tags(text: &str) -> String {
+pub(crate) fn strip_tags(text: &str) -> String {
     let mut plain = String::with_capacity(text.len());
     let mut inside = false;
     for character in text.chars() {

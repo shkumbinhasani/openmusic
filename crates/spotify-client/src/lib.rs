@@ -4,6 +4,8 @@ pub mod blend;
 pub mod browse;
 pub mod canvas;
 pub mod catalog;
+pub mod clienttoken;
+pub mod collection;
 pub mod connect;
 pub mod dealer;
 pub mod details;
@@ -11,11 +13,13 @@ pub mod director;
 pub mod dj;
 #[cfg(target_os = "macos")]
 pub mod engine;
+pub mod entity;
 pub mod home;
 pub mod jam;
 pub mod library;
 pub mod loudness;
 pub mod oauth;
+pub mod pathfinder;
 pub mod playback_settings;
 #[cfg(target_os = "macos")]
 pub mod player;
