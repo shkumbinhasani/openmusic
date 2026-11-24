@@ -1,8 +1,12 @@
+mod cache;
+mod keychain;
+
 use std::{collections::HashMap, time::Duration};
 
 use spotify_client::{
-    Api, catalog,
-    engine::{self, Control, Update},
+    Api, Track, catalog,
+    catalog::{Artist, Collection, Lyrics, Playlist},
+    engine::{self, Control, NowPlaying, Update},
     oauth::{self, Token},
 };
 use tokio::{
@@ -11,26 +15,13 @@ use tokio::{
     time::Instant,
 };
 
-pub use spotify_client::{
-    Track,
-    catalog::{Artist, Collection, Lyrics, Playlist},
-    engine::NowPlaying,
+use crate::areas::{
+    content, discovery,
+    discovery::worker::{Discovery, Mix},
+    library, playlists,
 };
 
 const COVER_RETRY: Duration = Duration::from_secs(60);
-
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-pub struct Discovery {
-    pub tracks: Vec<Track>,
-    pub from_top_tracks: bool,
-    pub mix: Option<Mix>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Mix {
-    pub seed: String,
-    pub tracks: Vec<Track>,
-}
 
 pub enum Command {
     Restore,
@@ -246,42 +237,19 @@ async fn connected(
                     }
                     Command::Search(query) => {
                         search.abort_all();
-                        let api = handle.api.clone();
-                        search.spawn(async move {
-                            match catalog::parse_track_input(&query) {
-                                Err(error) => Event::SearchDone(Err(error.to_string())),
-                                Ok(Some(uri)) => Event::DirectTrack(
-                                    catalog::tracks(&api, &[uri])
-                                        .await
-                                        .ok()
-                                        .and_then(|mut tracks| tracks.pop())
-                                        .ok_or_else(|| "Could not load this song from Spotify.".to_owned()),
-                                ),
-                                Ok(None) => Event::SearchDone(
-                                    catalog::search(&api, &query)
-                                        .await
-                                        .map_err(|_| "Spotify search is unavailable. Try again.".to_owned()),
-                                ),
-                            }
-                        });
+                        search.spawn(discovery::worker::search(handle.api.clone(), query));
                     }
                     Command::Discover => {
                         discovery.abort_all();
-                        let api = handle.api.clone();
-                        discovery.spawn(async move { Event::Discovery(discover(&api).await) });
+                        discovery.spawn(discovery::worker::discover(handle.api.clone()));
                     }
                     Command::Recommend(seed) => {
                         recommendations.abort_all();
-                        let api = handle.api.clone();
-                        recommendations.spawn(async move { Event::Recommendations(mix(&api, &seed).await) });
+                        recommendations.spawn(discovery::worker::recommend(handle.api.clone(), seed));
                     }
                     Command::Lyrics(uri) => {
                         lyrics.abort_all();
-                        let api = handle.api.clone();
-                        lyrics.spawn(async move {
-                            let found = catalog::lyrics(&api, &uri).await.ok().flatten();
-                            Event::Lyrics { uri, lyrics: found }
-                        });
+                        lyrics.spawn(content::worker::lyrics(handle.api.clone(), uri));
                     }
                     Command::ForgetCovers(urls) => {
                         for url in urls {
@@ -289,28 +257,13 @@ async fn connected(
                         }
                     }
                     Command::Playlists => {
-                        let api = handle.api.clone();
-                        pages.spawn(async move {
-                            Event::Playlists(catalog::playlists(&api).await.unwrap_or_default())
-                        });
+                        pages.spawn(library::worker::playlists(handle.api.clone()));
                     }
                     Command::Artist(uri) => {
-                        let api = handle.api.clone();
-                        pages.spawn(async move {
-                            let result = catalog::artist(&api, &uri)
-                                .await
-                                .map_err(|_| "Couldn’t load this artist. Try again.".to_owned());
-                            Event::Artist { uri, result }
-                        });
+                        pages.spawn(discovery::worker::artist(handle.api.clone(), uri));
                     }
                     Command::Collection(uri) => {
-                        let api = handle.api.clone();
-                        pages.spawn(async move {
-                            let result = catalog::collection(&api, &uri)
-                                .await
-                                .map_err(|_| "Couldn’t load this. Try again.".to_owned());
-                            Event::Collection { uri, result }
-                        });
+                        pages.spawn(playlists::worker::collection(handle.api.clone(), uri));
                     }
                     Command::PlayContext { uri, index, track_uri } => {
                         handle.send(Control::PlayContext { uri, index, track_uri });
@@ -423,27 +376,6 @@ async fn connected(
     }
 }
 
-async fn discover(api: &Api) -> Discovery {
-    let tracks = catalog::liked(api, 8).await.unwrap_or_default();
-    let mix = match tracks.first() {
-        Some(seed) => mix(api, seed).await,
-        None => None,
-    };
-    Discovery {
-        tracks,
-        from_top_tracks: false,
-        mix,
-    }
-}
-
-async fn mix(api: &Api, seed: &Track) -> Option<Mix> {
-    let tracks = catalog::station(api, &seed.uri).await.ok()?;
-    (!tracks.is_empty()).then(|| Mix {
-        seed: seed.title.clone(),
-        tracks,
-    })
-}
-
 fn publish(
     event: Event,
     events: &UnboundedSender<Event>,
@@ -530,187 +462,5 @@ fn request_urls(
             }
             (url, jpeg)
         });
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod keychain {
-    use security_framework::passwords;
-
-    const SERVICE: &str = "openmusic.spotify";
-    const ACCOUNT: &str = "refresh-token";
-    const ITEM_NOT_FOUND: i32 = -25300;
-
-    pub fn read() -> Option<String> {
-        String::from_utf8(passwords::get_generic_password(SERVICE, ACCOUNT).ok()?).ok()
-    }
-
-    pub fn write(token: &str) {
-        if token.is_empty() || read().as_deref() == Some(token) {
-            return;
-        }
-        if passwords::set_generic_password(SERVICE, ACCOUNT, token.as_bytes()).is_err() {
-            eprintln!("OpenMusic could not save the Spotify session in Keychain.");
-        }
-    }
-
-    pub fn clear() -> Result<(), security_framework::base::Error> {
-        match passwords::delete_generic_password(SERVICE, ACCOUNT) {
-            Err(error) if error.code() != ITEM_NOT_FOUND => Err(error),
-            _ => Ok(()),
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-mod keychain {
-    pub fn read() -> Option<String> {
-        None
-    }
-    pub fn write(_: &str) {}
-    pub fn clear() -> Result<(), ()> {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use spotify_client::catalog::parse_track_input;
-
-    #[test]
-    fn distinguishes_tracks_from_search_queries() {
-        let id = "4uLU6hMCjMI75M1A2tKUQC";
-        let uri = format!("spotify:track:{id}");
-        for input in [
-            uri.clone(),
-            format!("https://open.spotify.com/track/{id}?si=123"),
-            format!("https://open.spotify.com/intl-de/track/{id}"),
-        ] {
-            assert_eq!(parse_track_input(&input).unwrap().unwrap(), uri);
-        }
-        assert!(parse_track_input("Nina Simone").unwrap().is_none());
-        assert!(parse_track_input("spotify:track:broken").is_err());
-        assert!(parse_track_input("https://open.spotify.com/album/abc").is_err());
-    }
-}
-
-mod cache {
-    use std::path::PathBuf;
-
-    use serde::{Deserialize, Serialize};
-
-    use super::{Discovery, Playlist};
-
-    const COVER_LIMIT_BYTES: u64 = 200 * 1024 * 1024;
-
-    #[derive(Default, Serialize, Deserialize)]
-    pub struct Library {
-        pub playlists: Vec<Playlist>,
-        pub discovery: Option<Discovery>,
-    }
-
-    fn directory() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME")?;
-        let directory = PathBuf::from(home).join("Library/Caches/OpenMusic");
-        std::fs::create_dir_all(directory.join("covers")).ok()?;
-        Some(directory)
-    }
-
-    fn library_path() -> Option<PathBuf> {
-        Some(directory()?.join("library.json"))
-    }
-
-    pub fn load() -> Option<Library> {
-        let bytes = std::fs::read(library_path()?).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-
-    fn store(update: impl FnOnce(&mut Library)) {
-        let Some(path) = library_path() else { return };
-        let mut library = load().unwrap_or_default();
-        update(&mut library);
-        if let Ok(bytes) = serde_json::to_vec(&library) {
-            let temporary = path.with_extension("tmp");
-            if std::fs::write(&temporary, bytes).is_ok() {
-                let _ = std::fs::rename(temporary, path);
-            }
-        }
-    }
-
-    pub fn save_playlists(playlists: &[Playlist]) {
-        if playlists.is_empty() {
-            return;
-        }
-        let playlists = playlists.to_vec();
-        store(move |library| library.playlists = playlists);
-    }
-
-    pub fn save_discovery(discovery: &Discovery) {
-        if discovery.tracks.is_empty() && discovery.mix.is_none() {
-            return;
-        }
-        let Ok(copy) = serde_json::to_value(discovery).and_then(serde_json::from_value) else {
-            return;
-        };
-        store(move |library| library.discovery = Some(copy));
-    }
-
-    pub fn clear() {
-        if let Some(path) = library_path() {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-
-    fn hash(url: &str) -> u64 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in url.bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-        hash
-    }
-
-    fn cover_path(url: &str) -> Option<PathBuf> {
-        Some(
-            directory()?
-                .join("covers")
-                .join(format!("{:016x}", hash(url))),
-        )
-    }
-
-    pub fn read_cover(url: &str) -> Option<Vec<u8>> {
-        std::fs::read(cover_path(url)?).ok()
-    }
-
-    pub fn write_cover(url: &str, bytes: &[u8]) {
-        let Some(path) = cover_path(url) else { return };
-        let _ = std::fs::write(&path, bytes);
-        if !hash(url).is_multiple_of(64) {
-            return;
-        }
-        let Some(folder) = path.parent() else { return };
-        let Ok(entries) = std::fs::read_dir(folder) else {
-            return;
-        };
-        let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let metadata = entry.metadata().ok()?;
-                Some((metadata.modified().ok()?, metadata.len(), entry.path()))
-            })
-            .collect();
-        let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
-        if total <= COVER_LIMIT_BYTES {
-            return;
-        }
-        files.sort_by_key(|(modified, _, _)| *modified);
-        for (_, size, path) in files {
-            if total <= COVER_LIMIT_BYTES * 3 / 4 {
-                break;
-            }
-            if std::fs::remove_file(path).is_ok() {
-                total -= size;
-            }
-        }
     }
 }

@@ -124,7 +124,7 @@ OpenMusic registers with Spotify the way Spotify’s Web Playback SDK does, then
 
 1. Sign-in uses Spotify’s OAuth device flow (`oauth.rs`).
 2. A websocket to Spotify’s dealer service delivers commands (`dealer.rs`).
-3. OpenMusic registers a track-playback device and follows the state machine Spotify sends, reporting playback state back (`engine.rs`).
+3. OpenMusic registers a track-playback device and follows the state machine Spotify sends, reporting playback state back (`engine/`).
 4. Audio is Spotify’s FairPlay-protected AAC. OpenMusic builds an HLS playlist from the file’s segment table and plays it with AVFoundation. macOS FairPlay decrypts it with a license from Spotify, so the content protection stays intact (`player.rs`).
 5. Metadata, search, stations, liked songs and lyrics come from Spotify’s internal API (`catalog.rs`). Other devices are mirrored through a Connect observer (`connect.rs`).
 

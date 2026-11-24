@@ -93,6 +93,7 @@ mod native {
     use objc2_foundation::{NSData, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
     use super::{Action, Label, NowPlaying};
+    use crate::ui::components::timestamp;
 
     define_class!(
         #[unsafe(super(NSObject))]
@@ -192,8 +193,7 @@ mod native {
             if let Some(dock) = overlay.dock.as_mut() {
                 dock.scrubbing = true;
                 let position = (fraction * f64::from(dock.duration_ms)) as u32;
-                dock.elapsed
-                    .setStringValue(&string(&crate::timestamp(position)));
+                dock.elapsed.setStringValue(&string(&timestamp(position)));
             }
         });
     }
@@ -495,11 +495,11 @@ mod native {
             dock.subtitle.setTextColor(Some(&color));
             dock.duration_ms = state.duration_ms;
             dock.remaining
-                .setStringValue(&string(&crate::timestamp(state.duration_ms)));
+                .setStringValue(&string(&timestamp(state.duration_ms)));
             dock.slider.setEnabled(state.duration_ms > 0);
             if !dock.scrubbing {
                 dock.elapsed
-                    .setStringValue(&string(&crate::timestamp(state.position_ms)));
+                    .setStringValue(&string(&timestamp(state.position_ms)));
                 dock.slider.setDoubleValue(
                     f64::from(state.position_ms) / f64::from(state.duration_ms.max(1)),
                 );
@@ -598,7 +598,7 @@ mod native {
                 return;
             }
             dock.elapsed
-                .setStringValue(&string(&crate::timestamp(position_ms)));
+                .setStringValue(&string(&timestamp(position_ms)));
             dock.slider
                 .setDoubleValue(f64::from(position_ms) / f64::from(duration_ms.max(1)));
         });
