@@ -1,7 +1,10 @@
 use gpui::{App, Entity, Menu, MenuItem, OsAction, Window, actions};
 use gpui_component::input::{Copy, Cut, Paste, SelectAll};
 
-use crate::{app::OpenMusic, worker::Command};
+use crate::{
+    app::{OpenMusic, intent::Intent},
+    worker::Command,
+};
 
 actions!(openmusic, [Quit, FocusSearch, SignOut]);
 
@@ -40,7 +43,7 @@ pub fn connect(player: &Entity<OpenMusic>, window: &Window, cx: &mut App) {
     cx.on_action(move |_: &FocusSearch, cx| {
         let target = target.clone();
         let _ = handle.update(cx, |_, window, cx| {
-            let _ = target.update(cx, |this, cx| this.focus_search(window, cx));
+            let _ = target.update(cx, |this, cx| this.perform(Intent::FocusSearch, window, cx));
         });
     });
     let target = player.downgrade();

@@ -6,7 +6,8 @@ use super::{
     components::{ROW_RADIUS, icon},
 };
 use crate::{
-    app::{Account, OpenMusic, Page},
+    app::{OpenMusic, Page, Session},
+    areas::discovery::state::SearchTab,
     icons,
 };
 
@@ -14,7 +15,7 @@ const SIDEBAR_PADDING: f32 = 10.;
 
 impl OpenMusic {
     pub fn sidebar(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let connected = matches!(self.account, Account::Connected);
+        let connected = matches!(self.session, Session::Connected);
         let nav = |id: &'static str, path: &'static str, label: &'static str, selected: bool| {
             div()
                 .id(id)
@@ -99,14 +100,14 @@ impl OpenMusic {
                                 "nav-search",
                                 icons::SEARCH,
                                 "Search",
-                                self.page == Page::Search,
+                                matches!(self.page, Page::Search(_)),
                             )
                             .on_click(cx.listener(
                                 |this, _, window, cx| {
                                     if this.discovery.search_query.is_empty() {
                                         this.input.update(cx, |input, cx| input.focus(window, cx));
                                     } else {
-                                        this.navigate(Page::Search);
+                                        this.navigate(Page::Search(SearchTab::All));
                                     }
                                     cx.notify();
                                 },

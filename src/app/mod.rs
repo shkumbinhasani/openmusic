@@ -1,24 +1,35 @@
+pub mod intent;
 mod nav;
+mod saved;
+pub mod settings;
+mod toast;
 
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     sync::Arc,
-    time::Duration,
 };
 
-use gpui::{AppContext, Context, Entity, Image, ImageFormat, Window, px, size};
-use gpui_component::input::{InputEvent, InputState};
-use spotify_client::engine::NowPlaying;
-use tokio::sync::mpsc::UnboundedSender;
+use gpui::{
+    AppContext, Context, Entity, FocusHandle, Image, ImageFormat, Styled, Window, px, size,
+};
+use gpui_component::{
+    ActiveTheme, WindowExt,
+    input::{InputEvent, InputState},
+};
 
 use crate::{
-    areas::{content, discovery, discovery::worker::Discovery, library, playback, playlists},
+    areas::{account, audio, content, details, discovery, library, playback, playlists, system},
     debug, overlay, ui,
     worker::{Command, Event},
 };
-pub use nav::Page;
+use intent::Intent;
+pub use nav::{Page, page_for};
+use saved::Saved;
+use settings::Settings;
+use toast::Toast;
 
-pub enum Account {
+pub enum Session {
     SignedOut,
     Connecting,
     Pairing { code: String, url: String },
@@ -26,24 +37,31 @@ pub enum Account {
 }
 
 pub struct OpenMusic {
-    commands: UnboundedSender<Command>,
-    pub account: Account,
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    pub session: Session,
     initial_track: Option<String>,
     pub input: Entity<InputState>,
+    pub focus: FocusHandle,
     pub page: Page,
     pub history: Vec<Page>,
+    pub ahead: Vec<Page>,
     pub covers: HashMap<String, Arc<Image>>,
-    pub account_error: Option<String>,
-    pub playback: playback::state::State,
-    pub library: library::state::State,
-    pub playlists: playlists::state::State,
-    pub discovery: discovery::state::State,
+    pub session_error: Option<String>,
+    pub modal: bool,
+    pub toast: Option<Toast>,
+    pub settings: Settings,
+    pub saved: Saved,
+    pub account: account::state::State,
     pub content: content::state::State,
+    pub discovery: discovery::state::State,
+    pub library: library::state::State,
+    pub playback: playback::state::State,
+    pub playlists: playlists::state::State,
 }
 
 impl OpenMusic {
     pub fn new(
-        commands: UnboundedSender<Command>,
+        commands: tokio::sync::mpsc::UnboundedSender<Command>,
         initial_track: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -55,39 +73,67 @@ impl OpenMusic {
         .detach();
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Songs, artists, or links"));
-        cx.subscribe_in(&input, window, |this, _, event, _, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                this.search(cx);
-            }
+        cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+            InputEvent::PressEnter { .. } => this.search(cx),
+            InputEvent::Blur if window.focused(cx).is_none() => window.focus(&this.focus),
+            _ => {}
         })
         .detach();
 
         Self {
             commands,
-            account: Account::Connecting,
+            session: Session::Connecting,
             initial_track,
             input,
+            focus: cx.focus_handle(),
             page: Page::Home,
             history: Vec::new(),
+            ahead: Vec::new(),
             covers: HashMap::new(),
-            account_error: None,
-            playback: Default::default(),
-            library: Default::default(),
-            playlists: Default::default(),
-            discovery: Default::default(),
+            session_error: None,
+            modal: false,
+            toast: None,
+            settings: settings::load(),
+            saved: Saved::default(),
+            account: Default::default(),
             content: Default::default(),
+            discovery: Default::default(),
+            library: Default::default(),
+            playback: Default::default(),
+            playlists: Default::default(),
         }
     }
 
     pub fn debug_command(
         &mut self,
         line: &str,
-        directory: &std::path::Path,
+        directory: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
+        let _ = self.shared_debug(verb, rest, directory, window, cx)
+            || account::state::debug(self, verb, rest, directory, window, cx)
+            || audio::state::debug(self, verb, rest, directory, window, cx)
+            || content::state::debug(self, verb, rest, directory, window, cx)
+            || details::state::debug(self, verb, rest, directory, window, cx)
+            || discovery::state::debug(self, verb, rest, directory, window, cx)
+            || library::state::debug(self, verb, rest, directory, window, cx)
+            || playback::state::debug(self, verb, rest, directory, window, cx)
+            || playlists::state::debug(self, verb, rest, directory, window, cx)
+            || system::state::debug(self, verb, rest, directory, window, cx);
+        cx.notify();
+    }
+
+    fn shared_debug(
+        &mut self,
+        verb: &str,
+        rest: &str,
+        directory: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match verb {
             "snapshot" => {
                 let name = if rest.is_empty() { "snapshot" } else { rest };
@@ -108,6 +154,7 @@ impl OpenMusic {
             "home" => self.navigate(Page::Home),
             "lyrics" => self.show_lyrics(true),
             "back" => self.back(),
+            "forward" => self.forward(),
             "search" => {
                 let query = rest.to_owned();
                 self.input
@@ -116,16 +163,75 @@ impl OpenMusic {
                 self.search(cx);
             }
             "artist" => self.navigate(Page::Artist(rest.to_owned())),
-            "open" => self.navigate(Page::Collection(rest.to_owned())),
+            "open" => {
+                let page = page_for(rest).unwrap_or_else(|| Page::Collection(rest.to_owned()));
+                self.navigate(page);
+            }
+            "page" => {
+                if let Some(page) = Page::parse(rest) {
+                    self.navigate(page);
+                }
+            }
+            "intent" => {
+                if let Some(intent) = Intent::parse(rest) {
+                    self.perform(intent, window, cx);
+                }
+            }
             "play" => {
                 let (uri, index) = rest.split_once(' ').unwrap_or((rest, "0"));
-                self.send(Command::PlayContext {
+                self.send(playback::worker::Command::PlayContext {
                     uri: uri.to_owned(),
                     index: index.trim().parse().unwrap_or(0),
                     track_uri: None,
                 });
             }
             "toggle" => self.toggle(cx),
+            "like" | "unlike" => {
+                let uris = rest.split_whitespace().map(str::to_owned).collect();
+                self.set_saved(uris, verb == "like");
+            }
+            "saved" => {
+                let uris: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+                self.lookup_saved(uris.iter().cloned());
+                let lines: Vec<String> = uris
+                    .iter()
+                    .map(|uri| {
+                        let saved = match self.is_saved(uri) {
+                            Some(true) => "saved",
+                            Some(false) => "not-saved",
+                            None => "unknown",
+                        };
+                        let pending = if self.saved.pending.contains_key(uri) {
+                            " pending"
+                        } else {
+                            ""
+                        };
+                        format!("{uri} {saved}{pending}")
+                    })
+                    .collect();
+                let _ = std::fs::write(directory.join("saved.txt"), lines.join("\n"));
+            }
+            "toast" => self.show_toast(rest, None),
+            "dialog" => {
+                if rest.is_empty() {
+                    window.close_all_dialogs(cx);
+                } else {
+                    let text: gpui::SharedString = rest.to_owned().into();
+                    window.open_dialog(cx, move |dialog, _, cx| {
+                        dialog.title(text.clone()).bg(cx.theme().popover)
+                    });
+                }
+            }
+            "settings" => {
+                if !rest.is_empty()
+                    && let Ok(settings) = serde_json::from_str::<Settings>(rest)
+                {
+                    self.update_settings(|current| *current = settings);
+                }
+                if let Ok(text) = serde_json::to_string_pretty(&self.settings) {
+                    let _ = std::fs::write(directory.join("settings.txt"), text);
+                }
+            }
             "size" => {
                 let mut parts = rest
                     .split_whitespace()
@@ -135,32 +241,50 @@ impl OpenMusic {
                 }
             }
             "state" => {
-                let state = format!(
-                    "account={} page={} track={:?} playing={} position={} device={:?} playlists={} notice={:?}",
-                    matches!(self.account, Account::Connected),
-                    match &self.page {
-                        Page::Home => "home".to_owned(),
-                        Page::Search => "search".to_owned(),
-                        Page::Lyrics => "lyrics".to_owned(),
-                        Page::Artist(uri) => format!("artist {uri}"),
-                        Page::Collection(uri) => format!("collection {uri}"),
-                    },
-                    self.playback
-                        .now
-                        .track
-                        .as_ref()
-                        .map(|track| format!("{} - {}", track.title, track.artist)),
-                    self.playback.now.playing,
-                    self.playback.now.position(),
-                    self.playback.now.device,
-                    self.library.playlists.len(),
-                    self.playback.notice,
-                );
-                let _ = std::fs::write(directory.join("state.txt"), state);
+                let _ = std::fs::write(directory.join("state.txt"), self.state_line());
             }
-            _ => {}
+            _ => return false,
         }
-        cx.notify();
+        true
+    }
+
+    fn state_line(&self) -> String {
+        let mut state = format!(
+            "account={} page={} track={:?} playing={} position={} device={:?} playlists={} notice={:?} ahead={} saved={} pending={} toast={:?} modal={}",
+            matches!(self.session, Session::Connected),
+            self.page.describe(),
+            self.playback
+                .now
+                .track
+                .as_ref()
+                .map(|track| format!("{} - {}", track.title, track.artist)),
+            self.playback.now.playing,
+            self.playback.now.position(),
+            self.playback.now.device,
+            self.library.playlists.len(),
+            self.playback.notice,
+            self.ahead.len(),
+            self.saved.known.len(),
+            self.saved.pending.len(),
+            self.toast.as_ref().map(|toast| toast.text.as_str()),
+            self.modal,
+        );
+        let fragments = [
+            account::state::state_fragment(self),
+            audio::state::state_fragment(self),
+            content::state::state_fragment(self),
+            details::state::state_fragment(self),
+            discovery::state::state_fragment(self),
+            library::state::state_fragment(self),
+            playback::state::state_fragment(self),
+            playlists::state::state_fragment(self),
+            system::state::state_fragment(self),
+        ];
+        for fragment in fragments.iter().filter(|fragment| !fragment.is_empty()) {
+            state.push(' ');
+            state.push_str(fragment);
+        }
+        state
     }
 
     fn referenced_covers(&self) -> HashSet<String> {
@@ -194,16 +318,23 @@ impl OpenMusic {
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.account, Account::Connected) {
+        if matches!(self.session, Session::Connected) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
     }
 
-    pub fn send(&self, command: Command) {
-        let _ = self.commands.send(command);
+    pub fn modal_open(&self) -> bool {
+        self.modal
+    }
+
+    pub fn send(&self, command: impl Into<Command>) {
+        let _ = self.commands.send(command.into());
     }
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.expire_toast() {
+            cx.notify();
+        }
         if !self.playback.now.playing {
             return;
         }
@@ -213,11 +344,18 @@ impl OpenMusic {
         }
     }
 
-    pub fn handle_control(&mut self, action: overlay::Action, cx: &mut Context<Self>) {
+    pub fn handle_control(
+        &mut self,
+        action: overlay::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match action {
-            overlay::Action::Press("previous") => self.send(Command::Previous),
-            overlay::Action::Press("next") => self.send(Command::Next),
-            overlay::Action::Press("toggle-playback") => self.toggle(cx),
+            overlay::Action::Press("previous") => self.perform(Intent::Previous, window, cx),
+            overlay::Action::Press("next") => self.perform(Intent::Next, window, cx),
+            overlay::Action::Press("toggle-playback") => {
+                self.perform(Intent::PlayPause, window, cx)
+            }
             overlay::Action::Press("play-station") => {
                 if let Some(mix) = self.discovery.station() {
                     let tracks = mix.tracks.clone();
@@ -225,24 +363,24 @@ impl OpenMusic {
                 }
             }
             overlay::Action::Press("sign-in") => {
-                self.account_error = None;
-                self.account = Account::Connecting;
+                self.session_error = None;
+                self.session = Session::Connecting;
                 self.send(Command::SignIn);
             }
             overlay::Action::Press("cancel") => self.send(Command::Cancel),
             overlay::Action::Press("copy-code") => {
-                if let Account::Pairing { code, .. } = &self.account {
+                if let Session::Pairing { code, .. } = &self.session {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
                 }
             }
             overlay::Action::Press("open-pairing") => {
-                if let Account::Pairing { url, .. } = &self.account {
+                if let Session::Pairing { url, .. } = &self.session {
                     cx.open_url(url);
                 }
             }
-            overlay::Action::Press("play-here") => self.send(Command::PlayHere),
+            overlay::Action::Press("play-here") => self.send(playback::worker::Command::PlayHere),
             overlay::Action::Press("lyrics") => self.show_lyrics(self.page != Page::Lyrics),
-            overlay::Action::Press("back") => self.back(),
+            overlay::Action::Press("back") => self.perform(Intent::Back, window, cx),
             overlay::Action::Press("play-artist") => {
                 if let Some((uri, Ok(artist))) = &self.discovery.artist {
                     let (uri, tracks) = (uri.clone(), artist.top_tracks.clone());
@@ -265,7 +403,7 @@ impl OpenMusic {
             overlay::Action::Volume(fraction) => {
                 let volume = (fraction.clamp(0., 1.) * f32::from(u16::MAX)).round() as u16;
                 self.playback.now.volume = volume;
-                self.send(Command::Volume(volume));
+                self.send(playback::worker::Command::Volume(volume));
             }
         }
         cx.notify();
@@ -273,14 +411,20 @@ impl OpenMusic {
 
     pub fn handle_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::Connecting => self.account = Account::Connecting,
-            Event::Pairing { code, url } => self.account = Account::Pairing { code, url },
+            Event::Connecting => self.session = Session::Connecting,
+            Event::Pairing { code, url } => self.session = Session::Pairing { code, url },
             Event::Connected => {
-                self.account = Account::Connected;
-                self.discovery.discovery_pending = true;
-                self.send(Command::Discover);
-                self.library.playlists_loading = true;
-                self.send(Command::Playlists);
+                self.session = Session::Connected;
+                account::state::connected(self, window, cx);
+                audio::state::connected(self, window, cx);
+                content::state::connected(self, window, cx);
+                details::state::connected(self, window, cx);
+                discovery::state::connected(self, window, cx);
+                library::state::connected(self, window, cx);
+                playback::state::connected(self, window, cx);
+                playlists::state::connected(self, window, cx);
+                system::state::connected(self, window, cx);
+                self.send(Command::ApplySettings(self.settings.clone()));
                 if let Some(track) = self.initial_track.take() {
                     self.input
                         .update(cx, |input, cx| input.set_value(track, window, cx));
@@ -288,56 +432,23 @@ impl OpenMusic {
                 }
             }
             Event::SignedOut(message) => {
-                self.account = Account::SignedOut;
-                self.account_error = message;
-                self.discovery.search_error = None;
-                self.discovery.results.clear();
-                self.discovery.home = Discovery::default();
-                self.discovery.newest_mix = None;
-                self.discovery.last_seed = None;
-                self.discovery.discovery_pending = false;
+                self.session = Session::SignedOut;
+                self.session_error = message;
                 self.page = Page::Home;
                 self.history.clear();
-                self.library.playlists.clear();
-                self.discovery.artist = None;
-                self.playlists.collection = None;
+                self.ahead.clear();
                 self.covers.clear();
-                self.playback.now = NowPlaying::default();
-                self.content.lyrics = None;
-                self.playback.notice = None;
-                self.discovery.search_pending = false;
-            }
-            Event::Playlists(playlists) => {
-                self.library.playlists = playlists;
-                self.library.playlists_loading = false;
-            }
-            Event::Artist { uri, result } => self.discovery.artist = Some((uri, result)),
-            Event::Collection { uri, result } => self.playlists.collection = Some((uri, result)),
-            Event::SearchDone(result) => {
-                self.discovery.search_pending = false;
-                match result {
-                    Ok(tracks) => self.discovery.results = tracks,
-                    Err(error) => self.discovery.search_error = Some(error),
-                }
-            }
-            Event::DirectTrack(result) => {
-                self.discovery.search_pending = false;
-                match result {
-                    Ok(track) => {
-                        self.discovery.results = vec![track.clone()];
-                        self.play(&[track], 0, cx);
-                    }
-                    Err(error) => self.discovery.search_error = Some(error),
-                }
-            }
-            Event::Discovery(home) => {
-                self.discovery.discovery_pending = false;
-                self.discovery.home = home;
-            }
-            Event::Recommendations(mix) => {
-                if mix.is_some() {
-                    self.discovery.newest_mix = mix;
-                }
+                self.saved = Saved::default();
+                self.toast = None;
+                account::state::signed_out(self);
+                audio::state::signed_out(self);
+                content::state::signed_out(self);
+                details::state::signed_out(self);
+                discovery::state::signed_out(self);
+                library::state::signed_out(self);
+                playback::state::signed_out(self);
+                playlists::state::signed_out(self);
+                system::state::signed_out(self);
             }
             Event::Cover { url, jpeg } => {
                 self.covers
@@ -347,62 +458,32 @@ impl OpenMusic {
                 }
             }
             Event::NowPlaying(now) => {
-                if let Some(track) = &now.track
-                    && track.is_track()
-                    && self
-                        .content
-                        .lyrics
-                        .as_ref()
-                        .is_none_or(|(uri, _)| *uri != track.uri)
-                {
-                    self.content.lyrics = Some((track.uri.clone(), None));
-                    self.content.lyrics_loading = true;
-                    self.content.lyrics_line = None;
-                    self.send(Command::Lyrics(track.uri.clone()));
-                }
-                if let Some(track) = &now.track
-                    && track.is_track()
-                    && !track.title.is_empty()
-                    && self.discovery.last_seed.as_ref() != Some(&track.uri)
-                {
-                    self.discovery.last_seed = Some(track.uri.clone());
-                    self.send(Command::Recommend(track.clone()));
-                }
-                let expected = self.playback.now.position();
-                let held = self.playback.seek_hold.filter(|(_, at)| {
-                    at.elapsed() < Duration::from_secs(3)
-                        && now.track.as_ref().map(|track| &track.uri)
-                            == self.playback.now.track.as_ref().map(|track| &track.uri)
-                        && now.position().abs_diff(expected) > 1500
-                });
-                let (position, observed) =
-                    (self.playback.now.position_ms, self.playback.now.observed);
-                self.playback.now = now;
-                if held.is_some() {
-                    self.playback.now.position_ms = position;
-                    self.playback.now.observed = observed;
-                } else {
-                    self.playback.seek_hold = None;
-                }
+                self.request_lyrics(&now);
+                self.recommend_from(&now);
+                self.set_now_playing(now);
                 self.follow_lyrics();
+                if let Some(uri) = self.track().map(|track| track.uri.clone()) {
+                    self.lookup_saved([uri]);
+                }
             }
             Event::Notice(message) => {
                 self.playback.notice = Some(message);
                 self.playback.seek_hold = None;
             }
-            Event::Lyrics { uri, lyrics } => {
-                if self
-                    .content
-                    .lyrics
-                    .as_ref()
-                    .is_some_and(|(pending, _)| *pending == uri)
-                {
-                    self.content.lyrics = Some((uri, lyrics));
-                    self.content.lyrics_loading = false;
-                    self.content.lyrics_line = None;
-                    self.follow_lyrics();
-                }
+            Event::MutationFailed { keys, message } => {
+                self.saved_failed(&keys);
+                self.show_toast(message, None);
             }
+            Event::Saved(event) => self.on_saved(event),
+            Event::Account(event) => account::state::on_event(self, event, window, cx),
+            Event::Audio(event) => audio::state::on_event(self, event, window, cx),
+            Event::Content(event) => content::state::on_event(self, event, window, cx),
+            Event::Details(event) => details::state::on_event(self, event, window, cx),
+            Event::Discovery(event) => discovery::state::on_event(self, event, window, cx),
+            Event::Library(event) => library::state::on_event(self, event, window, cx),
+            Event::Playback(event) => playback::state::on_event(self, event, window, cx),
+            Event::Playlists(event) => playlists::state::on_event(self, event, window, cx),
+            Event::System(event) => system::state::on_event(self, event, window, cx),
         }
         cx.notify();
     }

@@ -34,12 +34,7 @@ fn main() {
             gpui_component::init(cx);
             app_icon::install();
             menus::install(cx);
-            cx.on_window_closed(|cx| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
-            .detach();
+            areas::system::state::install(cx);
             let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
             cx.open_window(
                 WindowOptions {
@@ -62,13 +57,15 @@ fn main() {
                     overlay::set_handler(overlay::handler(controls));
                     let player = cx.new(|cx| OpenMusic::new(commands, initial_track, window, cx));
                     menus::connect(&player, window, cx);
+                    areas::system::state::window_opened(window, cx);
+                    window.focus(&player.read(cx).focus);
                     player.update(cx, |this, cx| {
                         this.send(Command::Restore);
                         cx.spawn_in(window, async move |view, window| {
                             while let Some(action) = presses.recv().await {
                                 if view
-                                    .update_in(window, |this, _, cx| {
-                                        this.handle_control(action, cx);
+                                    .update_in(window, |this, window, cx| {
+                                        this.handle_control(action, window, cx);
                                     })
                                     .is_err()
                                 {

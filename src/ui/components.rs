@@ -225,6 +225,29 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.glass_control(key, label, prominent, !self.modal_open(), palette, cx)
+    }
+
+    pub fn dock_control(
+        &self,
+        key: &'static str,
+        label: Label,
+        prominent: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        self.glass_control(key, label, prominent, true, palette, cx)
+    }
+
+    fn glass_control(
+        &self,
+        key: &'static str,
+        label: Label,
+        prominent: bool,
+        visible: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let slot = div()
             .id(key)
             .occlude()
@@ -234,7 +257,9 @@ impl OpenMusic {
             .items_center()
             .justify_center();
         if overlay::available() {
-            return slot.child(overlay::button(key, label, prominent));
+            return slot.when(visible, |slot| {
+                slot.child(overlay::button(key, label, prominent))
+            });
         }
         slot.rounded_full()
             .bg(rgba(if prominent {
@@ -248,9 +273,9 @@ impl OpenMusic {
             .hover(move |button| button.opacity(0.85))
             .text_size(px(13.))
             .font_weight(FontWeight::SEMIBOLD)
-            .on_click(
-                cx.listener(move |this, _, _, cx| this.handle_control(Action::Press(key), cx)),
-            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.handle_control(Action::Press(key), window, cx)
+            }))
             .map(|button| match label {
                 Label::Symbol(name) => button.child(icon(fallback_icon(name), 20., palette.text)),
                 Label::Text(text) => button.child(text),

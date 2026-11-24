@@ -1,4 +1,4 @@
-use gpui::{Context, FontWeight, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb, rgba};
 
 use crate::{
     app::OpenMusic,
@@ -76,5 +76,35 @@ impl OpenMusic {
                         .w_full(),
                 )
             })
+    }
+}
+
+impl OpenMusic {
+    pub fn queue_page(
+        &self,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
+    }
+
+    pub fn jam_page(
+        &self,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
+    }
+
+    pub fn jam_invite_page(
+        &self,
+        _uri: &str,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
     }
 }

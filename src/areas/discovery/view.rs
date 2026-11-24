@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use gpui::{Context, Div, FontWeight, Pixels, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, FontWeight, Pixels, div, prelude::*, px, rgb};
 use spotify_client::Track;
 
+use super::state::{SearchTab, SectionSource};
 use crate::{
     app::{OpenMusic, Page},
     ui::{
@@ -238,7 +239,13 @@ impl OpenMusic {
             })
     }
 
-    pub fn search_results(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn search_results(
+        &self,
+        _tab: SearchTab,
+        _card_side: Pixels,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
@@ -496,5 +503,28 @@ impl OpenMusic {
                         ),
                 )
             })
+    }
+}
+
+impl OpenMusic {
+    pub fn browse_page(
+        &self,
+        _uri: &str,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
+    }
+
+    pub fn section_page(
+        &self,
+        _uri: &str,
+        _source: SectionSource,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
     }
 }

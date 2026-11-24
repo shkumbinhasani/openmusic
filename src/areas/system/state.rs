@@ -1,1 +1,58 @@
+use std::path::Path;
 
+use gpui::{App, Context, Window};
+use serde::{Deserialize, Serialize};
+
+use super::worker::Event;
+use crate::app::OpenMusic;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SystemPrefs {}
+
+pub fn install(cx: &mut App) {
+    cx.on_window_closed(|cx| {
+        if cx.windows().is_empty() {
+            cx.quit();
+        }
+    })
+    .detach();
+}
+
+pub fn window_opened(_window: &mut Window, _cx: &mut App) {}
+
+impl OpenMusic {
+    pub fn show_main_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        window.activate_window();
+    }
+
+    pub fn toggle_mini_player(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+}
+
+pub fn on_event(
+    _app: &mut OpenMusic,
+    event: Event,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) {
+    match event {}
+}
+
+pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {}
+
+pub fn signed_out(_app: &mut OpenMusic) {}
+
+pub fn debug(
+    _app: &mut OpenMusic,
+    _verb: &str,
+    _rest: &str,
+    _directory: &Path,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) -> bool {
+    false
+}
+
+pub fn state_fragment(_app: &OpenMusic) -> String {
+    String::new()
+}

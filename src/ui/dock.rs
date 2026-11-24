@@ -1,6 +1,6 @@
 use gpui::{Context, FontWeight, div, prelude::*, px, rgb, rgba};
 
-use super::{Palette, WINDOW_INSET};
+use super::{DOCK_HEIGHT, Palette, WINDOW_INSET};
 use crate::{
     app::{OpenMusic, Page},
     overlay::{self, Label, NowPlaying as NowPlayingBar},
@@ -45,12 +45,12 @@ impl OpenMusic {
             .left(px(WINDOW_INSET))
             .right(px(WINDOW_INSET))
             .bottom(px(WINDOW_INSET))
-            .h(px(60.))
+            .h(px(DOCK_HEIGHT))
             .flex()
             .items_center()
             .gap_2p5()
             .child(
-                self.control(
+                self.dock_control(
                     "previous",
                     Label::Symbol("backward.fill"),
                     false,
@@ -60,11 +60,11 @@ impl OpenMusic {
                 .size(px(48.)),
             )
             .child(
-                self.control("toggle-playback", Label::Symbol(toggle), false, palette, cx)
+                self.dock_control("toggle-playback", Label::Symbol(toggle), false, palette, cx)
                     .size(px(60.)),
             )
             .child(
-                self.control("next", Label::Symbol("forward.fill"), false, palette, cx)
+                self.dock_control("next", Label::Symbol("forward.fill"), false, palette, cx)
                     .size(px(48.)),
             )
             .child(div().relative().flex_1().min_w_0().h_full().map(|bar| {
@@ -94,7 +94,7 @@ impl OpenMusic {
                 }
             }))
             .child(
-                self.control(
+                self.dock_control(
                     "lyrics",
                     Label::Symbol(if self.page == Page::Lyrics {
                         "quote.bubble.fill"

@@ -1,4 +1,4 @@
-use gpui::{Context, FontWeight, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb};
 
 use crate::{
     app::{OpenMusic, Page},
@@ -98,5 +98,17 @@ impl OpenMusic {
                 cx,
             )
         })
+    }
+}
+
+impl OpenMusic {
+    pub fn blend_invitation_page(
+        &self,
+        _id: &str,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
     }
 }

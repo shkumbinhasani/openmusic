@@ -1,4 +1,4 @@
-use gpui::{Context, FontWeight, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb, rgba};
 
 use crate::{
     app::{OpenMusic, Page},
@@ -91,5 +91,35 @@ impl OpenMusic {
                         },
                     )),
             )
+    }
+}
+
+impl OpenMusic {
+    pub fn liked_page(
+        &self,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
+    }
+
+    pub fn recent_page(
+        &self,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
+    }
+
+    pub fn folder_page(
+        &self,
+        _uri: &str,
+        _card_side: Pixels,
+        palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.page_status("Coming soon", palette).into_any_element()
     }
 }

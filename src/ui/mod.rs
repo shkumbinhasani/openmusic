@@ -3,12 +3,13 @@ mod dock;
 mod sidebar;
 
 use gpui::{
-    App, Context, Div, FontWeight, Window, WindowAppearance, div, prelude::*, px, rgb, rgba,
+    AnyElement, App, Context, Div, FontWeight, Pixels, Window, WindowAppearance, div, prelude::*,
+    px, rgb, rgba,
 };
-use gpui_component::{Theme, ThemeMode};
+use gpui_component::{Root, Theme, ThemeMode, WindowExt};
 
 use crate::{
-    app::{Account, OpenMusic, Page},
+    app::{OpenMusic, Page, Session},
     glass, icons, overlay,
 };
 use components::icon;
@@ -129,12 +130,13 @@ pub(super) fn apply_theme(appearance: WindowAppearance, cx: &mut App) {
 }
 
 const WINDOW_INSET: f32 = 8.;
+const DOCK_HEIGHT: f32 = 60.;
 
 impl OpenMusic {
     fn sign_in(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let (headline, description) = match self.account {
-            Account::Connecting => ("Connecting to Spotify", "This can take a few seconds."),
-            Account::Pairing { .. } => (
+        let (headline, description) = match self.session {
+            Session::Connecting => ("Connecting to Spotify", "This can take a few seconds."),
+            Session::Pairing { .. } => (
                 "Pair your account",
                 "Open Spotify and enter this code if prompted.",
             ),
@@ -143,8 +145,8 @@ impl OpenMusic {
                 "Connect your Spotify Premium account to get started.",
             ),
         };
-        let controls = match &self.account {
-            Account::Pairing { code, .. } => div()
+        let controls = match &self.session {
+            Session::Pairing { code, .. } => div()
                 .flex()
                 .flex_col()
                 .items_center()
@@ -176,7 +178,7 @@ impl OpenMusic {
                         ))
                         .child(self.text_control("cancel", "Cancel", false, palette, cx)),
                 ),
-            Account::Connecting => {
+            Session::Connecting => {
                 div().child(self.text_control("cancel", "Cancel", false, palette, cx))
             }
             _ => {
@@ -199,33 +201,115 @@ impl OpenMusic {
                     .child(headline),
             )
             .child(div().text_color(rgb(palette.muted)).child(description))
-            .when_some(self.account_error.clone(), |page, error| {
+            .when_some(self.session_error.clone(), |page, error| {
                 page.child(div().text_sm().text_color(rgb(palette.accent)).child(error))
             })
             .child(div().mt_2().child(controls))
+    }
+
+    fn page_body(&self, card_side: Pixels, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        match self.page.clone() {
+            Page::Home => self.discover(card_side, palette, cx).into_any_element(),
+            Page::Search(tab) => self
+                .search_results(tab, card_side, palette, cx)
+                .into_any_element(),
+            Page::Browse(uri) => self.browse_page(&uri, card_side, palette, cx),
+            Page::Section { uri, source } => {
+                self.section_page(&uri, source, card_side, palette, cx)
+            }
+            Page::Artist(uri) => self
+                .artist_page(&uri, card_side, palette, cx)
+                .into_any_element(),
+            Page::Collection(uri) => self.collection_page(&uri, palette, cx).into_any_element(),
+            Page::BlendInvitation(id) => self.blend_invitation_page(&id, card_side, palette, cx),
+            Page::Track(uri) => self.track_page(&uri, card_side, palette, cx),
+            Page::Queue => self.queue_page(card_side, palette, cx),
+            Page::Jam => self.jam_page(card_side, palette, cx),
+            Page::JamInvite(uri) => self.jam_invite_page(&uri, card_side, palette, cx),
+            Page::Liked => self.liked_page(card_side, palette, cx),
+            Page::Recent => self.recent_page(card_side, palette, cx),
+            Page::Folder(uri) => self.folder_page(&uri, card_side, palette, cx),
+            Page::Lyrics => self.lyrics_page(palette, cx).into_any_element(),
+            Page::Show(uri) => self.show_page(&uri, card_side, palette, cx),
+            Page::Episode(uri) => self.episode_page(&uri, card_side, palette, cx),
+            Page::YourEpisodes => self.your_episodes_page(card_side, palette, cx),
+            Page::NowPlaying => self.now_playing_page(card_side, palette, cx),
+            Page::Settings => self.settings_page(card_side, palette, cx),
+            Page::Profile(uri) => self.profile_page(&uri, card_side, palette, cx),
+            Page::ProfileList(uri, kind) => {
+                self.profile_list_page(&uri, kind, card_side, palette, cx)
+            }
+            Page::LocalFiles => self.local_files_page(card_side, palette, cx),
+        }
+    }
+
+    fn toast_layer(&self, palette: Palette, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let toast = self.toast.as_ref()?;
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(WINDOW_INSET + DOCK_HEIGHT + 14.))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("toast")
+                        .occlude()
+                        .h(px(36.))
+                        .max_w(px(520.))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .rounded_full()
+                        .bg(rgb(palette.raised))
+                        .border_1()
+                        .border_color(rgba(palette.line))
+                        .shadow_lg()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(div().min_w_0().truncate().child(toast.text.clone()))
+                        .when(toast.undo.is_some(), |pill| {
+                            pill.child(
+                                div()
+                                    .id("toast-undo")
+                                    .flex_shrink_0()
+                                    .cursor_pointer()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(palette.accent))
+                                    .child("Undo")
+                                    .on_click(cx.listener(|this, _, _, cx| this.undo_toast(cx))),
+                            )
+                        }),
+                ),
+        )
     }
 }
 
 impl Render for OpenMusic {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.modal = window.has_active_dialog(cx) || window.has_active_sheet(cx);
         let palette = Palette::for_window(window.appearance());
         let content_width = window.viewport_size().width - px(248.);
         let card_side =
             ((content_width.min(px(1060.)) - px(80.) - px(48.)) / 4.).clamp(px(110.), px(200.));
-        let connected = matches!(self.account, Account::Connected);
+        let connected = matches!(self.session, Session::Connected);
         let roomy = window.viewport_size().width >= px(1060.);
 
         let content = div().flex_1().min_h_0().map(|content| {
             if !connected {
                 return content.child(self.sign_in(palette, cx));
             }
-            if self.page == Page::Lyrics {
-                return content.child(self.lyrics_page(palette, cx));
+            if self.page.fills_content() {
+                return content.child(self.page_body(card_side, palette, cx));
             }
             let scroll_id = match &self.page {
+                Page::Home => "home".to_owned(),
+                Page::Search(_) => format!("search-{}", self.discovery.search_query),
                 Page::Artist(uri) | Page::Collection(uri) => format!("page-{uri}"),
-                Page::Search => format!("search-{}", self.discovery.search_query),
-                _ => "home".to_owned(),
+                page => format!("page-{}", page.describe()),
             };
             content.child(
                 div()
@@ -240,16 +324,7 @@ impl Render for OpenMusic {
                             .px(px(32.))
                             .pt(px(40.))
                             .pb(px(96.))
-                            .map(|page| match self.page.clone() {
-                                Page::Search => page.child(self.search_results(palette, cx)),
-                                Page::Artist(uri) => {
-                                    page.child(self.artist_page(&uri, card_side, palette, cx))
-                                }
-                                Page::Collection(uri) => {
-                                    page.child(self.collection_page(&uri, palette, cx))
-                                }
-                                _ => page.child(self.discover(card_side, palette, cx)),
-                            }),
+                            .child(self.page_body(card_side, palette, cx)),
                     ),
             )
         });
@@ -258,6 +333,8 @@ impl Render for OpenMusic {
             .size_full()
             .relative()
             .flex()
+            .key_context("OpenMusic")
+            .track_focus(&self.focus)
             .when(!glass::available(), |root| {
                 root.bg(rgb(if palette.dark { 0x121216 } else { 0xe9e8ee }))
             })
@@ -292,8 +369,12 @@ impl Render for OpenMusic {
                                     )),
                             )
                             .child(self.dock(roomy, palette, cx))
+                            .children(self.toast_layer(palette, cx))
                     }),
             )
+            .children(Root::render_sheet_layer(window, cx))
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
             .child(glass::finish())
             .child(overlay::finish())
     }
