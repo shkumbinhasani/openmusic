@@ -5,8 +5,12 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use prost::Message as _;
 use reqwest::{Method, StatusCode};
 use serde_json::{Map, Value, json};
+use spotify_proto::playlist4::proto::{
+    ListAttributeKind, PlaylistModificationInfo, RootlistModificationInfo, op,
+};
 
 use crate::{
     api::{Api, Body, HttpStatus},
@@ -1134,6 +1138,92 @@ pub async fn more(api: &Api, uri: &str, from: usize) -> Result<(Vec<Track>, Opti
     let contents = parse_contents(&fetch(api, id, from, PAGE).await?);
     let tracks = tracks_for(api, &contents.items).await?;
     Ok((tracks, contents.next.filter(|next| *next > from)))
+}
+
+pub async fn revision(api: &Api, uri: &str) -> Result<Option<String>> {
+    let id = id_of(uri)?;
+    let value: Value = api
+        .get_json(&format!(
+            "/playlist/v2/playlist/{id}?decorate=revision&from=0&length=0"
+        ))
+        .await?;
+    Ok(text(&value["revision"]))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Push {
+    Rootlist {
+        user: String,
+        revision: Option<String>,
+    },
+    Playlist {
+        uri: String,
+        revision: Option<String>,
+        listed: bool,
+    },
+}
+
+fn revision_text(bytes: Option<&Vec<u8>>) -> Option<String> {
+    bytes
+        .filter(|bytes| !bytes.is_empty())
+        .map(|bytes| STANDARD.encode(bytes))
+}
+
+const LISTED: [ListAttributeKind; 3] = [
+    ListAttributeKind::ListName,
+    ListAttributeKind::ListPicture,
+    ListAttributeKind::ListCollaborative,
+];
+
+fn changes_listing(info: &PlaylistModificationInfo) -> bool {
+    info.ops.iter().any(|op| {
+        if op.kind() != op::Kind::UpdateListAttributes {
+            return false;
+        }
+        let Some(state) = op
+            .update_list_attributes
+            .as_ref()
+            .map(|update| &update.new_attributes)
+        else {
+            return true;
+        };
+        let values = &state.values;
+        values.name.is_some()
+            || values.picture.is_some()
+            || values.collaborative.is_some()
+            || state
+                .no_value
+                .iter()
+                .any(|kind| LISTED.iter().any(|listed| *listed as i32 == *kind))
+    })
+}
+
+pub fn push(topic: &str, payload: Option<&[u8]>) -> Option<Push> {
+    let rest = topic.strip_prefix("hm://playlist/v2/")?;
+    if let Some(user) = rest
+        .strip_prefix("user/")
+        .and_then(|rest| rest.strip_suffix("/rootlist"))
+    {
+        let info = payload.and_then(|bytes| RootlistModificationInfo::decode(bytes).ok());
+        return Some(Push::Rootlist {
+            user: url::form_urlencoded::parse(user.as_bytes())
+                .next()
+                .map(|(key, _)| key.into_owned())
+                .unwrap_or_else(|| user.to_owned()),
+            revision: info.and_then(|info| revision_text(info.new_revision.as_ref())),
+        });
+    }
+    let id = rest.strip_prefix("playlist/")?;
+    let id = id.split(['/', '?']).next().filter(|id| !id.is_empty())?;
+    let info = payload.and_then(|bytes| PlaylistModificationInfo::decode(bytes).ok());
+    let listed = info
+        .as_ref()
+        .is_none_or(|info| info.truncated_ops.unwrap_or_default() || changes_listing(info));
+    Some(Push::Playlist {
+        uri: format!("spotify:playlist:{id}"),
+        revision: info.and_then(|info| revision_text(info.new_revision.as_ref())),
+        listed,
+    })
 }
 
 pub async fn rootlist(api: &Api, user: &str) -> Result<Rootlist> {
@@ -2630,5 +2720,113 @@ mod tests {
             ),
             ["spotify:playlist:b"]
         );
+    }
+
+    #[test]
+    fn reads_playlist_pushes() {
+        use spotify_proto::playlist4::proto::{
+            ListAttributes, ListAttributesPartialState, Op, UpdateListAttributes,
+        };
+        let rename = Op {
+            kind: op::Kind::UpdateListAttributes as i32,
+            update_list_attributes: Some(UpdateListAttributes {
+                new_attributes: ListAttributesPartialState {
+                    values: ListAttributes {
+                        name: Some("New".into()),
+                        ..ListAttributes::default()
+                    },
+                    no_value: Vec::new(),
+                },
+                old_attributes: None,
+            }),
+            ..Op::default()
+        };
+        let describe = Op {
+            kind: op::Kind::UpdateListAttributes as i32,
+            update_list_attributes: Some(UpdateListAttributes {
+                new_attributes: ListAttributesPartialState {
+                    values: ListAttributes {
+                        description: Some("Words".into()),
+                        ..ListAttributes::default()
+                    },
+                    no_value: Vec::new(),
+                },
+                old_attributes: None,
+            }),
+            ..Op::default()
+        };
+        let removed_picture = Op {
+            kind: op::Kind::UpdateListAttributes as i32,
+            update_list_attributes: Some(UpdateListAttributes {
+                new_attributes: ListAttributesPartialState {
+                    values: ListAttributes::default(),
+                    no_value: vec![ListAttributeKind::ListPicture as i32],
+                },
+                old_attributes: None,
+            }),
+            ..Op::default()
+        };
+        let added = Op {
+            kind: op::Kind::Add as i32,
+            ..Op::default()
+        };
+        let info = |ops: Vec<Op>| {
+            PlaylistModificationInfo {
+                uri: Some(b"spotify:playlist:x".to_vec()),
+                new_revision: Some(vec![0, 0, 0, 42]),
+                parent_revision: Some(vec![0, 0, 0, 41]),
+                ops,
+                ..PlaylistModificationInfo::default()
+            }
+            .encode_to_vec()
+        };
+        let topic = "hm://playlist/v2/playlist/37i9dQZF1DXcBWIGoYBM5M";
+        assert_eq!(
+            push(topic, Some(&info(vec![added.clone()]))),
+            Some(Push::Playlist {
+                uri: "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into(),
+                revision: Some("AAAAKg==".into()),
+                listed: false,
+            })
+        );
+        for ops in [vec![added.clone(), rename], vec![removed_picture]] {
+            assert!(matches!(
+                push(topic, Some(&info(ops))),
+                Some(Push::Playlist { listed: true, .. })
+            ));
+        }
+        assert!(matches!(
+            push(topic, Some(&info(vec![describe]))),
+            Some(Push::Playlist { listed: false, .. })
+        ));
+        assert_eq!(
+            push(topic, Some(b"not a protobuf \xff")),
+            Some(Push::Playlist {
+                uri: "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into(),
+                revision: None,
+                listed: true,
+            })
+        );
+        let rootlist = RootlistModificationInfo {
+            new_revision: Some(vec![0, 0, 0, 42]),
+            ..RootlistModificationInfo::default()
+        }
+        .encode_to_vec();
+        assert_eq!(
+            push("hm://playlist/v2/user/some%20one/rootlist", Some(&rootlist)),
+            Some(Push::Rootlist {
+                user: "some one".into(),
+                revision: Some("AAAAKg==".into()),
+            })
+        );
+        assert_eq!(
+            push("hm://playlist/v2/user/someone/rootlist", None),
+            Some(Push::Rootlist {
+                user: "someone".into(),
+                revision: None,
+            })
+        );
+        assert_eq!(push("hm://collection/collection/someone/json", None), None);
+        assert_eq!(push("hm://playlist/v2/playlist/", None), None);
     }
 }

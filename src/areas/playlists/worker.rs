@@ -7,7 +7,8 @@ use spotify_client::{
     dealer::Message,
     pathfinder::PathfinderError,
     playlist::{
-        self, Details, EditTarget, ItemPosition, Level, Permissions, Position, RootPlace, Rootlist,
+        self, Details, EditTarget, ItemPosition, Level, Permissions, Position, Push, RootPlace,
+        Rootlist,
     },
 };
 
@@ -177,6 +178,9 @@ pub enum Command {
     Rootlist,
     Permissions(String),
     Base(String),
+    Check {
+        uri: String,
+    },
     Editable(Vec<String>),
     PrepareAdd {
         target: String,
@@ -233,6 +237,11 @@ pub enum Event {
     },
     Invited {
         link: String,
+    },
+    Pushed(Push),
+    Checked {
+        uri: String,
+        revision: Option<String>,
     },
     Changed {
         uri: Option<String>,
@@ -300,6 +309,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             .tasks
             .spawn_keyed(format!("playlist-permissions {uri}"), permissions(api, uri)),
         Command::Base(uri) => ctx.tasks.spawn(base(api, uri)),
+        Command::Check { uri } => ctx
+            .tasks
+            .spawn_keyed(format!("playlist-check {uri}"), check(api, uri)),
         Command::Editable(uris) => ctx.tasks.spawn_keyed(
             format!("playlist-editable {}", uris.join(",")),
             editable(api, uris),
@@ -329,7 +341,16 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
     }
 }
 
-pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
+pub fn on_push(message: &Message, ctx: &mut Ctx) {
+    if let Some(push) = playlist::push(&message.uri, message.bytes().as_deref()) {
+        ctx.publish(Event::Pushed(push));
+    }
+}
+
+async fn check(api: Api, uri: String) -> crate::worker::Event {
+    let revision = playlist::revision(&api, &uri).await.ok().flatten();
+    Event::Checked { uri, revision }.into()
+}
 
 async fn collection(api: Api, uri: String, upto: usize) -> crate::worker::Event {
     let result = if playlist::playlist_id(&uri).is_some() {

@@ -6,8 +6,8 @@ use std::{
 };
 
 use gpui::{
-    App, AppContext, ClipboardItem, Context, PromptButton, PromptLevel, SharedString, WeakEntity,
-    Window,
+    App, AppContext, ClipboardItem, Context, PromptButton, PromptLevel, SharedString, Subscription,
+    WeakEntity, Window,
 };
 use gpui_component::WindowExt;
 use spotify_client::{
@@ -15,8 +15,8 @@ use spotify_client::{
     catalog::{Capabilities, Collection},
     connect::{self, PlayOptions, Shuffle},
     playlist::{
-        self, Details, EditTarget, Folder, ItemPosition, Level, Permissions, RootEntry, RootNode,
-        RootPlace, RootPlaylist, Rootlist, TargetKind,
+        self, Details, EditTarget, Folder, ItemPosition, Level, Permissions, Push, RootEntry,
+        RootNode, RootPlace, RootPlaylist, Rootlist, TargetKind,
     },
 };
 
@@ -42,6 +42,26 @@ const BASE_SPACING: u32 = 4;
 const EDITABLE_FRESH: Duration = Duration::from_secs(60);
 const EDITABLE_WAIT: Duration = Duration::from_secs(30);
 const EDITABLE_KEEP: usize = 16;
+const PUSH_DELAY: Duration = Duration::from_millis(500);
+const FOCUS_REFRESH: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+pub struct Pushes {
+    pub due: Option<Instant>,
+    pub rootlist: bool,
+    pub playlists: HashSet<String>,
+    pub seen: usize,
+}
+
+impl Pushes {
+    fn waiting(&self) -> bool {
+        self.rootlist || !self.playlists.is_empty()
+    }
+}
+
+pub fn outdated(pushed: Option<&str>, current: Option<&str>) -> bool {
+    pushed.is_none() || pushed != current
+}
 
 pub struct Editable {
     pub at: Instant,
@@ -81,6 +101,9 @@ pub struct State {
     pub menu_source: Option<AddSource>,
     pub snapshots: HashMap<String, Snapshot>,
     pub save_to: Option<WeakEntity<SaveTo>>,
+    pub pushes: Pushes,
+    pub activation: Option<Subscription>,
+    pub refreshed: Option<Instant>,
 }
 
 impl State {
@@ -1198,6 +1221,92 @@ impl OpenMusic {
     }
 }
 
+impl OpenMusic {
+    pub fn on_playlist_push(&mut self, push: Push) {
+        self.playlists.pushes.seen += 1;
+        self.playlists.editable.clear();
+        match push {
+            Push::Rootlist { user, revision } => {
+                if self.playlists.user.as_deref().is_some_and(|me| me != user) {
+                    return;
+                }
+                let current = self
+                    .playlists
+                    .rootlist
+                    .as_ref()
+                    .map(|list| list.revision.as_str());
+                if outdated(revision.as_deref(), current) {
+                    self.playlists.pushes.rootlist = true;
+                }
+            }
+            Push::Playlist {
+                uri,
+                revision,
+                listed,
+            } => {
+                if listed
+                    && self
+                        .playlists
+                        .rootlist
+                        .as_ref()
+                        .is_some_and(|list| list.contains(&uri))
+                {
+                    self.playlists.pushes.rootlist = true;
+                }
+                let stale = self.open_playlist(&uri).is_some_and(|collection| {
+                    outdated(revision.as_deref(), collection.revision.as_deref())
+                });
+                if stale {
+                    self.playlists.pushes.playlists.insert(uri);
+                }
+            }
+        }
+        if self.playlists.pushes.waiting() {
+            self.playlists.pushes.due = Some(Instant::now() + PUSH_DELAY);
+        }
+    }
+
+    fn apply_pushes(&mut self) {
+        let pushes = &mut self.playlists.pushes;
+        if pushes.due.is_none_or(|due| Instant::now() < due) {
+            return;
+        }
+        pushes.due = None;
+        let rootlist = std::mem::take(&mut pushes.rootlist);
+        let playlists = std::mem::take(&mut pushes.playlists);
+        if rootlist {
+            self.refresh_rootlist();
+        }
+        for uri in playlists {
+            if !self.playlists.snapshots.contains_key(&uri) {
+                self.reload_playlist(&uri);
+            }
+        }
+    }
+
+    pub fn refresh_on_focus(&mut self) {
+        if self.playlists.user.is_none()
+            || self
+                .playlists
+                .refreshed
+                .is_some_and(|at| at.elapsed() < FOCUS_REFRESH)
+        {
+            return;
+        }
+        self.playlists.refreshed = Some(Instant::now());
+        self.playlists.editable.clear();
+        self.refresh_rootlist();
+        if let Some((_, Ok(collection))) = &self.playlists.collection
+            && collection.kind == "PLAYLIST"
+            && !self.playlists.snapshots.contains_key(&collection.uri)
+        {
+            self.send(Command::Check {
+                uri: collection.uri.clone(),
+            });
+        }
+    }
+}
+
 fn after_write(app: &mut OpenMusic, uri: Option<String>, rootlist: bool) {
     if rootlist {
         app.refresh_rootlist();
@@ -1379,6 +1488,16 @@ pub fn on_event(
             cx.write_to_clipboard(ClipboardItem::new_string(link));
             app.show_toast("Link copied to clipboard", None);
         }
+        Event::Pushed(push) => app.on_playlist_push(push),
+        Event::Checked { uri, revision } => {
+            let stale = revision.is_some()
+                && app
+                    .open_playlist(&uri)
+                    .is_some_and(|collection| collection.revision != revision);
+            if stale {
+                app.reload_playlist(&uri);
+            }
+        }
         Event::Changed {
             uri,
             rootlist,
@@ -1413,8 +1532,14 @@ pub fn on_event(
     }
 }
 
-pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<OpenMusic>) {
     app.send(Command::Rootlist);
+    app.playlists.refreshed = Some(Instant::now());
+    app.playlists.activation = Some(cx.observe_window_activation(window, |app, window, _| {
+        if window.is_window_active() {
+            app.refresh_on_focus();
+        }
+    }));
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
@@ -1526,6 +1651,11 @@ pub fn describe_playlist(app: &OpenMusic) -> String {
                 .map_or(0, |snapshot| snapshot.pending),
         ),
     ];
+    lines.push(format!(
+        "pushes={} push_due={}",
+        app.playlists.pushes.seen,
+        flag(app.playlists.pushes.due.is_some()),
+    ));
     lines.extend(collection.tracks.iter().enumerate().map(|(index, track)| {
         format!(
             "{index} {} {} {:?}",
@@ -1776,6 +1906,29 @@ pub fn debug(
         }
         ("playlist-members", [uri]) => app.show_collaborators(uri, window, cx),
         ("playlist-shuffle", []) => app.shuffle_collection(cx),
+        ("push", ["rootlist", revision @ ..]) => {
+            let user = app.playlists.user.clone().unwrap_or_default();
+            app.on_playlist_push(Push::Rootlist {
+                user,
+                revision: revision.first().map(|revision| (*revision).to_owned()),
+            });
+        }
+        ("push", ["playlist", uri, rest @ ..]) => {
+            if let Some(uri) = playlist::canonical(uri) {
+                app.on_playlist_push(Push::Playlist {
+                    uri,
+                    revision: rest
+                        .iter()
+                        .find(|word| **word != "listed")
+                        .map(|revision| (*revision).to_owned()),
+                    listed: rest.contains(&"listed"),
+                });
+            }
+        }
+        ("focus-refresh", []) => {
+            app.playlists.refreshed = None;
+            app.refresh_on_focus();
+        }
         _ => return false,
     }
     true
@@ -1858,6 +2011,7 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    app.apply_pushes();
     if let Some(source) = app.playlists.wanted.take() {
         app.request_editable(&source.uris);
         app.playlists.menu_source = Some(source);
@@ -1954,6 +2108,23 @@ mod tests {
         );
         assert_eq!(root_place("after:"), None);
         assert_eq!(root_place("middle"), None);
+    }
+
+    #[test]
+    fn reloads_only_what_a_push_changed() {
+        assert!(outdated(None, Some("AAAAKg==")));
+        assert!(outdated(Some("AAAAKw=="), Some("AAAAKg==")));
+        assert!(outdated(Some("AAAAKg=="), None));
+        assert!(!outdated(Some("AAAAKg=="), Some("AAAAKg==")));
+        let mut pushes = Pushes::default();
+        assert!(!pushes.waiting());
+        pushes.playlists.insert("spotify:playlist:x".into());
+        assert!(pushes.waiting());
+        let rootlist = Pushes {
+            rootlist: true,
+            ..Pushes::default()
+        };
+        assert!(rootlist.waiting());
     }
 
     #[test]
