@@ -1,29 +1,113 @@
-use std::{collections::HashSet, path::Path, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::{Duration, Instant},
+};
 
-use gpui::{App, Context, Window};
+use gpui::{App, Context, ParentElement, Styled, Window, px};
+use gpui_component::{ActiveTheme, WindowExt, button::ButtonVariant, dialog::DialogButtonProps};
 use serde::{Deserialize, Serialize};
 use spotify_client::{
     Track,
-    connect::{self, PlayOptions, Repeat, Shuffle},
+    connect::{
+        self, Allowed, ContextOptions, PlayOptions, Playback, QueueItem, QueueKey, Repeat, Shuffle,
+    },
     engine::NowPlaying,
+    entity,
 };
 
-use super::worker::{Command, Event};
+use super::worker::{Command, Event, PlaybackView, RECENT_LIMIT, lookup_uri};
 use crate::{
     app::{OpenMusic, Page, intent::Intent},
-    menus::Handle,
-    ui::tracks::{RowDrag, RowDrop},
+    menus::{self, CycleRepeat, Handle, ShowQueue, ToggleShuffle},
+    ui::{
+        menu::Row,
+        tracks::{RowDrag, RowDrop},
+    },
 };
+
+pub const OPTIMISTIC: Duration = Duration::from_secs(3);
+const REFRESH_SPACING: Duration = Duration::from_secs(2);
+
+pub const QUEUE_CURRENT: &str = "queue-current";
+pub const QUEUE_QUEUED: &str = "queue-queued";
+pub const QUEUE_NEXT: &str = "queue-next";
+pub const QUEUE_AUTOPLAY: &str = "queue-autoplay";
+pub const QUEUE_RECENT: &str = "queue-recent";
+const MOVABLE: [&str; 2] = [QUEUE_QUEUED, QUEUE_NEXT];
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlaybackPrefs {}
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueueRow {
+    pub key: QueueKey,
+    pub provider: String,
+    pub track: Track,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueueView {
+    pub current: Option<QueueRow>,
+    pub queued: Vec<QueueRow>,
+    pub next: Vec<QueueRow>,
+    pub autoplay: Vec<QueueRow>,
+    pub recent: Vec<QueueRow>,
+}
+
+impl QueueView {
+    pub fn section(&self, prefix: &str) -> &[QueueRow] {
+        match prefix {
+            QUEUE_CURRENT => self.current.as_slice(),
+            QUEUE_QUEUED => &self.queued,
+            QUEUE_NEXT => &self.next,
+            QUEUE_AUTOPLAY => &self.autoplay,
+            QUEUE_RECENT => &self.recent,
+            _ => &[],
+        }
+    }
+
+    pub fn row(&self, row: Row) -> Option<&QueueRow> {
+        self.section(row.0).get(row.1)
+    }
+
+    pub fn upcoming(&self) -> usize {
+        self.queued.len() + self.next.len() + self.autoplay.len()
+    }
+}
+
+struct PendingQueue {
+    revision: String,
+    hidden: Vec<QueueKey>,
+    cleared: bool,
+    since: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContextShuffle {
+    pub server: Option<ContextOptions>,
+    pub smart: Option<bool>,
+    pub chosen: Option<Shuffle>,
+    requested: bool,
+}
+
 #[derive(Default)]
 pub struct State {
     pub now: NowPlaying,
     pub notice: Option<String>,
-    pub seek_hold: Option<(u32, std::time::Instant)>,
+    pub seek_hold: Option<(u32, Instant)>,
+    pub model: Option<Box<Playback>>,
+    pub tracks: HashMap<String, Track>,
+    pub queue: QueueView,
+    pub contexts: HashMap<String, ContextShuffle>,
+    pub refreshes: u32,
+    missing: HashSet<String>,
+    requested: HashSet<String>,
+    pending_shuffle: Option<(Shuffle, Instant)>,
+    pending_repeat: Option<(Repeat, Instant)>,
+    pending_queue: Option<PendingQueue>,
+    last_refresh: Option<Instant>,
 }
 
 impl State {
@@ -34,7 +118,71 @@ impl State {
                 .iter()
                 .filter_map(|track| track.cover.clone()),
         );
+        let queue = &self.queue;
+        urls.extend(
+            queue
+                .current
+                .iter()
+                .chain(&queue.queued)
+                .chain(&queue.next)
+                .chain(&queue.autoplay)
+                .chain(&queue.recent)
+                .filter_map(|row| row.track.cover.clone()),
+        );
     }
+}
+
+pub fn next_shuffle(current: Shuffle, allowed: bool, smart: bool) -> Shuffle {
+    if !allowed {
+        return current;
+    }
+    match current {
+        Shuffle::Off => Shuffle::On,
+        Shuffle::On if smart => Shuffle::Smart,
+        Shuffle::On | Shuffle::Smart => Shuffle::Off,
+    }
+}
+
+pub fn next_repeat(current: Repeat, allowed: &Allowed) -> Repeat {
+    match current {
+        Repeat::Off if allowed.repeat_context => Repeat::Context,
+        Repeat::Off if allowed.repeat_track => Repeat::Track,
+        Repeat::Off => Repeat::Off,
+        Repeat::Context if allowed.repeat_track => Repeat::Track,
+        Repeat::Context | Repeat::Track => Repeat::Off,
+    }
+}
+
+fn metadata_track(item: &QueueItem, title: &str) -> Track {
+    let field = |key: &str| {
+        item.metadata
+            .get(key)
+            .filter(|value| !value.is_empty())
+            .cloned()
+    };
+    let album = field("album_title").unwrap_or_default();
+    Track {
+        uri: item.uri.clone(),
+        title: item.title.clone().unwrap_or_else(|| title.to_owned()),
+        artist: item.artist.clone().unwrap_or_else(|| album.clone()),
+        album,
+        duration_ms: field("duration")
+            .and_then(|duration| duration.parse().ok())
+            .unwrap_or(0),
+        cover: item.cover.clone(),
+        artist_uri: field("artist_uri"),
+        album_uri: field("album_uri"),
+        explicit: field("is_explicit").as_deref() == Some("true"),
+        ..Track::default()
+    }
+}
+
+fn uid(item: &QueueItem) -> Option<String> {
+    (!item.uid.is_empty()).then(|| item.uid.clone())
+}
+
+fn hidden(key: &QueueKey, pending: Option<&PendingQueue>) -> bool {
+    pending.is_some_and(|pending| pending.hidden.contains(key))
 }
 
 impl OpenMusic {
@@ -52,17 +200,155 @@ impl OpenMusic {
         self.track().is_some_and(|track| track.uri == *uri)
     }
 
+    pub fn playback_model(&self) -> Option<&Playback> {
+        self.playback.model.as_deref()
+    }
+
+    pub fn playback_allowed(&self) -> Allowed {
+        self.playback_model()
+            .filter(|model| model.track.is_some())
+            .map(|model| model.allowed)
+            .unwrap_or_default()
+    }
+
+    pub fn in_jam(&self) -> bool {
+        self.playback_model()
+            .and_then(|model| model.jam_mode.as_deref())
+            .is_some_and(|mode| !mode.is_empty() && mode != "off")
+    }
+
+    pub fn smart_shuffle_allowed(&self) -> bool {
+        self.playback_allowed().smart_shuffle && !self.in_jam()
+    }
+
+    pub fn repeat_allowed(&self) -> bool {
+        let allowed = self.playback_allowed();
+        allowed.repeat_context || allowed.repeat_track
+    }
+
     pub fn shuffle_mode(&self) -> Shuffle {
-        self.playback.now.shuffle
+        self.playback
+            .pending_shuffle
+            .map_or(self.playback.now.shuffle, |(mode, _)| mode)
     }
 
     pub fn repeat_mode(&self) -> Repeat {
-        self.playback.now.repeat
+        self.playback
+            .pending_repeat
+            .map_or(self.playback.now.repeat, |(mode, _)| mode)
     }
 
-    pub fn toggle_shuffle(&mut self, _cx: &mut Context<Self>) {}
+    pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        let allowed = self.playback_allowed();
+        if !allowed.shuffle {
+            return;
+        }
+        let next = next_shuffle(self.shuffle_mode(), true, self.smart_shuffle_allowed());
+        self.set_shuffle(next, cx);
+    }
 
-    pub fn cycle_repeat(&mut self, _cx: &mut Context<Self>) {}
+    pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
+        let next = next_repeat(self.repeat_mode(), &self.playback_allowed());
+        if next != self.repeat_mode() {
+            self.set_repeat(next, cx);
+        }
+    }
+
+    pub fn set_shuffle(&mut self, mode: Shuffle, cx: &mut Context<Self>) {
+        self.playback.pending_shuffle = Some((mode, Instant::now()));
+        self.playback.notice = None;
+        self.send(Command::Shuffle(mode));
+        cx.notify();
+    }
+
+    pub fn set_repeat(&mut self, mode: Repeat, cx: &mut Context<Self>) {
+        self.playback.pending_repeat = Some((mode, Instant::now()));
+        self.playback.notice = None;
+        self.send(Command::Repeat(mode));
+        cx.notify();
+    }
+
+    pub fn playing_context(&self, uri: &str) -> bool {
+        self.playback_model()
+            .and_then(|model| model.context_uri.as_deref())
+            .or(self.playback.now.context_uri.as_deref())
+            .is_some_and(|context| context == uri)
+    }
+
+    pub fn request_context_options(&mut self, uri: &str) {
+        let entry = self.playback.contexts.entry(uri.to_owned()).or_default();
+        if entry.requested {
+            return;
+        }
+        entry.requested = true;
+        self.send(Command::SmartShuffleEligibility(uri.to_owned()));
+        self.send(Command::ContextPlayerOptions(uri.to_owned()));
+    }
+
+    pub fn context_shuffle(&self, uri: &str) -> Shuffle {
+        if self.playing_context(uri) {
+            return self.shuffle_mode();
+        }
+        self.playback
+            .contexts
+            .get(uri)
+            .and_then(|state| {
+                state
+                    .chosen
+                    .or_else(|| state.server.map(|options| options.shuffle))
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn context_smart_available(&self, uri: &str) -> bool {
+        if self.playing_context(uri) {
+            return self.smart_shuffle_allowed();
+        }
+        self.playback.contexts.get(uri).is_some_and(|state| {
+            state.smart == Some(true) && state.server.is_none_or(|options| options.smart_allowed)
+        })
+    }
+
+    pub fn toggle_context_shuffle(&mut self, uri: &str, cx: &mut Context<Self>) {
+        if self.playing_context(uri) {
+            self.toggle_shuffle(cx);
+            return;
+        }
+        let allowed = self
+            .playback
+            .contexts
+            .get(uri)
+            .and_then(|state| state.server)
+            .is_none_or(|options| options.shuffle_allowed);
+        let next = next_shuffle(
+            self.context_shuffle(uri),
+            allowed,
+            self.context_smart_available(uri),
+        );
+        self.playback
+            .contexts
+            .entry(uri.to_owned())
+            .or_default()
+            .chosen = Some(next);
+        cx.notify();
+    }
+
+    pub fn context_play_options(&self, uri: &str) -> PlayOptions {
+        PlayOptions {
+            shuffle_override: self
+                .playback
+                .contexts
+                .get(uri)
+                .and_then(|state| state.chosen),
+            ..PlayOptions::default()
+        }
+    }
+
+    pub fn shuffle_play(&mut self, uri: &str, cx: &mut Context<Self>) {
+        self.playback.notice = None;
+        self.send(Command::ShufflePlay(uri.to_owned()));
+        cx.notify();
+    }
 
     pub fn play(&mut self, tracks: &[Track], index: usize, cx: &mut Context<Self>) {
         let Some(track) = tracks.get(index) else {
@@ -71,7 +357,7 @@ impl OpenMusic {
         self.playback.now.track = Some(track.clone());
         self.playback.now.playing = true;
         self.playback.now.position_ms = 0;
-        self.playback.now.observed = std::time::Instant::now();
+        self.playback.now.observed = Instant::now();
         self.playback.notice = None;
         self.send(Command::PlayTracks {
             tracks: tracks.iter().map(|track| track.uri.clone()).collect(),
@@ -92,7 +378,7 @@ impl OpenMusic {
             return;
         }
         self.playback.now.position_ms = self.playback.now.position();
-        self.playback.now.observed = std::time::Instant::now();
+        self.playback.now.observed = Instant::now();
         self.playback.now.playing = playing;
         self.playback.notice = None;
         self.send(Command::SetPlaying(playing));
@@ -101,8 +387,8 @@ impl OpenMusic {
 
     pub fn seek_to(&mut self, position: u32, cx: &mut Context<Self>) {
         self.playback.now.position_ms = position;
-        self.playback.now.observed = std::time::Instant::now();
-        self.playback.seek_hold = Some((position, std::time::Instant::now()));
+        self.playback.now.observed = Instant::now();
+        self.playback.seek_hold = Some((position, Instant::now()));
         self.send(Command::Seek(position));
         self.follow_lyrics();
         cx.notify();
@@ -138,7 +424,7 @@ impl OpenMusic {
             self.playback.now.track = Some(track.clone());
             self.playback.now.playing = true;
             self.playback.now.position_ms = 0;
-            self.playback.now.observed = std::time::Instant::now();
+            self.playback.now.observed = Instant::now();
         }
         self.playback.notice = None;
         self.send(Command::PlayContext {
@@ -167,47 +453,562 @@ impl OpenMusic {
         } else {
             self.playback.seek_hold = None;
         }
+        self.refresh_queue();
+    }
+
+    fn decorate(&self, item: &QueueItem) -> Track {
+        if let Some(track) = self.playback.tracks.get(&item.uri) {
+            return Track {
+                uid: uid(item),
+                ..track.clone()
+            };
+        }
+        let placeholder = if !lookup_uri(&item.uri) || self.playback.missing.contains(&item.uri) {
+            "Unknown song"
+        } else {
+            "Loading…"
+        };
+        Track {
+            uid: uid(item),
+            ..metadata_track(item, placeholder)
+        }
+    }
+
+    fn queue_row(&self, item: &QueueItem) -> QueueRow {
+        QueueRow {
+            key: item.key(),
+            provider: item.provider.clone(),
+            track: self.decorate(item),
+        }
+    }
+
+    fn refresh_queue(&mut self) {
+        let Some(model) = self.playback.model.as_deref() else {
+            self.playback.queue = QueueView::default();
+            return;
+        };
+        let queue = &model.queue;
+        let pending = self.playback.pending_queue.as_ref();
+        let visible = |item: &&QueueItem| !hidden(&item.key(), pending);
+        let current = queue.current.as_ref().map(|item| {
+            let mut row = self.queue_row(item);
+            if let Some(track) = self
+                .playback
+                .now
+                .track
+                .as_ref()
+                .filter(|track| track.uri == item.uri && !track.title.is_empty())
+            {
+                row.track = Track {
+                    uid: uid(item),
+                    ..track.clone()
+                };
+            }
+            row
+        });
+        let cleared = pending.is_some_and(|pending| pending.cleared);
+        let queued = queue
+            .queued
+            .iter()
+            .filter(|_| !cleared)
+            .filter(visible)
+            .map(|item| self.queue_row(item))
+            .collect();
+        let (autoplay, next): (Vec<&QueueItem>, Vec<&QueueItem>) = queue
+            .next_up
+            .iter()
+            .filter(|item| !(cleared && item.provider == "queue"))
+            .filter(visible)
+            .partition(|item| item.provider == "autoplay");
+        let view = QueueView {
+            current,
+            queued,
+            next: next.into_iter().map(|item| self.queue_row(item)).collect(),
+            autoplay: autoplay
+                .into_iter()
+                .map(|item| self.queue_row(item))
+                .collect(),
+            recent: queue
+                .recent(RECENT_LIMIT)
+                .iter()
+                .map(|item| self.queue_row(item))
+                .collect(),
+        };
+        self.playback.queue = view;
+    }
+
+    fn request_queue_tracks(&mut self) {
+        let Some(model) = self.playback.model.as_deref() else {
+            return;
+        };
+        let uris = PlaybackView::uris(model);
+        let wanted: HashSet<&str> = uris.iter().map(String::as_str).collect();
+        self.playback
+            .tracks
+            .retain(|uri, _| wanted.contains(uri.as_str()));
+        self.playback
+            .requested
+            .retain(|uri| wanted.contains(uri.as_str()));
+        self.playback
+            .missing
+            .retain(|uri| wanted.contains(uri.as_str()));
+        let mut ask: Vec<String> = Vec::new();
+        for uri in uris {
+            if lookup_uri(&uri)
+                && !self.playback.tracks.contains_key(&uri)
+                && !self.playback.requested.contains(&uri)
+                && !ask.contains(&uri)
+            {
+                ask.push(uri);
+            }
+        }
+        if ask.is_empty() {
+            return;
+        }
+        self.playback.requested.extend(ask.iter().cloned());
+        self.send(Command::LookupTracks(ask));
+    }
+
+    fn on_playback(&mut self, view: PlaybackView) {
+        let PlaybackView { playback, tracks } = view;
+        let previous = self
+            .playback
+            .model
+            .as_ref()
+            .map(|model| model.queue.revision.clone());
+        for track in tracks {
+            self.playback.tracks.insert(track.uri.clone(), track);
+        }
+        if self
+            .playback
+            .pending_shuffle
+            .is_some_and(|(mode, _)| mode == playback.shuffle)
+        {
+            self.playback.pending_shuffle = None;
+        }
+        if self
+            .playback
+            .pending_repeat
+            .is_some_and(|(mode, _)| mode == playback.repeat)
+        {
+            self.playback.pending_repeat = None;
+        }
+        if self
+            .playback
+            .pending_queue
+            .as_ref()
+            .is_some_and(|pending| pending.revision != playback.queue.revision)
+        {
+            self.playback.pending_queue = None;
+        }
+        let revised = previous
+            .as_deref()
+            .is_some_and(|previous| previous != playback.queue.revision);
+        let starved = playback.track.is_some() && playback.queue.raw_next.is_empty();
+        let spaced = self
+            .playback
+            .last_refresh
+            .is_none_or(|at| at.elapsed() >= REFRESH_SPACING);
+        if revised && starved && spaced {
+            self.playback.last_refresh = Some(Instant::now());
+            self.playback.refreshes += 1;
+            self.send(Command::RefreshCluster);
+        }
+        self.playback.model = Some(Box::new(playback));
+        self.request_queue_tracks();
+        self.refresh_queue();
+    }
+
+    pub fn queue_editable(&self) -> bool {
+        self.playback_allowed().set_queue
+            && !self.in_jam()
+            && self
+                .playback
+                .pending_queue
+                .as_ref()
+                .is_none_or(|pending| pending.since.elapsed() >= OPTIMISTIC)
+    }
+
+    fn hide_in_queue(&mut self, hidden: Vec<QueueKey>, cleared: bool) {
+        let Some(revision) = self
+            .playback_model()
+            .map(|model| model.queue.revision.clone())
+        else {
+            return;
+        };
+        self.playback.pending_queue = Some(PendingQueue {
+            revision,
+            hidden,
+            cleared,
+            since: Instant::now(),
+        });
+        self.playback.notice = None;
+        self.refresh_queue();
+    }
+
+    pub fn remove_from_queue(&mut self, keys: Vec<QueueKey>, cx: &mut Context<Self>) {
+        if keys.is_empty() || !self.queue_editable() {
+            return;
+        }
+        self.hide_in_queue(keys.clone(), false);
+        self.send(Command::RemoveFromQueue(keys));
+        cx.notify();
+    }
+
+    pub fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        if !self.queue_editable() {
+            return;
+        }
+        self.hide_in_queue(Vec::new(), true);
+        self.send(Command::ClearQueue);
+        cx.notify();
+    }
+
+    pub fn move_in_queue(
+        &mut self,
+        moved: Vec<QueueKey>,
+        anchor: QueueKey,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if moved.is_empty() || moved.contains(&anchor) || !self.queue_editable() {
+            return;
+        }
+        self.hide_in_queue(Vec::new(), false);
+        self.send(Command::MoveInQueue {
+            moved,
+            anchor,
+            after,
+        });
+        cx.notify();
+    }
+
+    pub fn jump_in_queue(&mut self, row: Row, cx: &mut Context<Self>) {
+        let Some(target) = self.playback.queue.row(row).cloned() else {
+            return;
+        };
+        if row.0 == QUEUE_RECENT {
+            self.play(&[target.track], 0, cx);
+            return;
+        }
+        if row.0 == QUEUE_CURRENT {
+            self.toggle(cx);
+            return;
+        }
+        if !self.playback_allowed().jump_in_queue {
+            return;
+        }
+        self.playback.notice = None;
+        self.send(Command::JumpTo(target.key));
+        cx.notify();
+    }
+
+    pub fn confirm_clear_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.queue_editable() || self.playback.queue.queued.is_empty() {
+            return;
+        }
+        let app = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let app = app.clone();
+            dialog
+                .title("Clear queue?")
+                .child("You can’t undo this.")
+                .w(px(360.))
+                .bg(cx.theme().popover)
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Clear")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Cancel"),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = app.update(cx, |app, cx| app.clear_queue(cx));
+                    true
+                })
+        });
+    }
+
+    pub fn toggle_queue_page(&mut self) {
+        if self.page == Page::Queue {
+            self.back();
+        } else {
+            self.navigate(Page::Queue);
+        }
+    }
+
+    pub fn next_from_title(&self) -> Option<String> {
+        let model = self.playback_model()?;
+        if let Some(title) = &model.context_title {
+            return Some(title.clone());
+        }
+        let uri = model.context_uri.as_deref()?;
+        if let Some((loaded, Ok(collection))) = &self.playlists.collection
+            && loaded == uri
+        {
+            return Some(collection.name.clone());
+        }
+        if let Some(playlist) = self
+            .library
+            .playlists
+            .iter()
+            .find(|playlist| playlist.uri == uri)
+        {
+            return Some(playlist.name.clone());
+        }
+        if let Some((loaded, Ok(artist))) = &self.discovery.artist
+            && loaded == uri
+        {
+            return Some(artist.name.clone());
+        }
+        entity::is_liked_songs(uri).then(|| "Liked Songs".to_owned())
     }
 }
 
-pub fn load(_app: &mut OpenMusic, _page: &Page) {}
+pub fn load(app: &mut OpenMusic, page: &Page) {
+    if *page == Page::Queue {
+        app.request_queue_tracks();
+        app.refresh_queue();
+    }
+}
 
 pub fn on_event(
-    _app: &mut OpenMusic,
+    app: &mut OpenMusic,
     event: Event,
     _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    cx: &mut Context<OpenMusic>,
 ) {
-    match event {}
+    match event {
+        Event::Playback(view) => app.on_playback(*view),
+        Event::Tracks { asked, found } => {
+            match found {
+                Some(found) => {
+                    for uri in &asked {
+                        if !found.iter().any(|track| track.uri == *uri) {
+                            app.playback.missing.insert(uri.clone());
+                        }
+                    }
+                    for track in &found {
+                        app.playback.tracks.insert(track.uri.clone(), track.clone());
+                    }
+                    app.send(Command::Remember(found));
+                }
+                None => {
+                    for uri in &asked {
+                        app.playback.requested.remove(uri);
+                    }
+                }
+            }
+            app.refresh_queue();
+        }
+        Event::SmartShuffle { uri, available } => {
+            app.playback.contexts.entry(uri).or_default().smart = Some(available);
+        }
+        Event::ContextOptions { uri, options } => {
+            app.playback.contexts.entry(uri).or_default().server = options;
+        }
+    }
+    cx.notify();
 }
 
 pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {}
 
 pub fn signed_out(app: &mut OpenMusic) {
-    app.playback.now = NowPlaying::default();
-    app.playback.notice = None;
+    app.playback = State::default();
 }
 
-pub fn debug(
-    _app: &mut OpenMusic,
-    _verb: &str,
-    _rest: &str,
-    _directory: &Path,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
-) -> bool {
-    false
+fn parse_shuffle(text: &str) -> Option<Shuffle> {
+    match text {
+        "off" => Some(Shuffle::Off),
+        "on" => Some(Shuffle::On),
+        "smart" => Some(Shuffle::Smart),
+        _ => None,
+    }
 }
 
-pub fn state_fragment(app: &OpenMusic) -> String {
+fn parse_repeat(text: &str) -> Option<Repeat> {
+    match text {
+        "off" => Some(Repeat::Off),
+        "context" => Some(Repeat::Context),
+        "track" => Some(Repeat::Track),
+        _ => None,
+    }
+}
+
+fn find_key(app: &OpenMusic, uid: &str) -> Option<QueueKey> {
+    let queue = &app.playback.queue;
+    queue
+        .queued
+        .iter()
+        .chain(&queue.next)
+        .chain(&queue.autoplay)
+        .find(|row| row.key.uid == uid || row.key.uri == uid)
+        .map(|row| row.key.clone())
+}
+
+fn queue_dump(app: &OpenMusic) -> String {
+    let queue = &app.playback.queue;
+    let mut lines = vec![format!(
+        "editable={} jam={} view={} revision={} next_from={:?} refreshes={}",
+        app.queue_editable(),
+        app.in_jam(),
+        app.playback_allowed().view_queue,
+        app.playback_model()
+            .map_or("", |model| model.queue.revision.as_str()),
+        app.next_from_title(),
+        app.playback.refreshes,
+    )];
+    for (name, prefix) in [
+        ("current", QUEUE_CURRENT),
+        ("queued", QUEUE_QUEUED),
+        ("next", QUEUE_NEXT),
+        ("autoplay", QUEUE_AUTOPLAY),
+        ("recent", QUEUE_RECENT),
+    ] {
+        for row in queue.section(prefix) {
+            lines.push(format!(
+                "{name} {} uid={} iteration={} provider={} title={:?} artist={:?} cover={}",
+                row.key.uri,
+                row.key.uid,
+                row.key.iteration,
+                row.provider,
+                row.track.title,
+                row.track.artist,
+                row.track
+                    .cover
+                    .as_ref()
+                    .is_some_and(|url| app.covers.contains_key(url)),
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn context_dump(app: &OpenMusic, uri: &str) -> String {
+    let state = app.playback.contexts.get(uri).copied().unwrap_or_default();
     format!(
-        "shuffle={:?} repeat={:?}",
-        app.shuffle_mode(),
-        app.repeat_mode()
+        "{uri} shuffle={:?} smart_available={} chosen={:?} server={:?} smart={:?} playing={} override={:?}",
+        app.context_shuffle(uri),
+        app.context_smart_available(uri),
+        state.chosen,
+        state.server,
+        state.smart,
+        app.playing_context(uri),
+        app.context_play_options(uri).shuffle_override,
     )
 }
 
-pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
+pub fn debug(
+    app: &mut OpenMusic,
+    verb: &str,
+    rest: &str,
+    directory: &Path,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> bool {
+    let mut words = rest.split_whitespace();
+    match verb {
+        "shuffle" => {
+            if let Some(mode) = parse_shuffle(rest) {
+                app.set_shuffle(mode, cx);
+            }
+        }
+        "repeat" => {
+            if let Some(mode) = parse_repeat(rest) {
+                app.set_repeat(mode, cx);
+            }
+        }
+        "queue" => {
+            let _ = std::fs::write(directory.join("queue.txt"), queue_dump(app));
+        }
+        "enqueue" if !rest.is_empty() => {
+            app.send(Command::AddToQueue(words.map(str::to_owned).collect()))
+        }
+        "playnext" if !rest.is_empty() => {
+            app.send(Command::PlayNext(words.map(str::to_owned).collect()))
+        }
+        "dequeue" => {
+            let keys = words.filter_map(|uid| find_key(app, uid)).collect();
+            app.remove_from_queue(keys, cx);
+        }
+        "clearqueue" => {
+            if rest == "confirm" {
+                app.confirm_clear_queue(window, cx);
+            } else {
+                app.clear_queue(cx);
+            }
+        }
+        "jump" => {
+            let queue = &app.playback.queue;
+            let row = [QUEUE_QUEUED, QUEUE_NEXT, QUEUE_AUTOPLAY]
+                .into_iter()
+                .find_map(|prefix| {
+                    queue
+                        .section(prefix)
+                        .iter()
+                        .position(|row| row.key.uid == rest || row.key.uri == rest)
+                        .map(|index| (prefix, index))
+                });
+            if let Some(row) = row {
+                app.jump_in_queue(row, cx);
+            }
+        }
+        "movequeue" => {
+            let (Some(moved), Some(anchor), Some(place)) =
+                (words.next(), words.next(), words.next())
+            else {
+                return true;
+            };
+            if let (Some(moved), Some(anchor)) = (find_key(app, moved), find_key(app, anchor)) {
+                app.move_in_queue(vec![moved], anchor, place == "after", cx);
+            }
+        }
+        "shuffleplay" if !rest.is_empty() => app.shuffle_play(rest, cx),
+        "contextshuffle" => {
+            let (uri, action) = rest.split_once(' ').unwrap_or((rest, ""));
+            if uri.is_empty() {
+                return true;
+            }
+            app.request_context_options(uri);
+            if action == "toggle" {
+                app.toggle_context_shuffle(uri, cx);
+            }
+            let _ = std::fs::write(directory.join("context.txt"), context_dump(app, uri));
+        }
+        "refreshcluster" => app.send(Command::RefreshCluster),
+        _ => return false,
+    }
+    true
+}
+
+pub fn state_fragment(app: &OpenMusic) -> String {
+    let model = app.playback_model();
+    format!(
+        "shuffle={:?} repeat={:?} queued={} next_up={} revision={} active={} refreshes={}",
+        app.shuffle_mode(),
+        app.repeat_mode(),
+        model.map_or(0, |model| model.queue.queued.len()),
+        model.map_or(0, |model| model.queue.next_up.len()),
+        model.map_or("-", |model| model.queue.revision.as_str()),
+        model
+            .and_then(|model| model.active_device_id.as_deref())
+            .unwrap_or("-"),
+        app.playback.refreshes,
+    )
+}
+
+pub fn register_actions(cx: &mut App, handle: &Handle) {
+    menus::route(cx, handle, |_: &ToggleShuffle, app, window, cx| {
+        app.perform(Intent::ToggleShuffle, window, cx)
+    });
+    menus::route(cx, handle, |_: &CycleRepeat, app, window, cx| {
+        app.perform(Intent::CycleRepeat, window, cx)
+    });
+    menus::route(cx, handle, |_: &ShowQueue, app, _, cx| {
+        app.toggle_queue_page();
+        cx.notify();
+    });
+}
 
 pub fn on_press(
     app: &mut OpenMusic,
@@ -220,19 +1021,188 @@ pub fn on_press(
         "next" => app.perform(Intent::Next, window, cx),
         "toggle-playback" => app.perform(Intent::PlayPause, window, cx),
         "play-here" => app.send(Command::PlayHere),
+        "shuffle" => app.perform(Intent::ToggleShuffle, window, cx),
+        "repeat" => app.perform(Intent::CycleRepeat, window, cx),
+        "queue" => app.toggle_queue_page(),
+        "queue-clear" => app.confirm_clear_queue(window, cx),
         _ => return false,
     }
     true
 }
 
 pub fn row_dropped(
-    _app: &mut OpenMusic,
-    _drag: &RowDrag,
-    _at: RowDrop,
+    app: &mut OpenMusic,
+    drag: &RowDrag,
+    at: RowDrop,
     _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    if !MOVABLE.contains(&at.row.0) || !MOVABLE.contains(&drag.source.0) {
+        return false;
+    }
+    let queue = &app.playback.queue;
+    let (Some(moved), Some(anchor)) = (queue.row(drag.source), queue.row(at.row)) else {
+        return true;
+    };
+    let (moved, anchor) = (moved.key.clone(), anchor.key.clone());
+    app.move_in_queue(vec![moved], anchor, at.after, cx);
+    true
 }
 
-pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    let failed = app.playback.notice.is_some();
+    let expired = |since: Instant| failed || since.elapsed() >= OPTIMISTIC;
+    let mut changed = false;
+    if app
+        .playback
+        .pending_shuffle
+        .is_some_and(|(_, since)| expired(since))
+    {
+        app.playback.pending_shuffle = None;
+        changed = true;
+    }
+    if app
+        .playback
+        .pending_repeat
+        .is_some_and(|(_, since)| expired(since))
+    {
+        app.playback.pending_repeat = None;
+        changed = true;
+    }
+    if app
+        .playback
+        .pending_queue
+        .as_ref()
+        .is_some_and(|pending| expired(pending.since))
+    {
+        app.playback.pending_queue = None;
+        app.refresh_queue();
+        changed = true;
+    }
+    if let Page::Collection(uri) = &app.page
+        && !app
+            .playback
+            .contexts
+            .get(uri)
+            .is_some_and(|state| state.requested)
+    {
+        let uri = uri.clone();
+        app.request_context_options(&uri);
+    }
+    if changed {
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycles_shuffle_modes() {
+        assert_eq!(next_shuffle(Shuffle::Off, true, true), Shuffle::On);
+        assert_eq!(next_shuffle(Shuffle::On, true, true), Shuffle::Smart);
+        assert_eq!(next_shuffle(Shuffle::Smart, true, true), Shuffle::Off);
+        assert_eq!(next_shuffle(Shuffle::On, true, false), Shuffle::Off);
+        assert_eq!(next_shuffle(Shuffle::Smart, true, false), Shuffle::Off);
+        assert_eq!(next_shuffle(Shuffle::Off, false, true), Shuffle::Off);
+    }
+
+    #[test]
+    fn cycles_repeat_modes_skipping_disallowed_ones() {
+        let all = Allowed {
+            repeat_context: true,
+            repeat_track: true,
+            ..Allowed::default()
+        };
+        assert_eq!(next_repeat(Repeat::Off, &all), Repeat::Context);
+        assert_eq!(next_repeat(Repeat::Context, &all), Repeat::Track);
+        assert_eq!(next_repeat(Repeat::Track, &all), Repeat::Off);
+        let context_only = Allowed {
+            repeat_context: true,
+            ..Allowed::default()
+        };
+        assert_eq!(next_repeat(Repeat::Context, &context_only), Repeat::Off);
+        let track_only = Allowed {
+            repeat_track: true,
+            ..Allowed::default()
+        };
+        assert_eq!(next_repeat(Repeat::Off, &track_only), Repeat::Track);
+        assert_eq!(next_repeat(Repeat::Off, &Allowed::default()), Repeat::Off);
+    }
+
+    #[test]
+    fn builds_rows_from_queue_metadata() {
+        let item = QueueItem {
+            uri: "spotify:track:1111111111111111111111".into(),
+            uid: "u1".into(),
+            iteration: "0".into(),
+            provider: "queue".into(),
+            title: Some("Song".into()),
+            artist: None,
+            cover: Some("https://i.scdn.co/image/ab".into()),
+            metadata: [
+                ("album_title", "Record"),
+                ("album_uri", "spotify:album:2222222222222222222222"),
+                ("duration", "152048"),
+                ("is_explicit", "true"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        };
+        let track = metadata_track(&item, "Loading…");
+        assert_eq!(track.title, "Song");
+        assert_eq!(track.artist, "Record");
+        assert_eq!(track.album, "Record");
+        assert_eq!(
+            track.album_uri.as_deref(),
+            Some("spotify:album:2222222222222222222222")
+        );
+        assert_eq!(track.duration_ms, 152_048);
+        assert!(track.explicit);
+        assert_eq!(uid(&item).as_deref(), Some("u1"));
+        let bare = QueueItem {
+            title: None,
+            metadata: HashMap::new(),
+            ..item
+        };
+        assert_eq!(metadata_track(&bare, "Loading…").title, "Loading…");
+        assert_eq!(metadata_track(&bare, "Loading…").duration_ms, 0);
+    }
+
+    #[test]
+    fn finds_rows_by_section() {
+        let row = |uid: &str| QueueRow {
+            key: QueueKey {
+                uid: uid.into(),
+                iteration: String::new(),
+                uri: format!("spotify:track:{uid}"),
+            },
+            provider: "queue".into(),
+            track: Track::placeholder(&format!("spotify:track:{uid}")),
+        };
+        let view = QueueView {
+            current: Some(row("now")),
+            queued: vec![row("a"), row("b")],
+            next: vec![row("c")],
+            autoplay: vec![row("d")],
+            recent: vec![row("e")],
+        };
+        assert_eq!(
+            view.row((QUEUE_QUEUED, 1)).map(|row| row.key.uid.as_str()),
+            Some("b")
+        );
+        assert_eq!(
+            view.row((QUEUE_CURRENT, 0)).map(|row| row.key.uid.as_str()),
+            Some("now")
+        );
+        assert_eq!(
+            view.row((QUEUE_RECENT, 0)).map(|row| row.key.uid.as_str()),
+            Some("e")
+        );
+        assert_eq!(view.row((QUEUE_NEXT, 3)), None);
+        assert_eq!(view.row(("playlist", 0)), None);
+        assert_eq!(view.upcoming(), 4);
+    }
+}

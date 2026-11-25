@@ -34,6 +34,7 @@ pub const PIP: &str = "icons/pip.svg";
 pub const PERSON: &str = "icons/person.svg";
 pub const EXPLICIT: &str = "icons/explicit.svg";
 pub const LOCAL: &str = "icons/local.svg";
+pub const CLOSE: &str = "icons/close.svg";
 
 const ICONS: &[(&str, &str)] = &[
     (
@@ -159,6 +160,10 @@ const ICONS: &[(&str, &str)] = &[
     (
         LOCAL,
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14 2.8H7A1.8 1.8 0 0 0 5.2 4.6v14.8A1.8 1.8 0 0 0 7 21.2h10a1.8 1.8 0 0 0 1.8-1.8V7.6z" fill="none" stroke="black" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 2.8v4.8h4.8" fill="none" stroke="black" stroke-width="1.8" stroke-linejoin="round"/><circle cx="10.2" cy="16.2" r="1.9"/><path d="M11.3 16.2v-5.6l3.4-.9v2l-2 .5v4z"/></svg>"#,
+    ),
+    (
+        CLOSE,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-linecap="round" stroke-width="2.4"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg>"#,
     ),
 ];
 
