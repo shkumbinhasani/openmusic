@@ -568,7 +568,9 @@ pub fn on_event(
             saved,
             now,
         } => privacy::on_saved(app, field, value, saved, now),
-        Event::NameSaved { name, done } => name::on_saved(app, name, done, window, cx),
+        Event::NameSaved { name, done, editor } => {
+            name::on_saved(app, name, done, editor, window, cx)
+        }
         Event::Friends { result, slow } => friends::on_friends(app, result, slow),
         Event::LocalScan(update) => local::on_scan(app, *update),
         Event::LocalArt(_) => {}

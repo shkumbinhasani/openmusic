@@ -108,7 +108,10 @@ impl OpenMusic {
                     editor.saving = true;
                     cx.notify();
                 });
-                self.send(Command::SetName(name));
+                self.send(Command::SetName {
+                    name,
+                    editor: Some(editor.entity_id().as_u64()),
+                });
                 cx.notify();
                 false
             }
@@ -195,20 +198,32 @@ fn name_dialog(
         )
 }
 
+pub fn saved_from(open: Option<u64>, sent: Option<u64>) -> bool {
+    sent.is_some() && open == sent
+}
+
 pub fn on_saved(
     app: &mut OpenMusic,
     name: String,
     done: bool,
+    sent: Option<u64>,
     window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) {
+    let open = app
+        .account
+        .name_editor
+        .clone()
+        .filter(|editor| saved_from(Some(editor.entity_id().as_u64()), sent));
     if done {
         app.rename_here(&name);
-        app.close_name_editor(window, cx);
+        if open.is_some() {
+            app.close_name_editor(window, cx);
+        }
         app.send(Command::RefreshSoon);
         return;
     }
-    match app.account.name_editor.clone() {
+    match open {
         Some(editor) => editor.update(cx, |editor, cx| {
             editor.saving = false;
             editor.error = Some(SAVE_FAILED.into());
@@ -270,7 +285,7 @@ pub fn debug(
         }
         "set" => {
             if let Some(name) = display_name(text) {
-                app.send(Command::SetName(name));
+                app.send(Command::SetName { name, editor: None });
             }
         }
         _ => {}
@@ -291,5 +306,14 @@ mod tests {
             NameCheck::Changed("Someone Else".into())
         );
         assert_eq!(check_name(" Someone\t", " Someone "), NameCheck::Unchanged);
+    }
+
+    #[test]
+    fn answers_only_the_dialog_that_saved() {
+        assert!(saved_from(Some(4), Some(4)));
+        assert!(!saved_from(Some(5), Some(4)));
+        assert!(!saved_from(None, Some(4)));
+        assert!(!saved_from(Some(4), None));
+        assert!(!saved_from(None, None));
     }
 }

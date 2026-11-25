@@ -49,7 +49,10 @@ pub enum Command {
         field: PrivacyField,
         value: bool,
     },
-    SetName(String),
+    SetName {
+        name: String,
+        editor: Option<u64>,
+    },
     RefreshSoon,
     Friends,
     LocalScan {
@@ -172,6 +175,7 @@ pub enum Event {
     NameSaved {
         name: String,
         done: bool,
+        editor: Option<u64>,
     },
     Friends {
         result: Result<Vec<Friend>, String>,
@@ -261,11 +265,11 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 Ok(privacy_write(api, user, field, value).await)
             }));
         }
-        Command::SetName(name) => {
+        Command::SetName { name, editor } => {
             let (api, user) = (ctx.api.clone(), ctx.user.clone());
             ctx.writes
                 .push(Mutation::new(vec!["profile:name".to_owned()], async move {
-                    Ok(rename(api, user, name).await)
+                    Ok(rename(api, user, name, editor).await)
                 }));
         }
         Command::RefreshSoon => ctx
@@ -547,12 +551,12 @@ async fn friend_activity(api: Api) -> crate::worker::Event {
     Event::Friends { result, slow }.into()
 }
 
-async fn rename(api: Api, user: User, name: String) -> crate::worker::Event {
+async fn rename(api: Api, user: User, name: String, editor: Option<u64>) -> crate::worker::Event {
     let done = match user.name(&api).await {
         Ok(me) => social::set_display_name(&api, &me, &name).await.is_ok(),
         Err(_) => false,
     };
-    Event::NameSaved { name, done }.into()
+    Event::NameSaved { name, done, editor }.into()
 }
 
 pub fn block_message(block: bool, done: bool) -> &'static str {
