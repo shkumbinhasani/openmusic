@@ -34,6 +34,7 @@ pub const PIP: &str = "icons/pip.svg";
 pub const PERSON: &str = "icons/person.svg";
 pub const EXPLICIT: &str = "icons/explicit.svg";
 pub const LOCAL: &str = "icons/local.svg";
+pub const BOOKMARK: &str = "icons/bookmark.svg";
 
 const ICONS: &[(&str, &str)] = &[
     (
@@ -155,6 +156,10 @@ const ICONS: &[(&str, &str)] = &[
     (
         EXPLICIT,
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm4.5 4v10H15v-2h-3.5v-2h3.2v-2h-3.2V9H15V7z"/></svg>"#,
+    ),
+    (
+        BOOKMARK,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.5 2.5h11A1.5 1.5 0 0 1 19 4v16.6a.8.8 0 0 1-1.3.6L12 16.6l-5.7 4.6a.8.8 0 0 1-1.3-.6V4a1.5 1.5 0 0 1 1.5-1.5z"/></svg>"#,
     ),
     (
         LOCAL,

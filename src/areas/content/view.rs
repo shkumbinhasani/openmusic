@@ -28,14 +28,33 @@ use crate::{
 const ABOUT_CHARS: usize = 600;
 const ABOUT_LINES: usize = 8;
 
-fn heading(text: impl Into<SharedString>) -> Div {
+#[derive(Clone, Copy)]
+pub(super) struct RowIds {
+    pub row: &'static str,
+    pub play: &'static str,
+    pub save: &'static str,
+    pub show: &'static str,
+}
+
+const SHOW_ROWS: RowIds = RowIds {
+    row: "show-episode",
+    play: "show-episode-play",
+    save: "show-episode-save",
+    show: "show-episode-show",
+};
+
+pub(super) fn hairline(palette: Palette) -> Div {
+    div().h(px(1.)).mx_3().bg(rgba(palette.line))
+}
+
+pub(super) fn heading(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(19.))
         .font_weight(FontWeight::BOLD)
         .child(text.into())
 }
 
-fn kind_label(text: &'static str, palette: Palette) -> Div {
+pub(super) fn kind_label(text: &'static str, palette: Palette) -> Div {
     div()
         .text_size(px(11.5))
         .font_weight(FontWeight::SEMIBOLD)
@@ -137,7 +156,7 @@ fn meta_line(parts: impl IntoIterator<Item = Option<String>>) -> String {
         .join(" · ")
 }
 
-fn this_year() -> i32 {
+pub(super) fn this_year() -> i32 {
     podcast::year_of(now_ms())
 }
 
@@ -689,9 +708,19 @@ impl OpenMusic {
                 list = list.child(self.chapter_row(show, *index, episode, palette, cx));
             } else {
                 if position > 0 {
-                    list = list.child(div().h(px(1.)).mx_3().bg(rgba(palette.line)));
+                    list = list.child(hairline(palette));
                 }
-                list = list.child(self.episode_row(*index, episode, year, palette, cx));
+                let index = *index;
+                list = list.child(self.episode_row(
+                    SHOW_ROWS,
+                    index,
+                    episode,
+                    false,
+                    move |app, cx| app.play_show_episode(index, cx),
+                    year,
+                    palette,
+                    cx,
+                ));
             }
         }
         div()
@@ -848,15 +877,19 @@ impl OpenMusic {
             }))
     }
 
-    fn episode_row(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn episode_row(
         &self,
+        ids: RowIds,
         index: usize,
         episode: &Episode,
+        with_show: bool,
+        on_play: impl Fn(&mut OpenMusic, &mut Context<OpenMusic>) + 'static,
         year: i32,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let id = ("show-episode", index);
+        let id = (ids.row, index);
         let played = self.played(episode);
         let current = self.is_current(&episode.uri);
         let image = episode.cover.as_ref().and_then(|url| self.covers.get(url));
@@ -914,6 +947,16 @@ impl OpenMusic {
                             .when(current, |title| title.text_color(rgb(palette.accent)))
                             .child(episode.name.clone()),
                     )
+                    .when(with_show && !episode.show_name.is_empty(), |column| {
+                        column.child(div().flex().min_w_0().child(link(
+                            (ids.show, index),
+                            episode.show_name.clone(),
+                            episode.show_uri.clone().map(Page::Show),
+                            13.,
+                            palette,
+                            cx,
+                        )))
+                    })
                     .child(
                         div()
                             .flex()
@@ -947,15 +990,15 @@ impl OpenMusic {
                             .items_center()
                             .gap_3()
                             .child(self.episode_play_button(
-                                ("show-episode-play", index),
+                                (ids.play, index),
                                 episode,
-                                move |app, cx| app.play_show_episode(index, cx),
+                                on_play,
                                 palette,
                                 cx,
                             ))
                             .when(!episode.restricted(), |line| {
                                 line.child(self.episode_save_button(
-                                    ("show-episode-save", index),
+                                    (ids.save, index),
                                     &episode.uri,
                                     palette,
                                     cx,
@@ -1293,15 +1336,6 @@ impl OpenMusic {
         .into_any_element()
     }
 
-    pub fn your_episodes_page(
-        &self,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-
     pub fn now_playing_page(
         &self,
         _card_side: Pixels,
@@ -1328,7 +1362,7 @@ fn library_item(app: &OpenMusic, uri: &str, titles: [(&'static str, &'static str
     let (title, symbol) = titles[usize::from(saved)];
     let target = uri.to_owned();
     MenuItem::action(title, move |app, _, _| {
-        app.save_when_known(&target, !saved);
+        app.change_saved(&target, !saved);
     })
     .symbol(symbol)
     .enabled(!app.saving(uri))

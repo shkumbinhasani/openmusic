@@ -10,10 +10,16 @@ use serde::{Deserialize, Serialize};
 use spotify_client::{
     catalog::Lyrics,
     engine::NowPlaying,
-    podcast::{self, Availability, Episode, Played, Show, ShowKind},
+    podcast::{
+        self, Availability, Episode, Played, Show, ShowKind,
+        your_episodes::{Filter, Sort},
+    },
 };
 
-use super::worker::{Command, Event};
+use super::{
+    worker::{Command, Event},
+    yours::{SORT_KEY, Yours},
+};
 use crate::{
     app::{OpenMusic, Page},
     menus::Handle,
@@ -50,6 +56,7 @@ pub struct State {
     pub unavailable: HashSet<String>,
     pub progress_drawn: Option<Instant>,
     pub wanted: HashMap<String, (bool, Instant)>,
+    pub yours: Yours,
 }
 
 impl State {
@@ -65,6 +72,7 @@ impl State {
         if let Some((_, Ok(episode))) = &self.episode {
             urls.extend(episode.large_cover.clone());
         }
+        self.yours.covers(urls);
     }
 
     pub fn loaded_show(&self) -> Option<&Show> {
@@ -82,6 +90,7 @@ impl State {
                     .iter()
                     .find(|episode| episode.uri == uri)
             })
+            .or_else(|| self.yours.episodes.get(uri))
     }
 
     fn note(&mut self, episodes: &[Episode]) {
@@ -113,6 +122,7 @@ impl State {
         {
             *episode = Ok(fresh.clone());
         }
+        self.yours.patch(fresh);
         self.note(std::slice::from_ref(fresh));
         if !self.marking.contains_key(&fresh.uri)
             && self
@@ -407,7 +417,7 @@ impl OpenMusic {
 
     pub fn toggle_saved_uri(&mut self, uri: &str) {
         let saved = self.saved_or_known(uri).unwrap_or(false);
-        self.save_when_known(uri, !saved);
+        self.change_saved(uri, !saved);
     }
 
     fn settle_wanted(&mut self) -> bool {
@@ -523,6 +533,10 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
             app.send(Command::Episode(uri.clone()));
             app.lookup_saved([uri.clone()]);
         }
+        Page::YourEpisodes => {
+            app.load_your_episodes();
+            app.decorate_your_episodes();
+        }
         _ => {}
     }
 }
@@ -613,6 +627,20 @@ pub fn on_event(
                 app.content.patch(episode);
             }
         }
+        Event::YourEpisodes(result) => {
+            app.content.yours.take_entries(result);
+            app.took_your_episodes();
+        }
+        Event::Decorated { uris, result } => {
+            if let Ok(found) = &result {
+                let episodes: Vec<Episode> = found.iter().flatten().cloned().collect();
+                app.content.note(&episodes);
+            }
+            app.content.yours.take_decorated(uris, result);
+            if app.page == Page::YourEpisodes {
+                app.your_episodes_tick();
+            }
+        }
         Event::Marked { uris, error } => {
             let mut settled = Vec::new();
             for uri in &uris {
@@ -697,7 +725,7 @@ fn describe_saved(app: &OpenMusic, uri: &str) -> String {
     }
 }
 
-fn describe_played(played: Played) -> String {
+pub(super) fn describe_played(played: Played) -> String {
     match played {
         Played::InProgress(position) => format!("in-progress@{position}"),
         played => played.name().to_owned(),
@@ -724,8 +752,27 @@ pub fn debug(
             app.mark_played(vec![(*uri).to_owned()], *setting == "on");
         }
         ("episodesave" | "showfollow", [uri, setting @ ("on" | "off")]) => {
-            app.save_when_known(uri, *setting == "on");
+            app.change_saved(uri, *setting == "on");
         }
+        ("yours", []) => {
+            let mut lines = String::new();
+            app.describe_your_episodes(&mut lines);
+            let _ = std::fs::write(directory.join("yours.txt"), lines);
+        }
+        ("yours", ["reload"]) => app.load_your_episodes(),
+        ("yours", ["more"]) => {
+            app.content.yours.error = None;
+            app.decorate_your_episodes();
+        }
+        ("yours", ["sort", name]) => match Sort::from_name(name) {
+            Some(sort) => app.set_your_sort(sort),
+            None => return false,
+        },
+        ("yours", ["filter", "none"]) => app.set_your_filter(None),
+        ("yours", ["filter", name]) => match Filter::from_name(name) {
+            Some(filter) => app.set_your_filter(Some(filter)),
+            None => return false,
+        },
         ("content", []) => {
             let mut lines = String::new();
             match &app.content.show {
@@ -782,6 +829,16 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             }
             Some((loaded, Err(_))) if loaded == uri => format!("show={uri} episodes=error"),
             _ => format!("show={uri} episodes=loading"),
+        },
+        Page::YourEpisodes => match &app.content.yours.entries {
+            Some(Ok(entries)) => format!(
+                "your_episodes={}/{} decorated={}",
+                app.your_episode_list().len(),
+                entries.len(),
+                app.content.yours.episodes.len()
+            ),
+            Some(Err(_)) => "your_episodes=error".to_owned(),
+            None => "your_episodes=loading".to_owned(),
         },
         Page::Episode(uri) => match &app.content.episode {
             Some((loaded, Ok(episode))) if loaded == uri => {
@@ -860,6 +917,8 @@ pub fn on_press(
                 app.navigate(Page::Show(show));
             }
         }
+        "your-episodes-play" => app.play_your_episodes(cx),
+        SORT_KEY => app.open_your_sort_menu(),
         "more-episode" => {
             if let Some(uri) = episode_uri() {
                 app.open_menu_under(Target::Episode { uri }, key);
@@ -888,8 +947,14 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
         app.load_more_episodes();
         cx.notify();
     }
+    if app.page == Page::YourEpisodes && app.your_episodes_tick() {
+        cx.notify();
+    }
     let showing_progress = app.playback.now.playing
-        && matches!(app.page, Page::Show(_) | Page::Episode(_))
+        && matches!(
+            app.page,
+            Page::Show(_) | Page::Episode(_) | Page::YourEpisodes
+        )
         && app
             .track()
             .is_some_and(|track| app.content.loaded_episode(&track.uri).is_some());

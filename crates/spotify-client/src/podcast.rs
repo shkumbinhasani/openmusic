@@ -1,3 +1,5 @@
+pub mod your_episodes;
+
 use std::fmt;
 
 use anyhow::{Result, bail};

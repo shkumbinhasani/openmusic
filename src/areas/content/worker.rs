@@ -4,7 +4,10 @@ use spotify_client::{
     Api, catalog,
     catalog::Lyrics,
     dealer::Message,
-    podcast::{self, Episode, EpisodePage, Show, ShowKind, Unavailable},
+    podcast::{
+        self, Episode, EpisodePage, Show, ShowKind, Unavailable,
+        your_episodes::{self, Entry},
+    },
 };
 
 use super::state::ContentPrefs;
@@ -27,6 +30,8 @@ pub enum Command {
         uris: Vec<String>,
         played: bool,
     },
+    YourEpisodes,
+    DecorateEpisodes(Vec<String>),
 }
 
 pub enum Event {
@@ -51,6 +56,11 @@ pub enum Event {
     Marked {
         uris: Vec<String>,
         error: Option<String>,
+    },
+    YourEpisodes(Result<Vec<Entry>, String>),
+    Decorated {
+        uris: Vec<String>,
+        result: Result<Vec<Option<Episode>>, String>,
     },
 }
 
@@ -80,12 +90,21 @@ impl Event {
                 result: Ok(episode),
                 ..
             } => episode.large_cover.iter().cloned().collect(),
+            Self::Decorated {
+                result: Ok(found), ..
+            } => found
+                .iter()
+                .flatten()
+                .filter_map(|episode| episode.cover.clone())
+                .collect(),
             Self::Lyrics { .. }
             | Self::Show { .. }
             | Self::ShowPage { .. }
             | Self::Episode { .. }
             | Self::Refreshed(_)
-            | Self::Marked { .. } => Vec::new(),
+            | Self::Marked { .. }
+            | Self::YourEpisodes(_)
+            | Self::Decorated { .. } => Vec::new(),
         }
     }
 }
@@ -116,6 +135,13 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             ctx.writes
                 .push(Mutation::new(keys, async move { Ok(run.await) }));
         }
+        Command::YourEpisodes => ctx.tasks.spawn_keyed(
+            "your-episodes",
+            your_episode_list(ctx.api.clone(), ctx.user.clone()),
+        ),
+        Command::DecorateEpisodes(uris) => ctx
+            .tasks
+            .spawn_keyed("your-episodes-decorate", decorate(ctx.api.clone(), uris)),
     }
 }
 
@@ -183,4 +209,19 @@ async fn mark(api: Api, user: User, uris: Vec<String>, played: bool) -> crate::w
         }
     });
     Event::Marked { uris, error }.into()
+}
+
+async fn your_episode_list(api: Api, user: User) -> crate::worker::Event {
+    let result = match user.name(&api).await {
+        Ok(name) => your_episodes::entries(&api, &name).await,
+        Err(error) => Err(error),
+    };
+    Event::YourEpisodes(result.map_err(|_| "Couldn’t load Your Episodes.".to_owned())).into()
+}
+
+async fn decorate(api: Api, uris: Vec<String>) -> crate::worker::Event {
+    let result = your_episodes::decorate(&api, &uris)
+        .await
+        .map_err(|_| "Couldn’t load more episodes.".to_owned());
+    Event::Decorated { uris, result }.into()
 }
