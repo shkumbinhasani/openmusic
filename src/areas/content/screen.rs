@@ -43,6 +43,9 @@ const RADIUS: f32 = 14.;
 const DOCK_CLEARANCE: f32 = 112.;
 const KEEP: usize = 200;
 const COLLAPSED_VIDEOS: usize = 3;
+const CARD_GAP: f32 = 8.;
+const TITLE_LINE: f32 = 20.;
+const SUBTITLE_LINE: f32 = 18.;
 const TO_VIDEO: &str = "We’ll play video when available, from now on.";
 const TO_AUDIO: &str = "We’ll only play audio from now on.";
 const ELSEWHERE: &str = "Video shows when this plays on this Mac.";
@@ -728,7 +731,7 @@ impl OpenMusic {
                 .w(px(width))
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap(px(CARD_GAP))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.play_music_videos(&list, index, cx);
@@ -752,6 +755,7 @@ impl OpenMusic {
                 .child(
                     div()
                         .text_size(px(14.))
+                        .line_height(px(TITLE_LINE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .truncate()
                         .child(video.track.title.clone()),
@@ -759,6 +763,7 @@ impl OpenMusic {
                 .child(
                     div()
                         .text_size(px(12.5))
+                        .line_height(px(SUBTITLE_LINE))
                         .text_color(rgb(palette.muted))
                         .truncate()
                         .child(format!("Music video • {}", video.track.artist)),
@@ -794,7 +799,8 @@ impl OpenMusic {
                 .child(if all {
                     grid
                 } else {
-                    grid.max_h(px(still + 52.)).overflow_hidden()
+                    grid.max_h(px(still + CARD_GAP * 2. + TITLE_LINE + SUBTITLE_LINE))
+                        .overflow_hidden()
                 })
                 .when(more, |section| {
                     section.child(screen_link(
