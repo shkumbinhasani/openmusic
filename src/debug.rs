@@ -1,10 +1,59 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 pub fn directory() -> Option<PathBuf> {
     if !cfg!(any(debug_assertions, feature = "debug-dir")) {
         return None;
     }
-    std::env::var_os("OPENMUSIC_DEBUG_DIR").map(PathBuf::from)
+    static DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIRECTORY
+        .get_or_init(|| {
+            let directory = PathBuf::from(std::env::var_os("OPENMUSIC_DEBUG_DIR")?);
+            match claim(&directory) {
+                Ok(()) => Some(directory),
+                Err(reason) => {
+                    eprintln!(
+                        "OpenMusic ignores OPENMUSIC_DEBUG_DIR {}: {reason}",
+                        directory.display()
+                    );
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+#[cfg(unix)]
+fn claim(directory: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .map_err(|error| error.to_string())?;
+    let metadata = std::fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() {
+        return Err("it is not a folder".into());
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err("another user owns it".into());
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err("other users can write to it".into());
+    }
+    if metadata.mode() & 0o077 != 0 {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn claim(directory: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())
 }
 
 pub fn secrets() -> Option<PathBuf> {
@@ -27,22 +76,31 @@ pub fn forget_token() {
 }
 
 #[cfg(unix)]
-pub fn write_private(path: &std::path::Path, contents: &str) {
+pub fn write_private(path: &Path, contents: &str) {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
 
-    let file = std::fs::OpenOptions::new()
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let mut temporary = std::ffi::OsString::from(".");
+    temporary.push(name);
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = path.with_file_name(temporary);
+    let _ = std::fs::remove_file(&temporary);
+    let written = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .open(path);
-    if let Ok(mut file) = file {
-        let _ = file.write_all(contents.as_bytes());
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(contents.as_bytes()))
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
 }
 
 #[cfg(not(unix))]
-pub fn write_private(path: &std::path::Path, contents: &str) {
+pub fn write_private(path: &Path, contents: &str) {
     let _ = std::fs::write(path, contents);
 }
 
@@ -143,4 +201,64 @@ pub fn capture(path: PathBuf, done: impl FnOnce(Result<(), String>) + Send + 'st
 #[cfg(not(target_os = "macos"))]
 pub fn capture(_: PathBuf, done: impl FnOnce(Result<(), String>) + Send + 'static) {
     done(Err("Capture is only available on macOS.".into()));
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("openmusic-debug-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        directory
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::symlink_metadata(path).unwrap().mode() & 0o777
+    }
+
+    #[test]
+    fn claims_only_a_private_folder_of_its_own() {
+        let root = scratch("claim");
+        let fresh = root.join("fresh");
+        claim(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        let open = root.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        claim(&open).unwrap();
+        assert_eq!(mode(&open), 0o700);
+        let shared = root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(claim(&shared).is_err());
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert!(claim(&link).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writes_secrets_privately_without_following_links() {
+        let root = scratch("write");
+        claim(&root).unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let token = root.join("token");
+        std::os::unix::fs::symlink(&elsewhere, &token).unwrap();
+        write_private(&token, "secret");
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "untouched");
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "secret");
+        assert!(!std::fs::symlink_metadata(&token).unwrap().is_symlink());
+        assert_eq!(mode(&token), 0o600);
+        write_private(&token, "");
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "");
+        let leftovers = std::fs::read_dir(&root).unwrap().count();
+        assert_eq!(leftovers, 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

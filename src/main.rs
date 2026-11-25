@@ -103,7 +103,6 @@ fn main() {
                         .detach();
                     });
                     if let Some(directory) = debug::directory() {
-                        let _ = std::fs::create_dir_all(&directory);
                         player.update(cx, |_, cx| {
                             cx.spawn_in(window, async move |view, window| {
                                 let command_file = directory.join("command");
