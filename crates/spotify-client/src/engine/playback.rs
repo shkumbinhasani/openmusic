@@ -24,6 +24,7 @@ use mix::Mix;
 use narration::is_narration;
 use quality::Automatic;
 pub use quality::{Quality, Stream, StreamKind, codec_of};
+pub use skips::Skips;
 use sleep::Sleep;
 pub use sleep::{FADE_MS, SleepChoice};
 pub use source::MANIFEST_FORMATS;
@@ -39,6 +40,7 @@ mod local;
 mod mix;
 mod narration;
 mod quality;
+mod skips;
 mod sleep;
 mod source;
 mod speed;
@@ -66,6 +68,7 @@ pub enum Control {
         uri: String,
         position_ms: u32,
     },
+    Skips(Skips),
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +288,8 @@ pub(super) struct State {
     notes: Vec<String>,
     narration_run: u32,
     narration_told: bool,
+    skips: Skips,
+    skip_run: u32,
     mix: Mix,
     video: Video,
 }
@@ -482,6 +487,10 @@ impl Engine {
             Control::Rename(name) => self.rename(&name).await?,
             Control::Video(prefs) => self.set_video(prefs).await,
             Control::Watch { uri, position_ms } => self.watch(uri, position_ms).await?,
+            Control::Skips(skips) => {
+                self.audio.skips = skips;
+                self.check_prepared();
+            }
         }
         Ok(())
     }
@@ -825,6 +834,10 @@ impl Engine {
         self.discard_prepared();
         self.audio.joins.tried = None;
         self.generation += 1;
+        let backwards = self
+            .playing
+            .as_ref()
+            .is_some_and(|old| old.steps_back_to(&machine, index));
         let state = machine["states"].get(index).cloned().unwrap_or(Value::Null);
         let initial = state["initial_playback_position"]
             .as_u64()
@@ -843,7 +856,11 @@ impl Engine {
         if is_narration(&track) {
             return Box::pin(self.skip_narration(playing)).await;
         }
+        if self.skipped(&track) {
+            return Box::pin(self.skip_hidden(playing, backwards)).await;
+        }
         self.audio.narration_run = 0;
+        self.audio.skip_run = 0;
         let uri = playing.uri().to_owned();
         let show = show_of(&playing.machine, playing.index);
         playing.state_speed = state_speed(&playing.machine, playing.index);

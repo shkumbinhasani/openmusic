@@ -6,6 +6,10 @@ use spotify_client::{
         self, Ban, BanProvider, Credits, NoRadio, SetPush, TrackMissing, TrackPage, Unavailable,
         WriteFormat,
     },
+    engine::{
+        Control,
+        playback::{self, Skips},
+    },
     pathfinder::PathfinderError,
 };
 
@@ -32,6 +36,7 @@ pub enum Command {
     TrackArtists(String),
     Radio(String),
     TrackPage(String),
+    Skips(Skips),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -188,6 +193,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         }),
         Command::Radio(seed) => ctx.tasks.spawn_keyed("radio", radio(api, seed)),
         Command::TrackPage(uri) => ctx.tasks.spawn_keyed("track-page", track_page(api, uri)),
+        Command::Skips(skips) => ctx
+            .handle
+            .send(Control::Audio(playback::Control::Skips(skips))),
     }
 }
 

@@ -48,32 +48,7 @@ impl Engine {
             self.audio.narration_told = true;
             self.audio.updates.push(Update::Notice(VOICE.into()));
         }
-        let next = playing.transition("advance");
-        let paused = playing.paused;
-        let machine = playing.machine.clone();
-        let generation = playing.generation;
-        self.audio
-            .note(format!("narration skipped {}", playing.uri()));
-        self.playing = Some(playing);
-        self.report("track_data_finalized").await;
-        if self.playing.as_ref().map(|playing| playing.generation) != Some(generation) {
-            return Ok(());
-        }
-        match next {
-            Some((index, next_paused)) => {
-                Box::pin(self.start_state(machine, index, paused || next_paused, None)).await
-            }
-            None => {
-                if !self.local_active() {
-                    self.player.stop();
-                }
-                if let Some(playing) = self.playing.as_mut() {
-                    playing.paused = true;
-                }
-                self.report("pause").await;
-                Ok(())
-            }
-        }
+        Box::pin(self.move_past(playing, "advance", "narration skipped")).await
     }
 }
 

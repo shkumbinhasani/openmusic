@@ -8,6 +8,7 @@ use gpui::Context;
 use spotify_client::{
     Track,
     details::{Ban, BanProvider, FeedbackSet, SetPush, WriteFormat, hide_context},
+    engine::playback::Skips,
     entity,
 };
 
@@ -73,6 +74,7 @@ pub struct Sets {
     pub editable: HashMap<String, Option<bool>>,
     pub last_format: Option<WriteFormat>,
     pub pushes: usize,
+    pub revision: u64,
     writing: HashMap<Entry, Pending>,
     touched: HashMap<Entry, Instant>,
     requested: Option<Instant>,
@@ -102,6 +104,13 @@ impl Sets {
         self.hidden.values().map(HashSet::len).sum()
     }
 
+    pub fn skips(&self) -> Skips {
+        Skips {
+            hidden: self.hidden.clone(),
+            artists: self.banned.clone(),
+        }
+    }
+
     pub fn contains(&self, entry: &Entry) -> bool {
         match entry {
             Entry::Excluded(uri) => self.is_excluded(uri),
@@ -111,6 +120,7 @@ impl Sets {
     }
 
     fn mark(&mut self, entry: &Entry, on: bool) {
+        self.revision += 1;
         match entry {
             Entry::Excluded(uri) => mark_in(&mut self.excluded, uri, on),
             Entry::Banned(uri) => mark_in(&mut self.banned, uri, on),
@@ -183,6 +193,7 @@ impl Sets {
         for (entry, on) in local {
             self.mark(&entry, on);
         }
+        self.revision += 1;
         self.load = Load::Ready;
     }
 
@@ -638,6 +649,23 @@ mod tests {
             ..Track::placeholder("spotify:episode:0000000000000000000003")
         };
         assert_eq!(refusal(&sets, &episode, Some(RADIO)), None);
+    }
+
+    #[test]
+    fn hands_the_engine_what_to_skip() {
+        let mut sets = Sets::default();
+        sets.apply(Ok(Snapshot {
+            hidden: vec![ban()],
+            banned: vec![BOWIE.into()],
+            ..Snapshot::default()
+        }));
+        let loaded = sets.revision;
+        let skips = sets.skips();
+        assert!(skips.artists.contains(BOWIE));
+        assert!(skips.hidden[RADIO].contains(SONG));
+        sets.begin(Entry::Banned(RADIOHEAD.into()), true);
+        assert!(sets.revision > loaded);
+        assert!(sets.skips().artists.contains(RADIOHEAD));
     }
 
     #[test]

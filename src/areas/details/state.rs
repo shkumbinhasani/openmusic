@@ -41,6 +41,7 @@ pub struct State {
     pub radio: Option<String>,
     pub scroll: ContentScroll,
     pub track: Option<TrackView>,
+    pub skips_sent: Option<u64>,
 }
 
 impl State {
@@ -80,6 +81,15 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
 fn load_sets(app: &mut OpenMusic) {
     app.details.sets.loading();
     app.send(Command::LoadSets);
+}
+
+fn send_skips(app: &mut OpenMusic) {
+    let sets = &app.details.sets;
+    if !sets.ready() || app.details.skips_sent == Some(sets.revision) {
+        return;
+    }
+    app.details.skips_sent = Some(sets.revision);
+    app.send(Command::Skips(sets.skips()));
 }
 
 fn take_push(app: &mut OpenMusic, push: &SetPush) {
@@ -193,6 +203,7 @@ pub fn on_event(
 }
 
 pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+    app.details.skips_sent = None;
     load_sets(app);
 }
 
@@ -511,6 +522,7 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     if app.details.sets.due() {
         load_sets(app);
     }
+    send_skips(app);
     app.lookup_artists();
     lookup_editable(app);
     if app.tick_highlight() {

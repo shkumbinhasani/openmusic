@@ -248,9 +248,11 @@ impl Engine {
         if !preparable(&playing.machine, &target) {
             return None;
         }
-        let next_ms = track_at(&playing.machine, target.index)?["metadata"]["duration"]
-            .as_u64()
-            .unwrap_or_default() as u32;
+        let next = track_at(&playing.machine, target.index)?;
+        if self.skipped(next) {
+            return None;
+        }
+        let next_ms = next["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
         if let Some(plan) = self.mix_plan(playing, &target, next_ms) {
             return Some(Wanted {
                 target,
