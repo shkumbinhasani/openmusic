@@ -15,7 +15,13 @@ use spotify_client::{
     },
 };
 
-use super::worker::{Command, Event};
+use super::{
+    settings::{
+        self, Controls, LEVEL_KEY, QUALITY_KEY, RESET_NAME_KEY, RETRY_KEY, Toggle, create_controls,
+        settle, sync_controls,
+    },
+    worker::{Command, Event},
+};
 use crate::{
     app::OpenMusic,
     menus::{self, Handle, SleepAtEndOfTrack, SleepTimer},
@@ -135,6 +141,7 @@ pub struct State {
     pub speeds: HashMap<String, f32>,
     pub report_to: Option<PathBuf>,
     pub status: AudioStatus,
+    pub controls: Controls,
     pending_speed: Option<(f32, Instant)>,
     sleep_label: Option<String>,
 }
@@ -323,6 +330,7 @@ impl OpenMusic {
     }
 
     pub fn set_crossfade(&mut self, on: bool, ms: u32) {
+        self.audio.controls.draft = None;
         self.change_audio(vec![
             Setting::Crossfade(on),
             Setting::CrossfadeMs(ms.min(MAX_CROSSFADE_MS)),
@@ -416,9 +424,14 @@ impl OpenMusic {
 pub fn on_event(
     app: &mut OpenMusic,
     event: Event,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) {
+    apply_event(app, event);
+    sync_controls(app, window, cx);
+}
+
+fn apply_event(app: &mut OpenMusic, event: Event) {
     match event {
         Event::Synced(Ok(remote)) => {
             app.audio.synced = Some(Ok(()));
@@ -457,8 +470,10 @@ pub fn on_event(
     }
 }
 
-pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<OpenMusic>) {
     app.send(Command::Sync);
+    create_controls(app, window, cx);
+    sync_controls(app, window, cx);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
@@ -493,8 +508,8 @@ pub fn debug(
     verb: &str,
     rest: &str,
     directory: &Path,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
     match verb {
         "audio" if rest == "sync" => app.send(Command::Sync),
@@ -504,17 +519,14 @@ pub fn debug(
         }
         "gapless" => {
             if let Some(on) = switch(rest) {
-                app.set_gapless(on);
+                app.flip(Toggle::Gapless, on);
             }
         }
-        "crossfade" => {
-            let ms = app.settings.audio.crossfade_ms;
-            match (switch(rest), rest.parse::<u32>()) {
-                (Some(on), _) => app.set_crossfade(on, ms),
-                (None, Ok(ms)) => app.set_crossfade(true, ms),
-                _ => {}
-            }
-        }
+        "crossfade" => match (switch(rest), rest.parse::<u32>()) {
+            (Some(on), _) => app.flip(Toggle::Crossfade, on),
+            (None, Ok(ms)) => app.set_crossfade(true, ms),
+            _ => {}
+        },
         "sleep" => match rest.trim() {
             "off" | "0" => app.set_sleep(SleepChoice::Off),
             "end" => app.set_sleep(SleepChoice::EndOfTrack),
@@ -540,7 +552,7 @@ pub fn debug(
             }
         }
         "normalize" => match (switch(rest), LoudnessLevel::parse(rest)) {
-            (Some(on), _) => app.set_normalize(on),
+            (Some(on), _) => app.flip(Toggle::Normalize, on),
             (None, Some(level)) => app.set_loudness_level(level),
             _ => {}
         },
@@ -551,7 +563,7 @@ pub fn debug(
         }
         "autoplay" => {
             if let Some(on) = switch(rest) {
-                app.set_autoplay(on);
+                app.flip(Toggle::Autoplay, on);
             }
         }
         "rename" => {
@@ -565,8 +577,21 @@ pub fn debug(
                 app.show_toast(message, None);
             }
         }
+        "audiosettings" => {
+            let _ = std::fs::write(
+                directory.join("audio-settings.txt"),
+                settings::dump(app, cx),
+            );
+            return true;
+        }
+        "namefield" => {
+            let text = rest.trim().trim_matches('"').to_owned();
+            app.type_device_name(&text, window, cx);
+            return true;
+        }
         _ => return false,
     }
+    sync_controls(app, window, cx);
     true
 }
 
@@ -613,20 +638,23 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
 pub fn on_press(
     app: &mut OpenMusic,
     key: &'static str,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
         SPEED_KEY => {
             app.open_speed_menu();
-            true
         }
         SLEEP_KEY => {
             app.open_sleep_menu();
-            true
         }
-        _ => false,
+        QUALITY_KEY => app.open_quality_menu(),
+        LEVEL_KEY => app.open_level_menu(),
+        RETRY_KEY => app.retry_audio_sync(),
+        RESET_NAME_KEY => app.reset_device_name(window, cx),
+        _ => return false,
     }
+    true
 }
 
 pub fn row_dropped(
@@ -640,6 +668,7 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    settle(app, cx);
     if let Some((_, at)) = app.audio.pending_speed
         && at.elapsed() >= PENDING
     {
