@@ -145,7 +145,7 @@ use Category::{Basic, Navigation, Playback, Window as Windows};
 
 pub const SHORTCUTS: &[Shortcut] = &[
     shortcut("cmd-l", boxed::<FocusSearch>, None, Basic, "Search"),
-    shortcut("cmd-f", boxed::<FocusSearch>, None, Basic, "Search"),
+    shortcut("cmd-f", boxed::<FocusSearch>, QUIET, Basic, "Search"),
     shortcut("cmd-k", boxed::<FocusSearch>, None, Basic, "Search"),
     shortcut(
         "cmd-/",
@@ -180,29 +180,29 @@ pub const SHORTCUTS: &[Shortcut] = &[
         Playback,
         "Play or pause",
     ),
-    shortcut("cmd-right", boxed::<Next>, None, Playback, "Next"),
-    shortcut("cmd-left", boxed::<Previous>, None, Playback, "Previous"),
+    shortcut("cmd-right", boxed::<Next>, QUIET, Playback, "Next"),
+    shortcut("cmd-left", boxed::<Previous>, QUIET, Playback, "Previous"),
     shortcut(
         "shift-cmd-right",
         boxed::<SeekForward>,
-        None,
+        QUIET,
         Playback,
         "Seek forward",
     ),
     shortcut(
         "shift-cmd-left",
         boxed::<SeekBackward>,
-        None,
+        QUIET,
         Playback,
         "Seek backward",
     ),
     shortcut("cmd-s", boxed::<ToggleShuffle>, None, Playback, "Shuffle"),
     shortcut("cmd-r", boxed::<CycleRepeat>, None, Playback, "Repeat"),
-    shortcut("cmd-up", boxed::<VolumeUp>, None, Playback, "Volume up"),
+    shortcut("cmd-up", boxed::<VolumeUp>, QUIET, Playback, "Volume up"),
     shortcut(
         "cmd-down",
         boxed::<VolumeDown>,
-        None,
+        QUIET,
         Playback,
         "Volume down",
     ),
@@ -680,6 +680,52 @@ mod tests {
                 .iter()
                 .any(|shortcut| (shortcut.action)().partial_eq(&PlayPause))
         );
+    }
+
+    #[test]
+    fn text_fields_keep_their_caret_keys() {
+        use gpui::{KeyContext, Keymap};
+        use gpui_component::input::{
+            MoveEnd, MoveHome, MoveToEnd, MoveToStart, Search, SelectToEndOfLine,
+            SelectToStartOfLine,
+        };
+
+        let caret: Vec<(&str, Box<dyn Action>)> = vec![
+            ("cmd-right", Box::new(MoveEnd)),
+            ("cmd-left", Box::new(MoveHome)),
+            ("shift-cmd-right", Box::new(SelectToEndOfLine)),
+            ("shift-cmd-left", Box::new(SelectToStartOfLine)),
+            ("cmd-up", Box::new(MoveToStart)),
+            ("cmd-down", Box::new(MoveToEnd)),
+            ("cmd-f", Box::new(Search)),
+        ];
+        let mut bindings: Vec<KeyBinding> = caret
+            .iter()
+            .map(|(keys, action)| {
+                let input = KeyBindingContextPredicate::parse("Input").unwrap();
+                KeyBinding::load(
+                    keys,
+                    action.boxed_clone(),
+                    Some(Rc::new(input)),
+                    false,
+                    None,
+                    &DummyKeyboardMapper,
+                )
+                .unwrap()
+            })
+            .collect();
+        bindings.extend(key_bindings());
+        let keymap = Keymap::new(bindings);
+        let browsing = [KeyContext::parse("OpenMusic").unwrap()];
+        let typing = [browsing[0].clone(), KeyContext::parse("Input").unwrap()];
+        for (keys, action) in &caret {
+            let stroke = Keystroke::parse(keys).unwrap();
+            let (found, _) = keymap.bindings_for_input(std::slice::from_ref(&stroke), &typing);
+            assert!(found[0].action().partial_eq(action.as_ref()), "{keys}");
+            let (found, _) = keymap.bindings_for_input(&[stroke], &browsing);
+            assert!(!found.is_empty(), "{keys}");
+            assert!(!found[0].action().partial_eq(action.as_ref()), "{keys}");
+        }
     }
 
     #[test]
