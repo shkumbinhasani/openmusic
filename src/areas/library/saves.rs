@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, Div, Stateful, div, prelude::*, px};
+use gpui::{AnyElement, Context, div, prelude::*, px};
 use gpui_component::tooltip::Tooltip;
 use spotify_client::{
     Track,
@@ -10,7 +10,7 @@ use spotify_client::{
 use crate::{
     app::{OpenMusic, Page, Session},
     icons,
-    overlay::{self, ButtonSpec, Label},
+    overlay::{ButtonSpec, Label},
     ui::{Palette, components::icon, dock::DockItem, tracks::ROW_GROUP},
 };
 
@@ -209,28 +209,6 @@ impl OpenMusic {
         }
     }
 
-    fn glass_toggle(
-        &self,
-        key: &'static str,
-        spec: ButtonSpec,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        if !overlay::available() {
-            return self.control(key, spec.label, spec.prominent, palette, cx);
-        }
-        let visible = !self.modal_open();
-        div()
-            .id(key)
-            .occlude()
-            .relative()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(visible, |slot| slot.child(overlay::button(key, spec)))
-    }
-
     pub fn library_button(
         &self,
         uri: &str,
@@ -250,7 +228,7 @@ impl OpenMusic {
                 tooltip: None,
             };
             return Some(
-                self.glass_toggle(FOLLOW_KEY, spec, palette, cx)
+                self.glass_control(FOLLOW_KEY, spec, !self.modal_open(), palette, cx)
                     .h(px(36.))
                     .w(px(32. + 7.4 * text.chars().count() as f32))
                     .into_any_element(),
@@ -269,7 +247,7 @@ impl OpenMusic {
             tooltip: save_label(uri, saved).map(str::to_owned),
         };
         Some(
-            self.glass_toggle(SAVE_KEY, spec, palette, cx)
+            self.glass_control(SAVE_KEY, spec, !self.modal_open(), palette, cx)
                 .size(px(36.))
                 .into_any_element(),
         )
