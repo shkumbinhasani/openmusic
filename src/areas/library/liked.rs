@@ -112,8 +112,23 @@ impl LikedSort {
     }
 }
 
+const LATIN_BASE: &[u8; 192] = b"aaaaaaaceeeeiiiidnooooo*ouuuuytsaaaaaaaceeeeiiiidnooooo*ouuuuytyaaaaaaccccccccddddeeeeeeeeeegggggggghhhhiiiiiiiiiiiijjkkkllllllllllnnnnnnnnnoooooooorrrrrrssssssssttttttuuuuuuuuuuuuwwyyyzzzzzzs";
+
+fn base_letter(letter: char) -> char {
+    let Some(index) = (letter as usize).checked_sub(0xC0) else {
+        return letter;
+    };
+    match LATIN_BASE.get(index) {
+        Some(b'*') | None => letter,
+        Some(&base) => base as char,
+    }
+}
+
 fn folded(text: &str) -> String {
-    text.to_lowercase()
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(base_letter)
+        .collect()
 }
 
 fn compare(a: &Track, b: &Track, column: Column) -> Ordering {
@@ -741,6 +756,29 @@ mod tests {
         );
         assert_eq!(Column::from_slug("added"), Some(Column::Added));
         assert_eq!(Column::from_slug("nope"), None);
+    }
+
+    #[test]
+    fn sorts_accented_titles_with_their_base_letters() {
+        let tracks = vec![
+            track("spotify:track:x", "XANNYS", "a", 1, 1),
+            track("spotify:track:u", "Über Wasser", "a", 1, 1),
+            track("spotify:track:t", "Time", "a", 1, 1),
+            track("spotify:track:e", "Été", "a", 1, 1),
+            track("spotify:track:k", "Ł×ódź", "a", 1, 1),
+        ];
+        let title = LikedSort::default().pick(Column::Title);
+        assert_eq!(
+            uris(&sorted(&tracks, title)),
+            [
+                "spotify:track:e",
+                "spotify:track:k",
+                "spotify:track:t",
+                "spotify:track:u",
+                "spotify:track:x"
+            ]
+        );
+        assert_eq!(folded("Ł×ÓDŹ ß"), "l×odz s");
     }
 
     fn page(tracks: Vec<Track>, total: u32, rows: u32) -> LikedPage {
