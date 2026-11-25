@@ -318,7 +318,7 @@ impl OpenMusic {
         }
     }
 
-    fn refresh_current_episode(&self) {
+    pub(super) fn refresh_current_episode(&self) {
         if let Some(track) = self.track()
             && is_episode(&track.uri)
             && self.content.loaded_episode(&track.uri).is_some()
