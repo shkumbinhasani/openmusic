@@ -63,6 +63,7 @@ pub struct State {
     pub show_error: Option<String>,
     pub show_end: Sentinel,
     pub about_open: bool,
+    pub show_filter: Option<Filter>,
     pub episode: Option<(String, Result<Episode, String>)>,
     pub marks: HashMap<String, bool>,
     pub marking: HashMap<String, Option<bool>>,
@@ -642,6 +643,7 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
                 app.content.show_loading = false;
                 app.content.show_error = None;
                 app.content.about_open = false;
+                app.content.show_filter = None;
                 app.content.similar = None;
                 app.send(Command::Show(uri.clone()));
             }
@@ -834,7 +836,7 @@ fn describe_show(app: &OpenMusic, show: &Show, lines: &mut String) {
         });
     let _ = writeln!(
         lines,
-        "show {} kind={:?} media={:?} order={:?} saved={saved} rating={} total={} loaded={} next={} restricted={} resume={resume} loading={} error={:?} name={:?}",
+        "show {} kind={:?} media={:?} order={:?} saved={saved} rating={} total={} loaded={} next={} restricted={} resume={resume} filter={} loading={} error={:?} name={:?}",
         show.uri,
         show.kind,
         show.media,
@@ -845,6 +847,7 @@ fn describe_show(app: &OpenMusic, show: &Show, lines: &mut String) {
         show.next_offset
             .map_or("-".to_owned(), |next| next.to_string()),
         show.restricted(),
+        app.content.show_filter.map_or("none", Filter::name),
         app.content.show_loading,
         app.content.show_error,
         show.name,
@@ -966,6 +969,11 @@ pub fn debug(
             app.change_saved(uri, *setting == "on");
         }
         ("gotoshow", [uri]) => app.go_to_show(uri, None),
+        ("showfilter", ["none"]) => app.content.show_filter = None,
+        ("showfilter", [name]) => match Filter::from_name(name) {
+            Some(filter) => app.content.show_filter = Some(filter),
+            None => return false,
+        },
         ("canvas", []) => {
             let mut lines = String::new();
             app.describe_canvas(&mut lines);

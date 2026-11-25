@@ -5,7 +5,9 @@ use gpui::{
 use gpui_component::switch::Switch;
 use spotify_client::{
     Track, entity,
-    podcast::{self, Availability, Episode, Played, Show, ShowKind, similar},
+    podcast::{
+        self, Availability, Episode, Played, Show, ShowKind, similar, your_episodes::Filter,
+    },
 };
 
 use super::state::{open_in_spotify, show_kind_label};
@@ -819,11 +821,15 @@ impl OpenMusic {
     fn episode_section(&self, show: &Show, palette: Palette, cx: &mut Context<Self>) -> Div {
         let book = show.kind == ShowKind::Audiobook;
         let year = this_year();
+        let filter = self.content.show_filter.filter(|_| !book);
         let visible: Vec<(usize, &Episode)> = show
             .episodes
             .iter()
             .enumerate()
-            .filter(|(_, episode)| episode.listed())
+            .filter(|(_, episode)| {
+                episode.listed()
+                    && filter.is_none_or(|filter| filter.keeps(episode, self.played(episode)))
+            })
             .collect();
         let restricted = show.restricted();
         let loading = self.content.show_loading;
@@ -874,14 +880,21 @@ impl OpenMusic {
                             .child(count),
                     ),
             )
+            .when(!book && !show.episodes.is_empty(), |section| {
+                section.child(self.show_filters(show, filter, palette, cx))
+            })
             .when(
                 visible.is_empty() && !loading && show.next_offset.is_none(),
                 |section| {
                     section.child(self.page_status(
-                        if restricted > 0 {
-                            "These episodes aren’t available in your country."
-                        } else {
-                            "No episodes yet."
+                        match filter {
+                            Some(filter) => {
+                                format!("No {} episodes.", filter.label().to_lowercase())
+                            }
+                            None if restricted > 0 => {
+                                "These episodes aren’t available in your country.".to_owned()
+                            }
+                            None => "No episodes yet.".to_owned(),
                         },
                         palette,
                     ))
@@ -924,6 +937,40 @@ impl OpenMusic {
                         }),
                 )
             })
+    }
+
+    fn show_filters(
+        &self,
+        show: &Show,
+        filter: Option<Filter>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let filters: Vec<Filter> = Filter::ALL
+            .into_iter()
+            .filter(|filter| *filter != Filter::Video || show.video())
+            .collect();
+        let chips: Vec<SharedString> = filters
+            .iter()
+            .map(|filter| SharedString::from(filter.label()))
+            .collect();
+        let selected = filter.and_then(|filter| filters.iter().position(|each| *each == filter));
+        self.chip_row(
+            "show-filter",
+            &chips,
+            selected,
+            move |app, index, _, cx| {
+                let picked = filters.get(index).copied();
+                app.content.show_filter = if app.content.show_filter == picked {
+                    None
+                } else {
+                    picked
+                };
+                cx.notify();
+            },
+            palette,
+            cx,
+        )
     }
 
     fn episode_play_button(
