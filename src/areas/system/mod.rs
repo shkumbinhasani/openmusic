@@ -1,4 +1,5 @@
 pub mod dock_menu;
+pub mod login_item;
 pub mod menu_bar;
 pub mod mini_player;
 pub mod native_window;

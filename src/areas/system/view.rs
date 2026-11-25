@@ -3,12 +3,13 @@ use gpui_component::switch::Switch;
 use spotify_client::Track;
 
 use super::{
+    login_item::{self, Status},
     mini_player, native_window,
     notify::{self, Authorization},
 };
 use crate::{
     app::OpenMusic,
-    overlay::Label,
+    overlay::{self, Label},
     ui::{
         Palette,
         components::ROW_RADIUS,
@@ -29,6 +30,7 @@ const ROW_INSET: f32 = 14.;
 pub const NOTIFY_TITLE: &str = "Notification on song change";
 pub const NOTIFY_TEXT: &str = "Show a desktop notification when the track changes.";
 pub const NOTIFY_DENIED_TEXT: &str = "Enable notifications in your system settings to receive desktop notifications when the track changes.";
+pub const LOGIN_TITLE: &str = "Open OpenMusic automatically after you log in";
 pub const MINI_TITLE: &str = "Show Mini Player when minimized";
 pub const MINI_TEXT: &str =
     "Minimizing the window opens the Mini Player. It closes again when the window comes back.";
@@ -117,13 +119,44 @@ impl OpenMusic {
                 this.set_mini_on_minimize(*checked, cx);
                 cx.notify();
             }));
-        let rows = vec![setting_row(
+        let mut rows = Vec::new();
+        if login_item::available() {
+            rows.push(self.login_row(palette, cx));
+        }
+        rows.push(setting_row(
             MINI_TITLE,
             Some(MINI_TEXT.into()),
             mini,
             palette,
-        )];
+        ));
         Some(settings_section("Startup and window", rows, palette))
+    }
+
+    fn login_row(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.system.login;
+        let choice = self.startup();
+        let label = choice.label();
+        let picker = self
+            .control(login_item::CHOICE, Label::Text(label), false, palette, cx)
+            .h(px(36.))
+            .w(px(choice_width(label)))
+            .child(overlay::anchor(login_item::CHOICE));
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .when(status == Status::NeedsApproval, |control| {
+                control.child(self.text_control(
+                    login_item::SETTINGS,
+                    "Login Items",
+                    false,
+                    palette,
+                    cx,
+                ))
+            })
+            .child(picker);
+        let text = choice.describe(status, self.system.login_error.as_deref());
+        setting_row(LOGIN_TITLE, Some(text.into()), control, palette)
     }
 
     pub fn notifications_section(
@@ -170,6 +203,10 @@ impl OpenMusic {
         )];
         Some(settings_section("Notifications", rows, palette))
     }
+}
+
+fn choice_width(label: &str) -> f32 {
+    (32. + 7.6 * label.chars().count() as f32).max(72.)
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {

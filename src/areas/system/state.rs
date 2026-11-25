@@ -12,6 +12,7 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
     dock_menu::{self, DockState, RECENT_LIMIT, recent_name},
+    login_item::{self, STARTUPS, Startup},
     menu_bar::{self, MenuState},
     mini_player::{self, MiniState},
     native_window,
@@ -21,14 +22,17 @@ use super::{
     worker::Event,
 };
 use crate::{
-    app::{OpenMusic, Page, Session, intent::Intent},
+    app::{OpenMusic, Page, Session, intent::Intent, settings},
     menus::{
         About, BringAllToFront, CloseWindow, GoBack, GoForward, GoHome, Handle, HideApp,
         HideOthers, Minimize, Next, PlayPause, PlayRecent, Previous, SeekBackward, SeekForward,
         ShowAll, ShowMainWindow, ShowShortcuts, ToggleFullScreen, ToggleMiniOnMinimize,
         ToggleMiniPlayer, ToggleNotifications, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
     },
-    ui::tracks::{RowDrag, RowDrop},
+    ui::{
+        menu::{MenuItem, Place},
+        tracks::{RowDrag, RowDrop},
+    },
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -36,6 +40,7 @@ use crate::{
 pub struct SystemPrefs {
     pub notify_on_track_change: bool,
     pub mini_player_when_minimized: bool,
+    pub start_minimized: bool,
 }
 
 pub const TRACK_SEEK_MS: i32 = 5_000;
@@ -82,6 +87,8 @@ pub struct State {
     pub notify_asked: bool,
     pub on_settings: bool,
     pub was_active: bool,
+    pub login: login_item::Status,
+    pub login_error: Option<String>,
 }
 
 impl State {
@@ -89,6 +96,7 @@ impl State {
 }
 
 pub fn install(cx: &mut App) {
+    login_item::record_launch();
     if cfg!(not(target_os = "macos")) {
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -106,6 +114,9 @@ pub fn window_opened(window: &mut Window, cx: &mut App) {
             native_window::hide();
             false
         });
+        if login_item::launched_at_login() && settings::load().system.start_minimized {
+            login_item::hide_at_launch();
+        }
     }
 }
 
@@ -282,6 +293,41 @@ impl OpenMusic {
 
     fn refresh_settings_status(&mut self) {
         notify::refresh_status();
+        self.system.login = login_item::status();
+    }
+
+    pub fn startup(&self) -> Startup {
+        Startup::current(self.system.login, self.settings.system.start_minimized)
+    }
+
+    pub fn set_startup(&mut self, choice: Startup) {
+        self.system.login_error = None;
+        if choice.registers() != self.system.login.registered() {
+            match login_item::set(choice.registers()) {
+                Ok(status) => self.system.login = status,
+                Err(message) => {
+                    self.system.login = login_item::status();
+                    self.system.login_error = Some(message);
+                    self.show_toast("Couldn’t change Open at Login.", None);
+                    return;
+                }
+            }
+        }
+        self.update_settings(|settings| settings.system.start_minimized = choice.minimized());
+    }
+
+    fn open_startup_menu(&mut self) {
+        let current = self.startup();
+        let items = STARTUPS
+            .into_iter()
+            .map(|choice| {
+                MenuItem::action(choice.label(), move |app, _, _| app.set_startup(choice))
+                    .checked(choice == current)
+            })
+            .collect();
+        if !self.show_menu(items, Place::Under(login_item::CHOICE), None) {
+            self.set_startup(current.next());
+        }
     }
 
     pub fn settings_summary(&self) -> String {
@@ -289,7 +335,15 @@ impl OpenMusic {
         let status = notify::status();
         [
             format!(
-                "startup mini_on_minimize={}",
+                "startup shown={} login={} choice={} launched_at_login={} error={:?}",
+                login_item::available(),
+                self.system.login.name(),
+                self.startup().label(),
+                login_item::launched_at_login(),
+                self.system.login_error,
+            ),
+            format!(
+                "window mini_on_minimize={}",
                 prefs.mini_player_when_minimized
             ),
             format!(
@@ -508,6 +562,7 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
         .detach();
     }
     app.system.watch.reset();
+    app.system.login = login_item::status();
     app.sync_system(cx);
 }
 
@@ -666,6 +721,10 @@ pub fn debug(
             match (name, on) {
                 ("", _) => {}
                 ("mini", Some(on)) => app.set_mini_on_minimize(on, cx),
+                ("login", _) => match Startup::parse(value.trim()) {
+                    Some(choice) => app.set_startup(choice),
+                    None => return false,
+                },
                 ("notify", Some(on)) => {
                     if on != app.settings.system.notify_on_track_change && notify::available() {
                         app.toggle_notifications(cx);
@@ -826,6 +885,8 @@ pub fn on_press(
         notify::OPEN => app.act(Intent::ShowMainWindow, window, cx),
         notify::STATUS => app.notification_status(cx),
         view::NOTIFICATION_SETTINGS => cx.open_url(notify::SETTINGS_URL),
+        login_item::CHOICE => app.open_startup_menu(),
+        login_item::SETTINGS => login_item::open_settings(),
         view::MINI_BUTTON => app.act(Intent::ToggleMiniPlayer, window, cx),
         _ => return false,
     }
