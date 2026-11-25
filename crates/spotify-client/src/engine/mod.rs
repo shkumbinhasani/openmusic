@@ -122,6 +122,7 @@ impl NowPlaying {
 
 #[derive(Clone, Debug)]
 pub enum Update {
+    Connected,
     Ready,
     Now(Box<NowPlaying>),
     Playback(Box<Playback>),
@@ -383,6 +384,7 @@ async fn run(
                 match event {
                     DealerEvent::Connected { connection_id } => {
                         engine.connection_id = Some(connection_id);
+                        let _ = updates.send(Update::Connected);
                         match engine.register().await {
                             Ok(()) => {
                                 let _ = updates.send(Update::Ready);

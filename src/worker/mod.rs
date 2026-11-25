@@ -383,11 +383,12 @@ async fn connected(
                     return Some("Spotify disconnected. Sign in again to reconnect.".into());
                 };
                 match update {
-                    Update::Ready => {
+                    Update::Connected => {
                         if std::mem::replace(&mut dealer_seen, true) {
                             let _ = events.send(Event::Reconnected);
                         }
                     }
+                    Update::Ready => {}
                     Update::Now(mut now) => {
                         now_playing(&mut now, &mut ctx);
                         let _ = events.send(Event::NowPlaying(*now));

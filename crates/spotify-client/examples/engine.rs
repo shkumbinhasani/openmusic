@@ -152,6 +152,10 @@ async fn scenario() -> Result<()> {
                 playback.repeat,
                 playback.devices.len()
             ),
+            Update::Connected => println!(
+                "[{:>4.1}s] dealer connected",
+                started.elapsed().as_secs_f32()
+            ),
             Update::Push(message) => println!(
                 "[{:>4.1}s] push: {}",
                 started.elapsed().as_secs_f32(),
