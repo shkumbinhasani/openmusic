@@ -6,6 +6,8 @@ use serde_json::Value;
 use spotify_client::account::{AccountInfo, Explicit};
 
 use super::{
+    friends::{self, Friends},
+    friends_view::HIDE_KEY,
     name::{self, NameEditor},
     privacy::{self, PrivacyState},
     profile::{self, Profiles},
@@ -15,7 +17,7 @@ use super::{
 use crate::{
     app::{OpenMusic, Page, Session, settings::Settings},
     areas::{discovery, playlists},
-    menus::{self, Handle, OpenSettings, SignOut},
+    menus::{self, Handle, OpenSettings, SignOut, ToggleFriendActivity},
     ui::{
         menu::{MenuItem, Place, Row, Target},
         tracks::{RowDrag, RowDrop},
@@ -27,6 +29,7 @@ use crate::{
 #[serde(default)]
 pub struct AccountPrefs {
     pub language: Option<String>,
+    pub show_friends: bool,
 }
 
 pub const LANGUAGE_KEY: &str = "settings-language";
@@ -219,6 +222,7 @@ pub struct State {
     pub profiles: Profiles,
     pub privacy: PrivacyState,
     pub name_editor: Option<Entity<NameEditor>>,
+    pub friends: Friends,
 }
 
 impl State {
@@ -227,6 +231,7 @@ impl State {
             urls.extend(info.avatar.clone());
         }
         self.profiles.covers(urls);
+        self.friends.covers(urls);
     }
 }
 
@@ -282,6 +287,13 @@ impl OpenMusic {
                     .subtitle(FREE_NOTICE),
             );
         }
+        items.push(
+            MenuItem::action("Friend Activity", |app, window, _| {
+                app.toggle_friend_activity(window)
+            })
+            .symbol("person.2")
+            .checked(self.friends_on()),
+        );
         items.extend([
             MenuItem::Separator,
             MenuItem::action("Sign Out", |app, _, _| app.send(worker::Command::SignOut))
@@ -498,6 +510,7 @@ pub fn on_event(
             now,
         } => privacy::on_saved(app, field, value, saved, now),
         Event::NameSaved { name, done } => name::on_saved(app, name, done, window, cx),
+        Event::Friends { result, slow } => friends::on_friends(app, result, slow),
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -565,6 +578,7 @@ pub fn debug(
         "account-menu" => app.open_account_menu(),
         "privacy" => privacy::debug(app, rest, directory),
         "display-name" => name::debug(app, rest, directory, window, cx),
+        "friends" => friends::debug(app, rest, directory),
         "profile" | "profiles" | "follow-user" | "follows" | "block" | "block-ask" | "blocking" => {
             return profile::debug(app, verb, rest, directory, window, cx);
         }
@@ -628,8 +642,13 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         .profile
         .as_ref()
         .map_or("none", |(uri, _)| uri.as_str());
+    let friends = if app.friends_on() {
+        app.account.friends.items.len().to_string()
+    } else {
+        "off".to_owned()
+    };
     format!(
-        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={} blocks_pending={}",
+        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={} blocks_pending={} friends={friends}",
         app.language(),
         app.account.profiles.pending.len(),
         app.account.profiles.block_pending.len()
@@ -642,6 +661,10 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     });
     menus::route(cx, handle, |_: &OpenSettings, app, window, cx| {
         app.open_settings(window, cx);
+        cx.notify();
+    });
+    menus::route(cx, handle, |_: &ToggleFriendActivity, app, window, cx| {
+        app.toggle_friend_activity(window);
         cx.notify();
     });
 }
@@ -661,6 +684,7 @@ pub fn on_press(
         LANGUAGE_KEY => app.open_language_menu(),
         CLEAR_CACHE_KEY => app.confirm_clear_cache(window, cx),
         privacy::RETRY_KEY => app.refresh_privacy(),
+        HIDE_KEY => app.set_friend_activity(false),
         FOLLOW_PROFILE => {
             if let Page::Profile(uri) = &app.page {
                 let uri = uri.clone();
@@ -696,6 +720,7 @@ pub fn row_dropped(
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     profile::tick(app, cx);
+    friends::tick(app, cx);
 }
 
 #[cfg(test)]

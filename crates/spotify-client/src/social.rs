@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use prost::Message;
@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::{
     account::{IdentityProfile, Wrapped, identity_path},
     api::{Api, Body},
-    catalog::{self, Track},
+    catalog::{self, Link, Track},
     entity,
     pathfinder::{self, Operation},
 };
@@ -38,6 +38,8 @@ pub const TOP_PREVIEW_TRACKS: usize = 4;
 pub const TOP_ALL: usize = 50;
 pub const PRIVACY_READ: &str = "/profile-privacy/v2/read-settings";
 pub const PRIVACY_STORE: &str = "/profile-privacy/v2/store-settings";
+pub const BUDDYLIST: &str = "/presence-view/v1/buddylist";
+pub const PLAYING_WINDOW_MS: i64 = 15 * 60 * 1000;
 const IMAGE_SIZE: u32 = 300;
 const PROTOBUF: &str = "application/x-protobuf";
 
@@ -660,6 +662,123 @@ pub fn name_update(name: &str) -> Vec<u8> {
     .encode_to_vec()
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Friend {
+    pub user: ProfileRef,
+    pub track: Track,
+    pub context_uri: Option<String>,
+    pub context_name: Option<String>,
+    pub timestamp_ms: i64,
+    pub playing: Option<bool>,
+}
+
+impl Friend {
+    pub fn playing_now(&self, now_ms: i64) -> bool {
+        self.playing
+            .unwrap_or(now_ms.saturating_sub(self.timestamp_ms) < PLAYING_WINDOW_MS)
+    }
+
+    pub fn images(&self) -> impl Iterator<Item = String> + '_ {
+        self.user.image.iter().chain(&self.track.cover).cloned()
+    }
+}
+
+fn web_image(value: &Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    let Some(rest) = text.strip_prefix("http://") else {
+        return image(value);
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    let spotify = host == "scdn.co"
+        || host.ends_with(".scdn.co")
+        || host == "spotifycdn.com"
+        || host.ends_with(".spotifycdn.com");
+    spotify.then(|| format!("https://{rest}"))
+}
+
+fn named_link(value: &Value) -> Option<Link> {
+    let uri = string(&value["uri"]);
+    let name = string(&value["name"]);
+    (!uri.is_empty() && !name.is_empty()).then_some(Link { uri, name })
+}
+
+fn timestamp(value: &Value) -> i64 {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|number| number as i64))
+        .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        .unwrap_or_default()
+}
+
+pub fn parse_friend(value: &Value) -> Option<Friend> {
+    let person = &value["user"];
+    let user_uri = string(&person["uri"]);
+    let fallback = username(&user_uri)?;
+    let user = ProfileRef {
+        name: Some(string(&person["name"]))
+            .filter(|name| !name.is_empty())
+            .unwrap_or(fallback),
+        image: web_image(&person["imageUrl"]).or_else(|| web_image(&person["image_url"])),
+        uri: user_uri,
+        ..ProfileRef::default()
+    };
+    let song = &value["track"];
+    let uri = string(&song["uri"]);
+    if uri.is_empty() {
+        return None;
+    }
+    let artist = named_link(&song["artist"]);
+    let album = named_link(&song["album"]);
+    let context = &song["context"];
+    let track = Track {
+        title: Some(string(&song["name"]))
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| uri.clone()),
+        artist: artist
+            .as_ref()
+            .map(|artist| artist.name.clone())
+            .unwrap_or_default(),
+        artist_uri: artist.as_ref().map(|artist| artist.uri.clone()),
+        album: album
+            .as_ref()
+            .map(|album| album.name.clone())
+            .unwrap_or_default(),
+        album_uri: album.map(|album| album.uri),
+        cover: web_image(&song["imageUrl"]).or_else(|| web_image(&song["image_url"])),
+        artists: artist.into_iter().collect(),
+        uri,
+        ..Track::default()
+    };
+    let context_uri = Some(string(&context["uri"])).filter(|uri| !uri.is_empty());
+    let context_name = Some(string(&context["name"])).filter(|name| !name.is_empty());
+    Some(Friend {
+        user,
+        track,
+        context_name: context_uri.as_ref().and(context_name),
+        context_uri,
+        timestamp_ms: timestamp(&value["timestamp"]),
+        playing: value["isPlaying"]
+            .as_bool()
+            .or_else(|| value["is_playing"].as_bool()),
+    })
+}
+
+pub fn parse_friends(reply: &Value) -> Vec<Friend> {
+    let mut friends: Vec<Friend> = reply["friends"]
+        .as_array()
+        .map(|items| items.iter().filter_map(parse_friend).collect())
+        .unwrap_or_default();
+    friends.sort_by_key(|friend| std::cmp::Reverse(friend.timestamp_ms));
+    let mut seen = HashSet::new();
+    friends.retain(|friend| seen.insert(friend.user.uri.clone()));
+    friends
+}
+
+pub async fn friends(api: &Api) -> Result<Vec<Friend>> {
+    let reply: Value = api.get_json(BUDDYLIST).await?;
+    Ok(parse_friends(&reply))
+}
+
 pub async fn set_display_name(api: &Api, username: &str, name: &str) -> Result<()> {
     let Some(name) = display_name(name) else {
         bail!("Display name is required.");
@@ -1053,6 +1172,110 @@ mod tests {
         let mut reply = own_profile();
         reply["edit_profile_disabled"] = json!(true);
         assert!(parse_profile(&reply).unwrap().name_locked);
+    }
+
+    fn buddylist() -> Value {
+        json!({"friends": [
+            {"timestamp": 1_795_470_000_000_i64,
+             "user": {"uri": "spotify:user:friend", "name": "A Friend",
+                      "imageUrl": "https://i.scdn.co/image/friend"},
+             "track": {"uri": "spotify:track:0000000000000000000001", "name": "Song",
+                       "imageUrl": "http://i.scdn.co/image/cover",
+                       "album": {"uri": "spotify:album:0000000000000000000001", "name": "Record"},
+                       "artist": {"uri": "spotify:artist:0000000000000000000001", "name": "Band"},
+                       "context": {"uri": "spotify:playlist:0000000000000000000001",
+                                   "name": "Mix", "index": 0}}},
+            {"timestamp": "1795471000000", "isPlaying": true,
+             "user": {"uri": "spotify:user:pal", "imageUrl": "https://example.com/pal.jpg"},
+             "track": {"uri": "spotify:episode:0000000000000000000001", "name": "Episode",
+                       "album": {"uri": "spotify:show:0000000000000000000001", "name": "Show"},
+                       "context": {"uri": "", "name": "Nothing"}}},
+            {"timestamp": 1_795_460_000_000_i64,
+             "user": {"uri": "spotify:user:friend", "name": "A Friend"},
+             "track": {"uri": "spotify:track:0000000000000000000002", "name": "Older"}},
+            {"timestamp": 1, "user": {"uri": "spotify:artist:x", "name": "Not a user"},
+             "track": {"uri": "spotify:track:0000000000000000000003"}},
+            {"timestamp": 1, "user": {"uri": "spotify:user:quiet"}, "track": {}}
+        ]})
+    }
+
+    #[test]
+    fn reads_friend_activity() {
+        let friends = parse_friends(&buddylist());
+        assert_eq!(friends.len(), 2);
+
+        let pal = &friends[0];
+        assert_eq!(pal.user.uri, "spotify:user:pal");
+        assert_eq!(pal.user.name, "pal");
+        assert_eq!(
+            pal.user.image.as_deref(),
+            Some("https://example.com/pal.jpg")
+        );
+        assert_eq!(pal.timestamp_ms, 1_795_471_000_000);
+        assert_eq!(pal.playing, Some(true));
+        assert_eq!(pal.track.album, "Show");
+        assert_eq!(
+            pal.track.album_uri.as_deref(),
+            Some("spotify:show:0000000000000000000001")
+        );
+        assert_eq!(pal.track.artist_uri, None);
+        assert!(pal.track.artists.is_empty());
+        assert_eq!(
+            (pal.context_uri.as_deref(), pal.context_name.as_deref()),
+            (None, None)
+        );
+
+        let friend = &friends[1];
+        assert_eq!(friend.user.name, "A Friend");
+        assert_eq!(friend.track.title, "Song");
+        assert_eq!(friend.track.artist, "Band");
+        assert_eq!(friend.track.artists.len(), 1);
+        assert_eq!(
+            friend.track.cover.as_deref(),
+            Some("https://i.scdn.co/image/cover")
+        );
+        assert_eq!(
+            friend.context_uri.as_deref(),
+            Some("spotify:playlist:0000000000000000000001")
+        );
+        assert_eq!(friend.context_name.as_deref(), Some("Mix"));
+        assert_eq!(friend.playing, None);
+        assert_eq!(friend.images().count(), 2);
+
+        assert!(parse_friends(&json!({"friends": []})).is_empty());
+        assert!(parse_friends(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn decides_who_is_playing_now() {
+        let mut friend = Friend {
+            timestamp_ms: 1_000_000_000,
+            ..Friend::default()
+        };
+        assert!(friend.playing_now(1_000_000_000 + PLAYING_WINDOW_MS - 1));
+        assert!(!friend.playing_now(1_000_000_000 + PLAYING_WINDOW_MS));
+        friend.playing = Some(false);
+        assert!(!friend.playing_now(1_000_000_001));
+        friend.playing = Some(true);
+        assert!(friend.playing_now(i64::MAX));
+    }
+
+    #[test]
+    fn keeps_only_spotify_images_from_plain_http() {
+        assert_eq!(
+            web_image(&json!("http://i.scdn.co/image/x")).as_deref(),
+            Some("https://i.scdn.co/image/x")
+        );
+        assert_eq!(
+            web_image(&json!("http://image-cdn-ak.spotifycdn.com/image/x")).as_deref(),
+            Some("https://image-cdn-ak.spotifycdn.com/image/x")
+        );
+        assert_eq!(web_image(&json!("http://evil.example/scdn.co/x")), None);
+        assert_eq!(web_image(&json!("http://notscdn.co/x")), None);
+        assert_eq!(
+            web_image(&json!("spotify:image:ab67")).as_deref(),
+            Some("https://i.scdn.co/image/ab67")
+        );
     }
 
     #[test]

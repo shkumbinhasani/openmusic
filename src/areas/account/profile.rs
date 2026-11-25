@@ -306,6 +306,14 @@ impl OpenMusic {
         self.account
             .profiles
             .person_name(uri)
+            .or_else(|| {
+                self.account
+                    .friends
+                    .items
+                    .iter()
+                    .find(|friend| friend.user.uri == uri)
+                    .map(|friend| friend.user.name.clone())
+            })
             .or_else(|| username(uri))
             .unwrap_or_else(|| uri.to_owned())
     }

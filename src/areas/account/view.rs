@@ -2,6 +2,7 @@ use gpui::{
     AnyElement, Context, FontWeight, MouseButton, Pixels, SharedString, div, prelude::*, px, rgb,
     rgba,
 };
+use gpui_component::switch::Switch;
 use spotify_client::{
     Track,
     account::{AccountInfo, Explicit},
@@ -27,6 +28,7 @@ use crate::{
 };
 
 const SETTINGS_WIDTH: f32 = 720.;
+const FRIENDS_DETAIL: &str = "Shows Friend Activity on the right when the window is wide enough. View › Friend Activity turns it on and off too.";
 const ROW_INSET: f32 = 14.;
 
 pub fn settings_section(
@@ -263,8 +265,8 @@ impl OpenMusic {
             )
     }
 
-    pub fn right_panel(&self, _palette: Palette, _cx: &mut Context<Self>) -> Option<Panel> {
-        None
+    pub fn right_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Option<Panel> {
+        self.friends_panel(palette, cx)
     }
 
     pub fn account_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -411,7 +413,22 @@ impl OpenMusic {
     }
 
     pub fn social_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let rows = self.privacy_rows(palette, cx);
+        let mut rows = self.privacy_rows(palette, cx);
+        let app = cx.entity().downgrade();
+        let friends = Switch::new("settings-friend-activity")
+            .checked(self.friends_on())
+            .on_click(move |show, _, cx| {
+                let _ = app.update(cx, |app, cx| {
+                    app.set_friend_activity(*show);
+                    cx.notify();
+                });
+            });
+        rows.push(setting_row(
+            "See what your friends are playing",
+            Some(FRIENDS_DETAIL.into()),
+            friends,
+            palette,
+        ));
         Some(settings_section("Social", rows, palette))
     }
 

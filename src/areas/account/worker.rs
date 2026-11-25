@@ -5,7 +5,7 @@ use spotify_client::{
     account::{self, AccountInfo},
     api::HttpStatus,
     dealer::Message,
-    social::{self, PlaylistRef, Privacy, PrivacyField, Profile, ProfileRef, TopContent},
+    social::{self, Friend, PlaylistRef, Privacy, PrivacyField, Profile, ProfileRef, TopContent},
 };
 
 use super::state::{AccountPrefs, ProfileListKind, chosen_language, system_language};
@@ -42,6 +42,7 @@ pub enum Command {
     },
     SetName(String),
     RefreshSoon,
+    Friends,
 }
 
 pub struct ProfileView {
@@ -148,6 +149,10 @@ pub enum Event {
         name: String,
         done: bool,
     },
+    Friends {
+        result: Result<Vec<Friend>, String>,
+        slow: bool,
+    },
 }
 
 impl Event {
@@ -161,6 +166,10 @@ impl Event {
                 result: Ok(listing),
                 ..
             } => listing.images(),
+            Self::Friends {
+                result: Ok(friends),
+                ..
+            } => friends.iter().flat_map(Friend::images).collect(),
             Self::Account(Err(_))
             | Self::Cache { .. }
             | Self::Profile { .. }
@@ -172,7 +181,8 @@ impl Event {
             | Self::BlockState(_)
             | Self::Privacy(_)
             | Self::PrivacySaved { .. }
-            | Self::NameSaved { .. } => Vec::new(),
+            | Self::NameSaved { .. }
+            | Self::Friends { .. } => Vec::new(),
         }
     }
 }
@@ -230,6 +240,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::RefreshSoon => ctx
             .tasks
             .spawn_keyed("account-later", fetch(ctx.api.clone(), Some(SECOND_LOOK))),
+        Command::Friends => ctx
+            .tasks
+            .spawn_keyed("friends", friend_activity(ctx.api.clone())),
     }
 }
 
@@ -283,10 +296,12 @@ async fn cache_size(clear: bool) -> crate::worker::Event {
     .into()
 }
 
+fn status(error: &anyhow::Error) -> Option<reqwest::StatusCode> {
+    error.downcast_ref::<HttpStatus>().map(|status| status.0)
+}
+
 fn missing(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<HttpStatus>()
-        .is_some_and(|status| status.0 == reqwest::StatusCode::NOT_FOUND)
+    status(error) == Some(reqwest::StatusCode::NOT_FOUND)
 }
 
 async fn profile_view(api: Api, user: User, uri: String) -> crate::worker::Event {
@@ -399,6 +414,17 @@ async fn privacy_write(
         now: written.flatten(),
     }
     .into()
+}
+
+async fn friend_activity(api: Api) -> crate::worker::Event {
+    let (result, slow) = match social::friends(&api).await {
+        Ok(friends) => (Ok(friends), false),
+        Err(error) => (
+            Err(super::friends::LOAD_FAILED.to_owned()),
+            status(&error) == Some(reqwest::StatusCode::TOO_MANY_REQUESTS),
+        ),
+    };
+    Event::Friends { result, slow }.into()
 }
 
 async fn rename(api: Api, user: User, name: String) -> crate::worker::Event {
