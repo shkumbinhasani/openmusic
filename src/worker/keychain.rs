@@ -1,14 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn read() -> Option<String> {
     let Some(path) = debug_file() else {
         return native::read();
     };
-    let saved = std::fs::read_to_string(&path)
-        .ok()
-        .map(|token| token.trim().to_owned())
-        .filter(|token| !token.is_empty());
-    saved.or_else(|| {
+    saved(&path).or_else(|| {
         let token = native::read()?;
         crate::debug::write_private(&path, &token);
         Some(token)
@@ -17,8 +13,7 @@ pub fn read() -> Option<String> {
 
 pub fn write(token: &str) {
     match debug_file() {
-        Some(path) if !token.is_empty() => crate::debug::write_private(&path, token),
-        Some(_) => {}
+        Some(path) => write_shared(&path, token, native::read, native::write),
         None => native::write(token),
     }
 }
@@ -35,6 +30,28 @@ pub fn clear() -> Result<(), native::Error> {
 
 fn debug_file() -> Option<PathBuf> {
     crate::debug::secrets().map(|directory| directory.join("refresh-token"))
+}
+
+fn saved(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+}
+
+fn write_shared(
+    path: &Path,
+    token: &str,
+    keychain: impl FnOnce() -> Option<String>,
+    store: impl FnOnce(&str),
+) {
+    if token.is_empty() {
+        return;
+    }
+    if saved(path).is_some_and(|current| keychain().as_deref() == Some(current.as_str())) {
+        store(token);
+    }
+    crate::debug::write_private(path, token);
 }
 
 #[cfg(target_os = "macos")]
@@ -78,5 +95,38 @@ mod native {
     pub fn write(_: &str) {}
     pub fn clear() -> Result<(), Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("openmusic-keychain-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join("refresh-token")
+    }
+
+    #[test]
+    fn a_rotated_token_reaches_keychain_while_the_session_is_shared() {
+        let path = scratch("shared");
+        let stored = RefCell::new(None);
+        let store = |token: &str| *stored.borrow_mut() = Some(token.to_owned());
+        std::fs::write(&path, "first\n").unwrap();
+        write_shared(&path, "second", || Some("first".into()), store);
+        assert_eq!(stored.take().as_deref(), Some("second"));
+        assert_eq!(saved(&path).as_deref(), Some("second"));
+        write_shared(&path, "third", || Some("someone else".into()), store);
+        assert_eq!(stored.take(), None);
+        assert_eq!(saved(&path).as_deref(), Some("third"));
+        write_shared(&path, "", || Some("third".into()), store);
+        assert_eq!(stored.take(), None);
+        assert_eq!(saved(&path).as_deref(), Some("third"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
