@@ -69,9 +69,9 @@ Choose **Sign in with Spotify** and approve the pairing in your browser with a S
 ## What it does
 
 - **Spotify Connect.** OpenMusic appears as a device named “OpenMusic”. Pick it from any Spotify app, or choose **Play on This Mac** to move playback from another device.
-- **Home.** Spotify’s Home feed: shortcuts, your mixes, recently played and recommendations, with Music and Podcasts filters.
-- **Search.** Songs, artists, albums, playlists, podcasts and profiles, with suggestions as you type and your recent searches. Browse all opens Spotify’s genres and moods. Paste any Spotify link or URI to open it. Command-F focuses the search field.
-- **Playlists, albums and artists.** Your playlists sit in the sidebar. Artist pages show the portrait, popular songs, releases and biography. Playing a song from a playlist or album queues the rest, as Spotify does.
+- **Home.** Spotify’s Home feed: shortcuts, your mixes, recently played and recommendations, with Music and Podcasts filters. Every card has a play button on hover.
+- **Search.** Songs, artists, albums, playlists, podcasts and profiles, with suggestions as you type and your recent searches. Browse all opens Spotify’s genres and moods. Paste any Spotify link or URI to open it. Command-F focuses the search field. If Spotify’s search service fails, songs still come back.
+- **Playlists, albums and artists.** Your playlists sit in the sidebar. Artist pages show the portrait, popular songs, the discography by albums, singles and compilations, the biography and artists fans also like, with Follow and Play. Playing a song from a playlist or album queues the rest, as Spotify does.
 - **Lyrics.** Time-synced lyrics highlight and scroll with the song. Click a line to jump to it.
 - **Native controls.** On macOS 26 and later the playback buttons, now-playing bar and volume are AppKit glass controls placed over the GPUI content, so songs scroll underneath them. Older systems get plain controls, without seeking and volume.
 

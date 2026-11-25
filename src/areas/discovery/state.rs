@@ -12,6 +12,7 @@ use spotify_client::{
 };
 
 use super::{
+    artist::{ArtistView, FOLLOW_KEY, MORE_KEY, PLAY_KEY},
     browse::{BrowseAllState, BrowseState, Kept, SectionState},
     home::HomeFeed,
     search::{Keys, Recent, Suggest, TabState},
@@ -109,6 +110,7 @@ pub struct State {
     pub sections: Kept<SectionState>,
     pub more_sentinel: Sentinel,
     pub artist: Option<(String, Result<Artist, String>)>,
+    pub artist_view: ArtistView,
     pub search_query: String,
     pub search_pending: bool,
     pub search: Option<Result<Box<SearchResults>, String>>,
@@ -161,15 +163,18 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
         Page::Search(tab) => app.open_search_tab(*tab),
         Page::Browse(uri) => app.load_browse(uri),
         Page::Section { uri, source } => app.load_section(uri, *source),
-        Page::Artist(uri)
-            if app
+        Page::Artist(uri) => {
+            app.discovery.artist_view.show(uri);
+            app.lookup_saved([uri.clone()]);
+            let loaded = app
                 .discovery
                 .artist
                 .as_ref()
-                .is_none_or(|(loaded, _)| loaded != uri) =>
-        {
-            app.discovery.artist = None;
-            app.send(Command::Artist(uri.clone()));
+                .is_some_and(|(loaded, result)| loaded == uri && result.is_ok());
+            if !loaded {
+                app.discovery.artist = None;
+                app.send(Command::Artist(uri.clone()));
+            }
         }
         _ => {}
     }
@@ -233,6 +238,7 @@ pub fn signed_out(app: &mut OpenMusic) {
     app.discovery.browse_pages.clear();
     app.discovery.sections.clear();
     app.discovery.artist = None;
+    app.discovery.artist_view = ArtistView::default();
 }
 
 pub fn debug(
@@ -245,6 +251,7 @@ pub fn debug(
 ) -> bool {
     app.search_debug(verb, rest, directory, window, cx)
         || app.feed_debug(verb, rest, directory, window, cx)
+        || app.artist_debug(verb, rest, directory)
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
@@ -253,7 +260,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             .search_fragment(&app.page, app.search_dropdown_visible()),
         app.home_fragment(),
         app.browse_fragment(),
+        app.artist_fragment(),
     ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
     .join(" ")
 }
 
@@ -270,14 +281,10 @@ pub fn on_press(
     cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
-        "play-artist" => {
-            if let Some((uri, Ok(artist))) = &app.discovery.artist {
-                let (uri, tracks) = (uri.clone(), artist.top_tracks.clone());
-                app.play_context(&uri, &tracks, 0, cx);
-            }
-        }
+        PLAY_KEY => app.play_artist(cx),
+        FOLLOW_KEY => app.toggle_artist_follow(),
         "search-top-play" => app.play_top_result(cx),
-        "more-artist" => {
+        MORE_KEY => {
             if let Page::Artist(uri) = &app.page
                 && let Some(target) = Target::for_uri(uri)
             {

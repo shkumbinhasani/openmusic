@@ -1,17 +1,25 @@
-use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
-use spotify_client::{
-    Track,
-    catalog::Artist,
-    entity::{Card, Kind},
+use gpui::{
+    AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, div, prelude::*, px,
+    rgb,
 };
+use spotify_client::{Track, catalog::Artist};
 
-use super::{home::ARTIST_ORIGIN, search::SONG_ROWS, state::SearchTab};
+use super::{
+    artist::{
+        ArtistView, FOLLOW_KEY, MORE_KEY, PLAY_KEY, POPULAR_ROWS, ReleaseKind, SHELF_CARDS,
+        about_text, popular_count, related_cards, release_cards, release_kinds,
+    },
+    home::ARTIST_ORIGIN,
+    home_view::CARD_TEXT_HEIGHT,
+    search::SONG_ROWS,
+    state::SearchTab,
+};
 use crate::{
     app::{OpenMusic, Page},
     icons,
     ui::{
         Palette,
-        cards::{CardOptions, card},
+        cards::CardOptions,
         components::{artwork, bone, skeleton_header, skeleton_rows},
         dock::DockItem,
         menu::{Group, MenuItem, Row, Target},
@@ -52,33 +60,179 @@ impl OpenMusic {
                                 .h(px(20.))
                                 .rounded(px(5.)),
                         )
-                        .child(skeleton_rows("artist-rows", 6, false, palette)),
+                        .child(skeleton_rows("artist-rows", POPULAR_ROWS, false, palette)),
                 );
         };
         let artist = match result {
             Ok(artist) => artist,
             Err(error) => return page.child(self.page_status(error.clone(), palette)),
         };
+        let view = &self.discovery.artist_view;
+        let view = (view.uri == *loaded).then_some(view);
+        let more_tracks = view.is_some_and(|view| view.more_tracks);
+        let filter = view.and_then(|view| view.filter);
+        let all_releases = view.is_some_and(|view| view.all_releases);
+        let all_related = view.is_some_and(|view| view.all_related);
+        let about_open = view.is_some_and(|view| view.about_open);
+        let options = CardOptions::from(ARTIST_ORIGIN);
+        let popular = popular_count(artist.top_tracks.len(), more_tracks);
+        let kinds = release_kinds(artist);
+        let releases = release_cards(artist, filter);
+        let related = related_cards(artist);
+        page.child(self.artist_header(loaded, artist, palette, cx))
+            .when(!artist.top_tracks.is_empty(), |page| {
+                page.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(artist_heading("Popular"))
+                        .child(self.track_list(
+                            &artist.top_tracks[..popular],
+                            "artist-track",
+                            0,
+                            &self.artist_row_options(loaded),
+                            palette,
+                            cx,
+                        ))
+                        .when(artist.top_tracks.len() > POPULAR_ROWS, |list| {
+                            list.child(toggle_link(
+                                "artist-more-tracks",
+                                if more_tracks { "Show less" } else { "See more" },
+                                palette,
+                                cx,
+                                |view| view.more_tracks = !view.more_tracks,
+                            ))
+                        }),
+                )
+            })
+            .when(!artist.releases.is_empty(), |page| {
+                let expandable = releases.len() > SHELF_CARDS;
+                let grid =
+                    self.card_grid_with(&releases, "release", card_side, &options, palette, cx);
+                page.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .child(artist_heading("Discography"))
+                                .when(expandable, |row| {
+                                    row.child(toggle_link(
+                                        "artist-more-releases",
+                                        if all_releases {
+                                            "Show less"
+                                        } else {
+                                            "Show all"
+                                        },
+                                        palette,
+                                        cx,
+                                        |view| view.all_releases = !view.all_releases,
+                                    ))
+                                }),
+                        )
+                        .when(kinds.len() > 1, |section| {
+                            section.child(self.release_chips(&kinds, filter, palette, cx))
+                        })
+                        .child(if all_releases {
+                            grid
+                        } else {
+                            grid.max_h(card_side + px(CARD_TEXT_HEIGHT))
+                                .overflow_hidden()
+                        }),
+                )
+            })
+            .when_some(artist.biography.clone(), |page, biography| {
+                let (text, long) = about_text(&biography, about_open);
+                page.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(artist_heading("About"))
+                        .child(
+                            div()
+                                .max_w(px(760.))
+                                .text_size(px(14.))
+                                .line_height(px(22.))
+                                .text_color(rgb(palette.muted))
+                                .child(text),
+                        )
+                        .when(long, |about| {
+                            about.child(toggle_link(
+                                "artist-more-about",
+                                if about_open { "Show less" } else { "Show more" },
+                                palette,
+                                cx,
+                                |view| view.about_open = !view.about_open,
+                            ))
+                        }),
+                )
+            })
+            .when(!related.is_empty(), |page| {
+                let grid =
+                    self.card_grid_with(&related, "related", card_side, &options, palette, cx);
+                page.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .child(artist_heading("Fans also like"))
+                                .when(related.len() > SHELF_CARDS, |row| {
+                                    row.child(toggle_link(
+                                        "artist-more-related",
+                                        if all_related { "Show less" } else { "Show all" },
+                                        palette,
+                                        cx,
+                                        |view| view.all_related = !view.all_related,
+                                    ))
+                                }),
+                        )
+                        .child(if all_related {
+                            grid
+                        } else {
+                            grid.max_h(card_side + px(CARD_TEXT_HEIGHT))
+                                .overflow_hidden()
+                        }),
+                )
+            })
+    }
+
+    fn artist_header(
+        &self,
+        uri: &str,
+        artist: &Artist,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let image = artist.image.as_ref().and_then(|url| self.covers.get(url));
-        let has_menu = self.has_menu(&Target::Artist {
-            uri: loaded.clone(),
-        });
-        let header_uri = loaded.clone();
-        let header = div()
+        let target = Target::Artist {
+            uri: uri.to_owned(),
+        };
+        let has_menu = self.has_menu(&target);
+        let play = if self.artist_is_playing(uri) {
+            "Pause"
+        } else {
+            "Play"
+        };
+        div()
             .flex()
             .items_center()
             .gap_6()
             .on_mouse_down(
                 MouseButton::Right,
-                self.on_menu(
-                    None,
-                    move |_| {
-                        Some(Target::Artist {
-                            uri: header_uri.clone(),
-                        })
-                    },
-                    cx,
-                ),
+                self.on_menu(None, move |_| Some(target.clone()), cx),
             )
             .child(
                 div()
@@ -115,163 +269,90 @@ impl OpenMusic {
                     .child(
                         div()
                             .mt_3()
+                            .flex()
+                            .gap_2()
                             .child(
-                                self.text_control("play-artist", "Play", true, palette, cx)
+                                self.text_control(PLAY_KEY, play, true, palette, cx)
                                     .w(px(96.)),
                             )
+                            .children(self.artist_follow(uri, palette, cx))
                             .when(has_menu, |actions| {
-                                actions.flex().gap_2().child(self.menu_button(
-                                    "more-artist",
-                                    &artist.name,
-                                    palette,
-                                    cx,
-                                ))
+                                actions.child(self.menu_button(MORE_KEY, &artist.name, palette, cx))
                             }),
                     ),
-            );
-        let releases = release_cards(artist);
-        let related = related_cards(artist);
-        let options = CardOptions::from(ARTIST_ORIGIN);
-        page.child(header)
-            .when(!artist.top_tracks.is_empty(), |page| {
-                page.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(19.))
-                                .font_weight(FontWeight::BOLD)
-                                .child("Popular"),
-                        )
-                        .child(self.rows(
-                            &artist.top_tracks,
-                            "artist-track",
-                            0,
-                            Some(loaded),
-                            palette,
-                            cx,
-                        )),
-                )
-            })
-            .when(!releases.is_empty(), |page| {
-                page.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_size(px(19.))
-                                .font_weight(FontWeight::BOLD)
-                                .child("Releases"),
-                        )
-                        .child(self.card_grid_with(
-                            &releases, "release", card_side, &options, palette, cx,
-                        )),
-                )
-            })
-            .when_some(artist.biography.clone(), |page, biography| {
-                let short: String = biography.chars().take(900).collect();
-                let short = if short.len() < biography.len() {
-                    format!("{short}…")
-                } else {
-                    short
-                };
-                page.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(19.))
-                                .font_weight(FontWeight::BOLD)
-                                .child("About"),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(760.))
-                                .text_size(px(14.))
-                                .line_height(px(22.))
-                                .text_color(rgb(palette.muted))
-                                .child(short),
-                        ),
-                )
-            })
-            .when(!related.is_empty(), |page| {
-                page.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_size(px(19.))
-                                .font_weight(FontWeight::BOLD)
-                                .child("Fans Also Like"),
-                        )
-                        .child(
-                            self.card_grid_with(
-                                &related, "related", card_side, &options, palette, cx,
-                            ),
-                        ),
-                )
-            })
+            )
+    }
+
+    fn artist_follow(
+        &self,
+        uri: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let followed = self.is_saved(uri)?;
+        let text = if followed { "Following" } else { "Follow" };
+        Some(
+            self.text_control(FOLLOW_KEY, text, false, palette, cx)
+                .w(px(104.))
+                .into_any_element(),
+        )
+    }
+
+    fn release_chips(
+        &self,
+        kinds: &[ReleaseKind],
+        filter: Option<ReleaseKind>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let chips: Vec<(SharedString, bool)> = kinds
+            .iter()
+            .map(|kind| (kind.label().into(), filter == Some(*kind)))
+            .collect();
+        let kinds = kinds.to_vec();
+        self.chip_strip(
+            "artist-release",
+            &chips,
+            move |app, index, _, _| {
+                if let Some(kind) = kinds.get(index) {
+                    app.discovery.artist_view.pick(*kind);
+                }
+            },
+            palette,
+            cx,
+        )
     }
 }
 
-pub fn release_cards(artist: &Artist) -> Vec<Card> {
-    artist
-        .releases
-        .iter()
-        .map(|release| {
-            let subtitle = [
-                release.year.map(|year| year.to_string()),
-                Some(release.kind.clone()),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" • ");
-            card(
-                &release.uri,
-                Kind::Album,
-                &release.name,
-                subtitle,
-                release.cover.clone(),
-            )
-        })
-        .collect()
+fn artist_heading(title: &'static str) -> Div {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(px(19.))
+        .font_weight(FontWeight::BOLD)
+        .child(title)
 }
 
-pub fn related_cards(artist: &Artist) -> Vec<Card> {
-    artist
-        .related
-        .iter()
-        .map(|related| {
-            card(
-                &related.uri,
-                Kind::Artist,
-                &related.name,
-                "Artist",
-                related.image.clone(),
-            )
-        })
-        .collect()
-}
-
-impl OpenMusic {
-    pub fn artist_cards(&self) -> Vec<Card> {
-        match &self.discovery.artist {
-            Some((_, Ok(artist))) => release_cards(artist)
-                .into_iter()
-                .chain(related_cards(artist))
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
+fn toggle_link(
+    id: &'static str,
+    text: &'static str,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
+    flip: impl Fn(&mut ArtistView) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .text_size(px(13.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(palette.muted))
+        .cursor_pointer()
+        .hover(move |link| link.text_color(rgb(palette.text)).underline())
+        .child(text)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            flip(&mut this.discovery.artist_view);
+            cx.notify();
+        }))
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
@@ -330,50 +411,4 @@ pub fn row_accessories(
 
 pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOptions) -> bool {
     SONG_ROWS.contains(&row.0) && app.discovery.is_unplayable(&track.uri)
-}
-
-#[cfg(test)]
-mod tests {
-    use spotify_client::catalog::{ArtistRef, Release};
-
-    use super::*;
-
-    #[test]
-    fn turns_artist_releases_and_peers_into_cards() {
-        let artist = Artist {
-            uri: "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".into(),
-            name: "Radiohead".into(),
-            image: None,
-            biography: None,
-            top_tracks: Vec::new(),
-            releases: vec![
-                Release {
-                    uri: "spotify:album:6dVIqQ8qmQ5GBnJ9shOYGE".into(),
-                    name: "OK Computer".into(),
-                    year: Some(1997),
-                    cover: Some("https://i.scdn.co/image/ok".into()),
-                    kind: "Album".into(),
-                },
-                Release {
-                    uri: "spotify:album:x".into(),
-                    name: "Single".into(),
-                    year: None,
-                    cover: None,
-                    kind: "Single".into(),
-                },
-            ],
-            related: vec![ArtistRef {
-                uri: "spotify:artist:y".into(),
-                name: "Peer".into(),
-                image: None,
-            }],
-        };
-        let releases = release_cards(&artist);
-        assert_eq!(releases[0].subtitle, "1997 • Album");
-        assert_eq!(releases[0].kind, Kind::Album);
-        assert_eq!(releases[1].subtitle, "Single");
-        let related = related_cards(&artist);
-        assert_eq!(related[0].kind, Kind::Artist);
-        assert_eq!(related[0].subtitle, "Artist");
-    }
 }

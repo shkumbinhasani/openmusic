@@ -1,3 +1,4 @@
+pub mod artist;
 pub mod browse;
 pub mod browse_view;
 pub mod home;

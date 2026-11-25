@@ -205,22 +205,6 @@ fn artist_links(track: &Track) -> Vec<(String, Option<Page>)> {
 }
 
 impl OpenMusic {
-    pub fn rows(
-        &self,
-        tracks: &[Track],
-        prefix: &'static str,
-        start: usize,
-        context: Option<&str>,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let options = RowOptions {
-            context: context.map(str::to_owned),
-            ..RowOptions::default()
-        };
-        self.track_list(tracks, prefix, start, &options, palette, cx)
-    }
-
     pub fn row_accessories(
         &self,
         track: &Track,
