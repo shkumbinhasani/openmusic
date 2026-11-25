@@ -333,6 +333,7 @@ impl OpenMusic {
             Page::Liked => self.liked_page(card_side, palette, cx),
             Page::Recent => self.recent_page(card_side, palette, cx),
             Page::Folder(uri) => self.folder_page(&uri, card_side, palette, cx),
+            Page::Library(shelf) => self.library_page(shelf, card_side, palette, cx),
             Page::Lyrics => self.lyrics_page(palette, cx).into_any_element(),
             Page::Show(uri) => self.show_page(&uri, card_side, palette, cx),
             Page::Episode(uri) => self.episode_page(&uri, card_side, palette, cx),

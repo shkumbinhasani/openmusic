@@ -29,6 +29,11 @@ pub enum Command {
         offset: u32,
         request: u64,
     },
+    Grid {
+        query: LibraryQuery,
+        offset: u32,
+        request: u64,
+    },
 }
 
 pub enum Event {
@@ -56,6 +61,12 @@ pub enum Event {
         offset: u32,
         result: Result<LikedPage, String>,
     },
+    Grid {
+        request: u64,
+        query: LibraryQuery,
+        offset: u32,
+        result: Result<LibraryPage, String>,
+    },
 }
 
 impl Event {
@@ -65,6 +76,9 @@ impl Event {
                 result: Ok(page), ..
             }
             | Self::Folder {
+                result: Ok(page), ..
+            }
+            | Self::Grid {
                 result: Ok(page), ..
             } => page
                 .items
@@ -133,6 +147,13 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             }
             .into()
         }),
+        Command::Grid {
+            query,
+            offset,
+            request,
+        } => ctx
+            .tasks
+            .spawn_keyed("library-grid", grid(api, user, query, offset, request)),
     }
 }
 
@@ -204,6 +225,30 @@ async fn library(
         cache::save(&query, page);
     }
     Event::Library {
+        request,
+        query,
+        offset,
+        result: result.map_err(|error| error.to_string()),
+    }
+    .into()
+}
+
+async fn grid(
+    api: Api,
+    user: User,
+    query: LibraryQuery,
+    offset: u32,
+    request: u64,
+) -> worker::Event {
+    let (query, offset, result) = match fetch(&api, &user, &query, offset).await {
+        Err(error) if invalid(&error) => {
+            let reset = LibraryQuery::default();
+            let result = fetch(&api, &user, &reset, 0).await;
+            (reset, 0, result)
+        }
+        result => (query, offset, result),
+    };
+    Event::Grid {
         request,
         query,
         offset,

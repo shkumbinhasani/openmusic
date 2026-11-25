@@ -125,7 +125,7 @@ impl OpenMusic {
             }))
     }
 
-    fn grid_skeleton(&self, count: usize, card_side: Pixels, palette: Palette) -> Div {
+    pub(super) fn grid_skeleton(&self, count: usize, card_side: Pixels, palette: Palette) -> Div {
         div()
             .flex()
             .flex_wrap()

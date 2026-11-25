@@ -9,7 +9,8 @@ use crate::{
             self,
             state::{SearchTab, SectionSource},
         },
-        library, playback, playlists,
+        library::{self, state::Shelf},
+        playback, playlists,
     },
 };
 
@@ -31,6 +32,7 @@ pub enum Page {
     Liked,
     Recent,
     Folder(String),
+    Library(Shelf),
     Lyrics,
     Show(String),
     Episode(String),
@@ -64,6 +66,8 @@ impl Page {
             Self::Liked => "liked".into(),
             Self::Recent => "recent".into(),
             Self::Folder(uri) => format!("folder {uri}"),
+            Self::Library(Shelf::All) => "library".into(),
+            Self::Library(shelf) => format!("library {}", shelf.name()),
             Self::Lyrics => "lyrics".into(),
             Self::Show(uri) => format!("show {uri}"),
             Self::Episode(uri) => format!("episode {uri}"),
@@ -111,6 +115,11 @@ impl Page {
             "liked" if none => Some(Self::Liked),
             "recent" if none => Some(Self::Recent),
             "folder" => uri().map(Self::Folder),
+            "library" => match (first, second) {
+                (None, _) => Some(Self::Library(Shelf::All)),
+                (Some(name), None) => Shelf::from_name(name).map(Self::Library),
+                _ => None,
+            },
             "lyrics" if none => Some(Self::Lyrics),
             "show" => uri().map(Self::Show),
             "episode" => uri().map(Self::Episode),
@@ -202,7 +211,9 @@ impl OpenMusic {
             Page::Collection(_) | Page::BlendInvitation(_) => playlists::state::load(self, page),
             Page::Track(_) => details::state::load(self, page),
             Page::Queue | Page::Jam | Page::JamInvite(_) => playback::state::load(self, page),
-            Page::Liked | Page::Recent | Page::Folder(_) => library::state::load(self, page),
+            Page::Liked | Page::Recent | Page::Folder(_) | Page::Library(_) => {
+                library::state::load(self, page)
+            }
             Page::Lyrics
             | Page::Show(_)
             | Page::Episode(_)
@@ -250,6 +261,7 @@ mod tests {
             Page::LocalFiles,
         ];
         pages.extend(SearchTab::TABS.into_iter().map(Page::Search));
+        pages.extend(Shelf::SHELVES.into_iter().map(Page::Library));
         pages.extend(
             SectionSource::SOURCES
                 .into_iter()

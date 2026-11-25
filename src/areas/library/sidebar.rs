@@ -2,7 +2,7 @@ use gpui::{
     Context, Div, FontWeight, MouseButton, Pixels, SharedString, Stateful, Window, div, prelude::*,
     px, rgb, rgba,
 };
-use gpui_component::{Sizable, input::Input};
+use gpui_component::{Sizable, input::Input, tooltip::Tooltip};
 use spotify_client::{
     entity,
     library::{ItemKind, LibraryItem},
@@ -29,7 +29,7 @@ const INDENT: f32 = 14.;
 const LIKED_TOP: u32 = 0x450af5;
 const LIKED_BOTTOM: u32 = 0x8e8ee5;
 
-fn empty_text(filter: Option<&str>) -> (&'static str, &'static str) {
+pub(super) fn empty_text(filter: Option<&str>) -> (&'static str, &'static str) {
     match filter {
         Some("Playlists") => ("Create your first playlist", "It's easy, we'll help you"),
         Some("Podcasts & Shows") => (
@@ -205,13 +205,25 @@ impl OpenMusic {
                 None => row
                     .pl_2p5()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Your Library"),
+                        div().flex_1().min_w_0().flex().child(
+                            div()
+                                .id("library-title")
+                                .min_w_0()
+                                .truncate()
+                                .cursor_pointer()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::BOLD)
+                                .hover(|title| title.opacity(0.75))
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Open Your Library").build(window, cx)
+                                })
+                                .child("Your Library")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.open_library_page();
+                                    cx.notify();
+                                })),
+                        ),
                     )
                     .child(self.library_tool(
                         "library-filter",
@@ -229,7 +241,7 @@ impl OpenMusic {
             )
     }
 
-    fn library_chip(
+    pub(super) fn library_chip(
         &self,
         id: (&'static str, usize),
         label: SharedString,
@@ -365,7 +377,7 @@ impl OpenMusic {
         )
     }
 
-    fn library_message(
+    pub(super) fn library_message(
         &self,
         title: String,
         body: &'static str,

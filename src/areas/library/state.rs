@@ -17,10 +17,12 @@ use spotify_client::{
     library::{ItemKind, LibraryItem, LibraryPage, LibraryQuery, PinResult, Recent, Rootlist},
 };
 
+pub use super::shelf::Shelf;
 use super::{
     cache,
     liked::{Column, FIND_KEY, Liked, LikedSort, PLAY_KEY},
     saves::{self, FOLLOW_KEY, LIKE_CURRENT_KEY, SAVE_KEY, header_uri},
+    shelf::Grid,
     view::LIBRARY_ROW,
     worker::{Command, Event},
 };
@@ -35,7 +37,20 @@ use crate::{
     },
 };
 
-actions!(library, [FilterLibrary]);
+actions!(
+    library,
+    [
+        FilterLibrary,
+        ShowLibrary,
+        ShowPlaylists,
+        ShowPodcasts,
+        ShowArtists,
+        ShowAlbums,
+        ShowAudiobooks,
+        ShowAuthors,
+        ShowEvents
+    ]
+);
 
 pub const LIBRARY_CONTEXT: &str = "YourLibrary";
 const FILTER_DELAY: Duration = Duration::from_millis(250);
@@ -71,6 +86,7 @@ pub struct State {
     pub toggle_when_known: Option<(String, Instant)>,
     pub resync: bool,
     pub liked: Liked,
+    pub grid: Grid,
 }
 
 #[derive(Default)]
@@ -97,7 +113,7 @@ fn same_item(item: &LibraryItem, uri: &str) -> bool {
     item.uri == uri || (item.kind == ItemKind::LikedSongs && entity::is_liked_songs(uri))
 }
 
-fn merge(items: &mut Vec<LibraryItem>, page: &mut LibraryPage, offset: u32) -> u32 {
+pub(super) fn merge(items: &mut Vec<LibraryItem>, page: &mut LibraryPage, offset: u32) -> u32 {
     let fresh = std::mem::take(&mut page.items);
     let count = fresh.len() as u32;
     if offset == 0 || page.fallback {
@@ -119,6 +135,36 @@ fn merge(items: &mut Vec<LibraryItem>, page: &mut LibraryPage, offset: u32) -> u
     offset + count
 }
 
+fn forget(
+    items: &mut Vec<LibraryItem>,
+    next_offset: &mut u32,
+    page: Option<&mut LibraryPage>,
+    uris: &[&String],
+) {
+    let before = items.len();
+    items.retain(|item| !uris.contains(&&item.uri));
+    let removed = (before - items.len()) as u32;
+    if removed > 0 {
+        *next_offset = next_offset.saturating_sub(removed);
+        if let Some(page) = page {
+            page.total = page.total.saturating_sub(removed);
+        }
+    }
+}
+
+pub(super) fn apply_pins(library: &mut State) {
+    let pins: Vec<(String, bool)> = library
+        .pins
+        .iter()
+        .map(|(uri, &(_, wanted))| (uri.clone(), wanted))
+        .collect();
+    for (uri, wanted) in pins {
+        for item in library.items_mut(&uri) {
+            item.pinned = wanted;
+        }
+    }
+}
+
 impl State {
     pub fn covers(&self, urls: &mut HashSet<String>) {
         self.liked.covers(urls);
@@ -127,6 +173,7 @@ impl State {
             self.items
                 .iter()
                 .chain(folder)
+                .chain(&self.grid.items)
                 .filter_map(|item| item.image.clone()),
         );
     }
@@ -146,6 +193,7 @@ impl State {
         self.items
             .iter()
             .chain(folder)
+            .chain(&self.grid.items)
             .find(|item| same_item(item, uri))
     }
 
@@ -154,19 +202,24 @@ impl State {
         self.items
             .iter_mut()
             .chain(folder)
+            .chain(&mut self.grid.items)
             .filter(move |item| same_item(item, uri))
     }
 
     pub(super) fn forget_items(&mut self, uris: &[&String]) {
-        let before = self.items.len();
-        self.items.retain(|item| !uris.contains(&&item.uri));
-        let removed = (before - self.items.len()) as u32;
-        if removed > 0 {
-            self.next_offset = self.next_offset.saturating_sub(removed);
-            if let Some(page) = &mut self.page {
-                page.total = page.total.saturating_sub(removed);
-            }
-        }
+        forget(
+            &mut self.items,
+            &mut self.next_offset,
+            self.page.as_mut(),
+            uris,
+        );
+        let grid = &mut self.grid;
+        forget(
+            &mut grid.items,
+            &mut grid.next_offset,
+            grid.page.as_mut(),
+            uris,
+        );
     }
 
     fn set_playlists(&mut self, playlists: Vec<Playlist>) {
@@ -254,6 +307,9 @@ impl OpenMusic {
 
     pub fn reload_library_views(&mut self) {
         self.reload_library();
+        if self.library.grid.page.is_some() {
+            self.load_grid();
+        }
         if let Some(uri) = self
             .library
             .folder
@@ -457,6 +513,9 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
     if *page == Page::Liked && app.library.liked.wants_reload() && !app.library.liked.loading {
         app.load_liked();
     }
+    if let Page::Library(shelf) = page {
+        app.show_shelf(*shelf);
+    }
     if let Page::Folder(uri) = page {
         let loaded = app
             .library
@@ -529,17 +588,7 @@ pub fn on_event(
                     app.library.query = query;
                     app.library.page = Some(page);
                     app.library.error = None;
-                    let pins: Vec<(String, bool)> = app
-                        .library
-                        .pins
-                        .iter()
-                        .map(|(uri, &(_, wanted))| (uri.clone(), wanted))
-                        .collect();
-                    for (uri, wanted) in pins {
-                        for item in app.library.items_mut(&uri) {
-                            item.pinned = wanted;
-                        }
-                    }
+                    apply_pins(&mut app.library);
                 }
                 Err(message) => app.library.error = Some(message),
             }
@@ -578,6 +627,12 @@ pub fn on_event(
             offset,
             result,
         } => app.on_liked(request, offset, result),
+        Event::Grid {
+            request,
+            query,
+            offset,
+            result,
+        } => app.on_grid(request, query, offset, result),
     }
 }
 
@@ -685,6 +740,47 @@ fn dump(app: &OpenMusic, directory: &Path) {
         }
     }
     let _ = std::fs::write(directory.join("library.txt"), lines.join("\n"));
+}
+
+fn dump_shelf(app: &OpenMusic, directory: &Path) {
+    let grid = &app.library.grid;
+    let mut lines = vec![format!(
+        "page={} filters={:?} sort={:?} total={} loaded={} next={} loading={} error={:?}",
+        app.page.describe(),
+        grid.query.filters.join("/"),
+        grid.page
+            .as_ref()
+            .and_then(|page| page.sort.as_ref())
+            .map(|sort| sort.id.clone()),
+        grid.page.as_ref().map_or(0, |page| page.total),
+        grid.items.len(),
+        grid.next_offset,
+        grid.loading,
+        grid.error
+    )];
+    if let Some(page) = &grid.page {
+        let names = |chips: &[spotify_client::library::Chip]| {
+            chips
+                .iter()
+                .map(|chip| chip.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        lines.push(format!("filters {}", names(&page.filters)));
+        lines.push(format!("selected {}", names(&page.selected)));
+        lines.push(format!("sorts {}", names(&page.sorts)));
+    }
+    lines.extend(grid.items.iter().map(|item| {
+        format!(
+            "{} {:?} pinned={} | {} | {}",
+            item.uri,
+            item.kind,
+            item.pinned,
+            item.title(),
+            item.subtitle(true)
+        )
+    }));
+    let _ = std::fs::write(directory.join("shelf.txt"), lines.join("\n"));
 }
 
 fn dump_liked(app: &OpenMusic, directory: &Path) {
@@ -826,6 +922,32 @@ pub fn debug(
             }
         }
         "likecurrent" => app.like_current(),
+        "shelf" => {
+            let (action, argument) = rest.split_once(' ').unwrap_or((rest, ""));
+            let argument = argument.trim();
+            match action {
+                "" | "dump" => {}
+                "more" => app.more_grid(),
+                "reload" => app.load_grid(),
+                "sort" => app.set_grid_sort((!argument.is_empty()).then(|| argument.to_owned())),
+                "filter" => {
+                    let mut query = app.library.grid.query.clone();
+                    query.filters = argument
+                        .split('/')
+                        .map(str::trim)
+                        .filter(|part| !part.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                    app.set_grid_query(query);
+                }
+                "expand" => app.open_library_page(),
+                name => match Shelf::from_name(name) {
+                    Some(shelf) => app.open_shelf(shelf),
+                    None => return false,
+                },
+            }
+            dump_shelf(app, directory);
+        }
         "liked" => {
             let mut words = rest.split_whitespace();
             match (words.next(), words.next(), words.next()) {
@@ -853,7 +975,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let library = &app.library;
     format!(
-        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={}",
+        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={} shelf={}/{}",
         library.items.len(),
         library.page.as_ref().map_or(0, |page| page.total),
         library.query.filters.join("/"),
@@ -876,16 +998,39 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         library.resync,
         library.liked.tracks.len(),
         library.liked.total,
-        library.liked.sort.column.slug()
+        library.liked.sort.column.slug(),
+        library.grid.items.len(),
+        library.grid.page.as_ref().map_or(0, |page| page.total)
     )
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
-    cx.bind_keys([KeyBinding::new(
-        "cmd-f",
-        FilterLibrary,
-        Some(LIBRARY_CONTEXT),
-    )]);
+    let quiet = Some("!Input");
+    cx.bind_keys([
+        KeyBinding::new("cmd-f", FilterLibrary, Some(LIBRARY_CONTEXT)),
+        KeyBinding::new("alt-shift-0", ShowLibrary, quiet),
+        KeyBinding::new("alt-shift-1", ShowPlaylists, quiet),
+        KeyBinding::new("alt-shift-2", ShowPodcasts, quiet),
+        KeyBinding::new("alt-shift-3", ShowArtists, quiet),
+        KeyBinding::new("alt-shift-4", ShowAlbums, quiet),
+        KeyBinding::new("alt-shift-5", ShowAudiobooks, quiet),
+        KeyBinding::new("alt-shift-6", ShowAuthors, quiet),
+        KeyBinding::new("alt-shift-7", ShowEvents, quiet),
+    ]);
+    fn shelf<A: gpui::Action>(cx: &mut App, handle: &Handle, shelf: Shelf) {
+        menus::route(cx, handle, move |_: &A, app, _, cx| {
+            app.open_shelf(shelf);
+            cx.notify();
+        });
+    }
+    shelf::<ShowLibrary>(cx, handle, Shelf::All);
+    shelf::<ShowPlaylists>(cx, handle, Shelf::Playlists);
+    shelf::<ShowPodcasts>(cx, handle, Shelf::Podcasts);
+    shelf::<ShowArtists>(cx, handle, Shelf::Artists);
+    shelf::<ShowAlbums>(cx, handle, Shelf::Albums);
+    shelf::<ShowAudiobooks>(cx, handle, Shelf::Audiobooks);
+    shelf::<ShowAuthors>(cx, handle, Shelf::Authors);
+    shelf::<ShowEvents>(cx, handle, Shelf::Events);
     menus::route(cx, handle, |_: &FilterLibrary, app, window, cx| {
         app.open_library_filter(window, cx);
         cx.notify();
@@ -971,6 +1116,9 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     }
     if app.library.sentinel.take() {
         app.more_library();
+    }
+    if app.library.grid.sentinel.take() {
+        app.more_grid();
     }
     if app
         .library
