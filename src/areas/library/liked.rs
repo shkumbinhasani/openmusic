@@ -160,6 +160,7 @@ pub struct Liked {
     pub sort: LikedSort,
     pub stale: bool,
     pub fetched: Option<Instant>,
+    pub asked: Option<Instant>,
     pub fallback: Option<LikedList>,
 }
 
@@ -238,6 +239,7 @@ impl OpenMusic {
         liked.request += 1;
         liked.loading = true;
         liked.stale = false;
+        liked.asked = Some(Instant::now());
         let request = liked.request;
         self.send(Command::Liked {
             offset: 0,
@@ -253,6 +255,7 @@ impl OpenMusic {
         }
         liked.request += 1;
         liked.loading = true;
+        liked.asked = Some(Instant::now());
         let command = Command::Liked {
             offset: liked.next_offset,
             request: liked.request,
@@ -284,10 +287,9 @@ impl OpenMusic {
         self.library.liked.loading = false;
         match result {
             Ok(page) => {
+                let asked = self.library.liked.asked;
                 for track in &page.tracks {
-                    if !self.saved.pending.contains_key(&track.uri) {
-                        self.saved.known.insert(track.uri.clone(), true);
-                    }
+                    self.saved.learn(track.uri.clone(), true, asked);
                 }
                 if offset == 0 {
                     self.library.liked.fallback = fallback;

@@ -13,8 +13,14 @@ pub enum Command {
 }
 
 pub enum Event {
-    Known(Vec<(String, Option<bool>)>),
-    Written { uris: Vec<String>, saved: bool },
+    Known {
+        found: Vec<(String, Option<bool>)>,
+        asked: Option<std::time::Instant>,
+    },
+    Written {
+        uris: Vec<String>,
+        saved: bool,
+    },
 }
 
 #[derive(Default)]
@@ -64,6 +70,7 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
 pub fn flush(ctx: &mut Ctx) {
     ctx.saved.due = None;
     let uris = std::mem::take(&mut ctx.saved.uris);
+    let asked = Some(std::time::Instant::now());
     for chunk in uris.chunks(library::BATCH) {
         let api = ctx.api.clone();
         let chunk = chunk.to_vec();
@@ -71,7 +78,11 @@ pub fn flush(ctx: &mut Ctx) {
             let found = library::contains(&api, &chunk)
                 .await
                 .unwrap_or_else(|_| vec![None; chunk.len()]);
-            Event::Known(chunk.into_iter().zip(found).collect()).into()
+            Event::Known {
+                found: chunk.into_iter().zip(found).collect(),
+                asked,
+            }
+            .into()
         });
     }
 }
@@ -80,10 +91,10 @@ pub fn on_push(message: &Message, ctx: &mut Ctx) {
     if let Some(changes) = library::collection_push(message)
         && !changes.is_empty()
     {
-        let known = changes
+        let found = changes
             .into_iter()
             .map(|(uri, saved)| (uri, Some(saved)))
             .collect();
-        ctx.publish(Event::Known(known));
+        ctx.publish(Event::Known { found, asked: None });
     }
 }
