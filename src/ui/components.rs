@@ -321,7 +321,7 @@ impl OpenMusic {
             .child(overlay::anchor(key))
     }
 
-    fn glass_control(
+    pub fn glass_control(
         &self,
         key: &'static str,
         spec: ButtonSpec,

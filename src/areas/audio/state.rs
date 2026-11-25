@@ -1,22 +1,32 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::{
     catalog::LocalTrack,
-    engine::playback::AudioSettings,
-    playback_settings::{LoudnessLevel, MAX_CROSSFADE_MS, Remote, Setting},
+    engine::playback::{AudioSettings, AudioStatus},
+    playback_settings::{
+        LoudnessLevel, MAX_CROSSFADE_MS, Remote, Setting, round_speed, valid_speed,
+    },
 };
 
 use super::worker::{Command, Event};
 use crate::{
     app::OpenMusic,
     menus::Handle,
-    ui::tracks::{RowDrag, RowDrop},
+    ui::{
+        menu::{MenuItem, Place},
+        tracks::{RowDrag, RowDrop},
+    },
 };
+
+pub const SPEED_KEY: &str = "audio-speed";
+pub const SPEEDS: [f32; 10] = [0.5, 0.8, 1., 1.2, 1.5, 1.8, 2., 2.5, 3., 3.5];
+const PENDING: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -81,6 +91,8 @@ pub struct State {
     pub synced: Option<Result<(), String>>,
     pub speeds: HashMap<String, f32>,
     pub report_to: Option<PathBuf>,
+    pub status: AudioStatus,
+    pending_speed: Option<(f32, Instant)>,
 }
 
 impl State {
@@ -99,6 +111,69 @@ impl OpenMusic {
 
     pub fn play_local(&mut self, tracks: Vec<LocalTrack>, index: usize) {
         self.send(Command::PlayLocal { tracks, index });
+    }
+
+    pub fn speed_show(&self) -> Option<String> {
+        let now = &self.playback.now;
+        if !now.local || !now.episode {
+            return None;
+        }
+        now.track
+            .as_ref()
+            .and_then(|track| track.album_uri.clone())
+            .filter(|uri| uri.starts_with("spotify:show:"))
+    }
+
+    pub fn current_speed(&self) -> f32 {
+        match self.audio.pending_speed {
+            Some((speed, at)) if at.elapsed() < PENDING => speed,
+            _ => self.playback.now.speed,
+        }
+    }
+
+    pub fn can_set_speed(&self) -> bool {
+        self.audio.status.speed_allowed && self.playback.now.episode
+    }
+
+    pub fn set_speed(&mut self, speed: f32) {
+        let Some(speed) = valid_speed(round_speed(speed)) else {
+            self.show_toast("Choose a speed between 0.5× and 3.5×.", None);
+            return;
+        };
+        let show = self.speed_show();
+        if let Some(show) = &show {
+            self.audio.speeds.insert(show.clone(), speed);
+        }
+        self.audio.pending_speed = Some((speed, Instant::now()));
+        self.send(Command::Speed { speed, show });
+    }
+
+    pub fn speed_items(&self) -> Vec<MenuItem> {
+        let current = self.current_speed();
+        let enabled = self.can_set_speed();
+        let mut items = vec![MenuItem::header("Playback speed")];
+        items.extend(SPEEDS.into_iter().map(|speed| {
+            MenuItem::action(speed_text(speed), move |app, _, cx| {
+                app.set_speed(speed);
+                cx.notify();
+            })
+            .checked((current - speed).abs() < 0.01)
+            .enabled(enabled)
+        }));
+        if !SPEEDS.iter().any(|speed| (current - speed).abs() < 0.01) {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::note(format!("Now {}", speed_text(current))));
+        }
+        if self.speed_show().is_some() {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::note("Saved for this show"));
+        }
+        items
+    }
+
+    pub fn open_speed_menu(&mut self) -> bool {
+        let items = self.speed_items();
+        self.show_menu(items, Place::Under(SPEED_KEY), None)
     }
 
     pub fn set_gapless(&mut self, on: bool) {
@@ -148,6 +223,12 @@ impl OpenMusic {
                 }
             ),
         ];
+        lines.push(format!(
+            "status speed_allowed={} speed={} episode={}",
+            self.audio.status.speed_allowed,
+            self.current_speed(),
+            self.playback.now.episode
+        ));
         let mut speeds: Vec<_> = self.audio.speeds.iter().collect();
         speeds.sort_by(|a, b| a.0.cmp(b.0));
         lines.extend(
@@ -189,6 +270,7 @@ pub fn on_event(
             }
             app.show_toast(message, None);
         }
+        Event::Status(status) => app.audio.status = status,
         Event::Report(report) => {
             if let Some(directory) = app.audio.report_to.take() {
                 let mut text = report.to_string();
@@ -260,6 +342,11 @@ pub fn debug(
                 _ => {}
             }
         }
+        "speed" => {
+            if let Ok(speed) = rest.trim().trim_end_matches(['x', '×']).parse::<f32>() {
+                app.set_speed(speed);
+            }
+        }
         "playlocal" => {
             let tracks: Vec<LocalTrack> = rest
                 .split('|')
@@ -295,12 +382,18 @@ pub fn state_fragment(app: &OpenMusic) -> String {
 pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
 
 pub fn on_press(
-    _app: &mut OpenMusic,
-    _key: &'static str,
+    app: &mut OpenMusic,
+    key: &'static str,
     _window: &mut Window,
     _cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    match key {
+        SPEED_KEY => {
+            app.open_speed_menu();
+            true
+        }
+        _ => false,
+    }
 }
 
 pub fn row_dropped(
@@ -313,7 +406,20 @@ pub fn row_dropped(
     false
 }
 
-pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if let Some((_, at)) = app.audio.pending_speed
+        && at.elapsed() >= PENDING
+    {
+        app.audio.pending_speed = None;
+        cx.notify();
+    }
+}
+
+pub fn speed_text(speed: f32) -> String {
+    let text = format!("{:.2}", round_speed(speed));
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{text}×")
+}
 
 #[cfg(test)]
 mod tests {
@@ -321,6 +427,20 @@ mod tests {
 
     use super::*;
     use crate::app::settings::Settings;
+
+    #[test]
+    fn writes_speeds_the_way_the_menu_shows_them() {
+        assert_eq!(speed_text(1.), "1×");
+        assert_eq!(speed_text(1.5), "1.5×");
+        assert_eq!(speed_text(0.8), "0.8×");
+        assert_eq!(speed_text(1.25), "1.25×");
+        assert_eq!(speed_text(1.23), "1.25×");
+        assert_eq!(speed_text(3.5), "3.5×");
+        assert_eq!(
+            SPEEDS.map(speed_text).join(" "),
+            "0.5× 0.8× 1× 1.2× 1.5× 1.8× 2× 2.5× 3× 3.5×"
+        );
+    }
 
     #[test]
     fn names_debug_files_after_their_path() {

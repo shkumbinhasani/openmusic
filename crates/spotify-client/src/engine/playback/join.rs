@@ -2,7 +2,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{AudioSettings, Playing, ReportPrepared, gain::linear, source::Pick};
+use super::{
+    AudioSettings, Playing, ReportPrepared,
+    gain::linear,
+    source::Pick,
+    speed::{show_of, starting_speed, state_speed},
+};
 use crate::{
     engine::Engine,
     loudness,
@@ -118,6 +123,7 @@ pub(super) struct Prepared {
     duration_ms: u32,
     pub(super) ready: bool,
     pub(super) gain_db: Option<f32>,
+    speed: f32,
 }
 
 impl Prepared {
@@ -272,10 +278,17 @@ impl Engine {
             return;
         };
         let gain_db = self.gain_at(&playing.machine, target.index);
+        let show = show_of(&playing.machine, target.index);
+        let speed = starting_speed(
+            &target.uri,
+            state_speed(&playing.machine, target.index),
+            self.known_show_speed(show.as_deref()),
+        );
         self.player.prepare(
             generation,
             Media {
                 gain: linear(gain_db),
+                speed,
                 ..media
             },
             join,
@@ -289,6 +302,7 @@ impl Engine {
             duration_ms,
             ready: false,
             gain_db,
+            speed,
         });
     }
 
@@ -376,6 +390,8 @@ impl Engine {
         next.source = prepared.pick.name();
         next.duration_ms = prepared.duration_ms;
         next.gain_db = prepared.gain_db;
+        next.speed = prepared.speed;
+        next.state_speed = state_speed(&next.machine, next.index);
         self.playing = Some(next);
         self.audio.joins.tried = None;
         self.audio
@@ -485,6 +501,7 @@ mod tests {
             duration_ms: 180_000,
             ready: false,
             gain_db: None,
+            speed: 1.,
         }
     }
 

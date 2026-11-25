@@ -3,7 +3,7 @@ use spotify_client::{
     dealer::Message,
     engine::{
         Control,
-        playback::{self, AudioReport, Update},
+        playback::{self, AudioReport, AudioStatus, Update},
     },
     playback_settings::{self, Change, DeviceDescriptor, Remote, Setting},
 };
@@ -21,6 +21,10 @@ pub enum Command {
         tracks: Vec<LocalTrack>,
         index: usize,
     },
+    Speed {
+        speed: f32,
+        show: Option<String>,
+    },
 }
 
 pub enum Event {
@@ -36,6 +40,7 @@ pub enum Event {
         remote: Option<Remote>,
     },
     Report(Box<AudioReport>),
+    Status(AudioStatus),
 }
 
 impl Event {
@@ -91,6 +96,46 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                     index,
                 }))
         }
+        Command::Speed { speed, show } => {
+            ctx.handle
+                .send(Control::Audio(playback::Control::Speed(speed)));
+            if let Some(show) = show {
+                save_show_speed(ctx, show, speed);
+            }
+        }
+    }
+}
+
+fn save_show_speed(ctx: &mut Ctx, show: String, speed: f32) {
+    let api = ctx.api.clone();
+    let device = descriptor(ctx);
+    ctx.writes
+        .push(Mutation::new(vec![format!("speed:{show}")], async move {
+            let settings = vec![Setting::Speed(speed)];
+            let event =
+                match playback_settings::write_all(&api, &device, Some(&show), &settings).await {
+                    Ok(()) => Event::Content {
+                        content_id: show,
+                        settings,
+                    },
+                    Err(_) => Event::WriteFailed {
+                        message: "Couldn’t save this speed for the show. Try again.".into(),
+                        remote: None,
+                    },
+                };
+            Ok(event.into())
+        }));
+}
+
+fn share_speeds(ctx: &Ctx, show: &str, settings: &[Setting]) {
+    for setting in settings {
+        if let Setting::Speed(speed) = setting {
+            ctx.handle
+                .send(Control::Audio(playback::Control::ShowSpeed {
+                    show: show.to_owned(),
+                    speed: *speed,
+                }));
+        }
     }
 }
 
@@ -115,10 +160,13 @@ pub fn on_push(message: &Message, ctx: &mut Ctx) {
             content_id,
             settings,
             complete: true,
-        } => ctx.publish(Event::Content {
-            content_id,
-            settings,
-        }),
+        } => {
+            share_speeds(ctx, &content_id, &settings);
+            ctx.publish(Event::Content {
+                content_id,
+                settings,
+            });
+        }
         _ => sync(ctx),
     }
 }
@@ -127,6 +175,7 @@ pub fn on_update(update: Update, ctx: &mut Ctx) {
     match update {
         Update::Report(report) => ctx.publish(Event::Report(report)),
         Update::Notice(message) => ctx.publish(crate::worker::Event::Notice(message)),
+        Update::Status(status) => ctx.publish(Event::Status(status)),
     }
 }
 

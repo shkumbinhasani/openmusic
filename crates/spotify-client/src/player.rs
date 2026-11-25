@@ -73,6 +73,7 @@ pub struct Media {
     pub start_ms: u32,
     pub play: bool,
     pub gain: f32,
+    pub speed: f32,
 }
 
 impl Media {
@@ -82,7 +83,16 @@ impl Media {
             start_ms: 0,
             play: true,
             gain: 1.,
+            speed: 1.,
         }
+    }
+}
+
+pub fn valid_rate(rate: f32) -> f32 {
+    if rate.is_finite() && rate > 0. {
+        rate.clamp(0.25, 4.)
+    } else {
+        1.
     }
 }
 
@@ -177,6 +187,7 @@ struct Item {
     keyed: bool,
     file_id: Option<String>,
     gain: f32,
+    rate: f32,
     ready: bool,
     failed: bool,
     pending_seek: Option<u32>,
@@ -727,6 +738,7 @@ impl MainState {
             keyed,
             file_id,
             gain: media.gain.max(0.),
+            rate: valid_rate(media.speed),
             ready: false,
             failed: false,
             pending_seek: (media.start_ms > 0).then_some(media.start_ms),
@@ -796,12 +808,35 @@ impl MainState {
     }
 
     fn apply_volumes(&self) {
+        self.apply_rates();
         for deck in &self.decks {
             let gain = deck.items.first().map_or(1., |item| item.gain);
             unsafe {
                 deck.player
                     .setVolume(deck_volume(self.master, gain, deck.fade))
             };
+        }
+    }
+
+    fn apply_rates(&self) {
+        for deck in &self.decks {
+            let rate = deck.items.first().map_or(1., |item| item.rate);
+            unsafe {
+                if deck.player.defaultRate() != rate {
+                    deck.player.setDefaultRate(rate);
+                }
+                let current = deck.player.rate();
+                if current > 0. && current != rate {
+                    deck.player.setRate(rate);
+                }
+            }
+        }
+    }
+
+    fn set_rate(&mut self, generation: u64, rate: f32) {
+        if let Some((deck, index)) = self.find(generation) {
+            self.decks[deck].items[index].rate = valid_rate(rate);
+            self.apply_rates();
         }
     }
 
@@ -1267,6 +1302,10 @@ impl Player {
         on_main(move |_, state| state.crossfade(generation, duration));
     }
 
+    pub fn set_speed(&self, generation: u64, speed: f32) {
+        on_main(move |_, state| state.set_rate(generation, speed));
+    }
+
     pub fn set_gain(&self, generation: u64, gain: f32) {
         on_main(move |_, state| {
             if let Some((deck, index)) = state.find(generation) {
@@ -1355,6 +1394,16 @@ mod tests {
         ramp.elapsed = Duration::ZERO;
         ramp.resumed = Some(Instant::now());
         assert!(ramp.progress() < 0.01);
+    }
+
+    #[test]
+    fn keeps_rates_in_a_safe_range() {
+        assert_eq!(valid_rate(1.5), 1.5);
+        assert_eq!(valid_rate(0.), 1.);
+        assert_eq!(valid_rate(-2.), 1.);
+        assert_eq!(valid_rate(f32::NAN), 1.);
+        assert_eq!(valid_rate(9.), 4.);
+        assert_eq!(Media::new(Source::Url(String::new())).speed, 1.);
     }
 
     #[test]

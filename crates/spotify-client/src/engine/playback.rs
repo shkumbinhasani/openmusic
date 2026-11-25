@@ -21,11 +21,13 @@ use gain::{Gains, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
 pub use source::MANIFEST_FORMATS;
+use speed::{Shows, read_show_speed, show_of, starting_speed, state_speed};
 
 mod gain;
 mod join;
 mod local;
 mod source;
+mod speed;
 
 #[derive(Clone, Debug)]
 pub enum Control {
@@ -35,12 +37,23 @@ pub enum Control {
     },
     Settings(AudioSettings),
     Report,
+    Speed(f32),
+    ShowSpeed {
+        show: String,
+        speed: f32,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub enum Update {
     Report(Box<AudioReport>),
     Notice(String),
+    Status(AudioStatus),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioStatus {
+    pub speed_allowed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +88,7 @@ pub struct ReportItem {
     pub bitrate: u64,
     pub gain_db: Option<f32>,
     pub source: String,
+    pub speed: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,7 +129,7 @@ impl fmt::Display for AudioReport {
         match &self.playing {
             Some(item) => writeln!(
                 f,
-                "playing generation={} uri={} source={} position={} duration={} paused={} format={} bitrate={} gain={}",
+                "playing generation={} uri={} source={} position={} duration={} paused={} format={} bitrate={} gain={} speed={}",
                 item.generation,
                 item.uri,
                 item.source,
@@ -124,7 +138,8 @@ impl fmt::Display for AudioReport {
                 item.paused,
                 item.format,
                 item.bitrate,
-                gain_text(item.gain_db)
+                gain_text(item.gain_db),
+                item.speed
             )?,
             None => writeln!(f, "playing none")?,
         }
@@ -185,12 +200,8 @@ pub(super) struct State {
     gains: Gains,
     local: Option<LocalQueue>,
     unloaded: bool,
-}
-
-impl State {
-    pub(super) fn take_updates(&mut self) -> Vec<Update> {
-        std::mem::take(&mut self.updates)
-    }
+    shows: Shows,
+    status: Option<AudioStatus>,
 }
 
 pub(super) struct Playing {
@@ -208,6 +219,8 @@ pub(super) struct Playing {
     last_progress: Instant,
     gain_db: Option<f32>,
     source: &'static str,
+    pub(super) speed: f32,
+    state_speed: Option<f32>,
 }
 
 impl Playing {
@@ -227,6 +240,8 @@ impl Playing {
             last_progress: Instant::now(),
             gain_db: None,
             source: "",
+            speed: 1.,
+            state_speed: None,
         }
     }
 
@@ -346,8 +361,21 @@ impl Engine {
                 let report = self.audio_report();
                 self.audio.updates.push(Update::Report(Box::new(report)));
             }
+            Control::Speed(speed) => self.change_speed(speed).await?,
+            Control::ShowSpeed { show, speed } => self.learn_show_speed(show, speed),
         }
         Ok(())
+    }
+
+    pub(super) fn audio_updates(&mut self) -> Vec<Update> {
+        let status = AudioStatus {
+            speed_allowed: self.speed_allowed(),
+        };
+        if self.audio.status.as_ref() != Some(&status) {
+            self.audio.status = Some(status.clone());
+            self.audio.updates.push(Update::Status(status));
+        }
+        std::mem::take(&mut self.audio.updates)
     }
 
     fn audio_report(&self) -> AudioReport {
@@ -367,6 +395,7 @@ impl Engine {
                 bitrate: playing.bitrate,
                 gain_db: playing.gain_db,
                 source: playing.source.to_owned(),
+                speed: playing.speed,
             }),
             prepared: self
                 .audio
@@ -383,7 +412,7 @@ impl Engine {
     pub(super) fn state_payload(&self, state_ref: Option<Value>, source: &str) -> Value {
         let sub_state = self.playing.as_ref().map(|playing| {
             json!({
-                "playback_speed": if playing.paused { 0 } else { 1 },
+                "playback_speed": if playing.paused { 0. } else { playing.speed },
                 "position": playing.position_ms,
                 "duration": playing.duration_ms,
                 "media_type": "AUDIO",
@@ -457,6 +486,9 @@ impl Engine {
                     playing.index = index;
                 }
                 self.check_prepared();
+                if self.follow_state_speed() {
+                    Box::pin(self.report("speed_changed")).await;
+                }
             } else if let Err(error) =
                 Box::pin(self.start_state(machine, index, paused, None)).await
             {
@@ -567,7 +599,10 @@ impl Engine {
                 self.player.seek(seek);
                 changed = true;
             }
-            let source = if !changed {
+            let sped = self.follow_state_speed();
+            let source = if !changed && sped {
+                "speed_changed"
+            } else if !changed {
                 "modify_current_state"
             } else if seek.is_some() {
                 "position_changed"
@@ -655,6 +690,13 @@ impl Engine {
             .cloned()
             .context("Spotify sent no track to play.")?;
         let uri = playing.uri().to_owned();
+        let show = show_of(&playing.machine, playing.index);
+        playing.state_speed = state_speed(&playing.machine, playing.index);
+        playing.speed = starting_speed(
+            &uri,
+            playing.state_speed,
+            self.known_show_speed(show.as_deref()),
+        );
         let pick = self.resolve(&track).await?;
         playing.format = pick.format();
         playing.bitrate = pick.bitrate();
@@ -671,8 +713,14 @@ impl Engine {
         }
 
         let api = self.api.clone();
-        let (found, opened) = tokio::join!(loudness::fetch(&api, &missing), self.open(&pick, &uri));
+        let unknown_show = self.unknown_show(show.as_ref());
+        let (found, opened, show_speed) = tokio::join!(
+            loudness::fetch(&api, &missing),
+            self.open(&pick, &uri),
+            read_show_speed(&api, unknown_show)
+        );
         self.store_loudness(found);
+        self.store_show_speed(show_speed);
         let (media, bitrate) = opened?;
         let Some(playing) = self
             .playing
@@ -682,8 +730,15 @@ impl Engine {
             return Ok(());
         };
         let gain_db = self.gain_at(&playing.machine, playing.index);
+        let speed = starting_speed(
+            &uri,
+            playing.state_speed,
+            self.known_show_speed(show.as_deref()),
+        );
+        let reported_speed = playing.speed;
         if let Some(playing) = self.playing.as_mut() {
             playing.gain_db = gain_db;
+            playing.speed = speed;
             if bitrate > 0 {
                 playing.bitrate = bitrate;
             }
@@ -692,10 +747,14 @@ impl Engine {
             start_ms: seek.unwrap_or(initial),
             play: !paused,
             gain: linear(gain_db),
+            speed,
             ..media
         };
         self.player.set_volume(f32::from(self.volume) / GAIA_VOLUME);
         self.player.load(generation, media);
+        if speed != reported_speed {
+            self.report("speed_changed").await;
+        }
         Ok(())
     }
 

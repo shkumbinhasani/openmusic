@@ -108,7 +108,7 @@ impl Default for NowPlaying {
 impl NowPlaying {
     pub fn position(&self) -> u32 {
         let elapsed = if self.playing {
-            self.observed.elapsed().as_millis() as u32
+            (self.observed.elapsed().as_millis() as f64 * f64::from(self.speed.max(0.))) as u32
         } else {
             0
         };
@@ -446,7 +446,8 @@ impl Engine {
                 "manifest_formats": playback::MANIFEST_FORMATS,
                 "supports_preferred_media_type": true,
                 "supports_playback_offsets": true,
-                "supports_playback_speed": false
+                "supports_playback_speed": true,
+                "supports_external_url_playback_speed": true
             },
             "device_id": self.device_id,
             "device_type": "computer",
@@ -573,7 +574,7 @@ impl Engine {
                 provider,
                 shuffle,
                 repeat,
-                speed: 1.,
+                speed: playing.speed,
                 episode: track.as_ref().is_some_and(is_episode),
                 sleep: here.map_or(SleepState::Off, |playback| playback.sleep_timer),
                 track,
@@ -608,7 +609,7 @@ impl Engine {
     }
 
     fn publish(&mut self, updates: &mpsc::UnboundedSender<Update>) {
-        for update in self.audio.take_updates() {
+        for update in self.audio_updates() {
             let _ = updates.send(Update::Audio(update));
         }
         if let Some(playback) = &self.playback {
