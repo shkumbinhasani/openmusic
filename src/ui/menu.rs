@@ -93,11 +93,7 @@ impl Target {
         let uri = uri.to_owned();
         Some(match kind {
             "track" => {
-                let track = app
-                    .track()
-                    .filter(|track| track.uri == uri)
-                    .cloned()
-                    .unwrap_or_else(|| Track::placeholder(&uri));
+                let track = known_track(app, &uri).unwrap_or_else(|| Track::placeholder(&uri));
                 Self::track(track, context.map(str::to_owned), Surface::Row)
             }
             "album" => Self::Album { uri },
@@ -713,6 +709,78 @@ impl OpenMusic {
     }
 }
 
+fn known_track(app: &OpenMusic, uri: &str) -> Option<Track> {
+    let collection = app
+        .playlists
+        .collection
+        .as_ref()
+        .and_then(|(_, result)| result.as_ref().ok())
+        .map(|collection| collection.tracks.as_slice())
+        .unwrap_or_default();
+    let search = match &app.discovery.search {
+        Some(Ok(results)) => results.tracks.items.as_slice(),
+        _ => &[],
+    };
+    app.track()
+        .into_iter()
+        .chain(collection)
+        .chain(search)
+        .chain(app.discovery.artist_tracks())
+        .find(|track| track.uri == uri)
+        .cloned()
+}
+
+fn entry_at<'a>(entries: &'a [Entry], path: &str) -> Option<&'a Entry> {
+    let mut level = entries;
+    let mut found = None;
+    for part in path.split('.') {
+        let entry = level.get(part.parse::<usize>().ok()?)?;
+        level = match entry {
+            Entry::Submenu { entries, .. } => entries,
+            _ => &[],
+        };
+        found = Some(entry);
+    }
+    found
+}
+
+fn run_path(
+    app: &mut OpenMusic,
+    target: &Target,
+    path: &str,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> String {
+    let mut runs = Vec::new();
+    let entries = lower(app.menu_items(target), &mut runs, &mut HashMap::new());
+    let (path, wants_alternate) = path
+        .strip_suffix('a')
+        .map_or((path, false), |path| (path, true));
+    let Some(Entry::Item {
+        title,
+        id,
+        enabled,
+        alternate,
+        ..
+    }) = entry_at(&entries, path)
+    else {
+        return format!("no item at {path}");
+    };
+    if !enabled {
+        return format!("disabled {title}");
+    }
+    let (title, id) = match (wants_alternate, alternate) {
+        (false, _) => (title.clone(), *id),
+        (true, Some((title, id))) => (title.clone(), *id),
+        (true, None) => return format!("no alternate for {title}"),
+    };
+    let Some(run) = runs.get(id as usize).cloned() else {
+        return format!("no action for {title}");
+    };
+    run(app, window, cx);
+    format!("ran {title}")
+}
+
 const SAMPLE_PLAYLISTS: &str = "sample-playlists";
 
 fn record(
@@ -800,6 +868,20 @@ pub fn debug(
     match (verb, words.as_slice()) {
         ("menu", ["sample", "on"]) => app.menus.sample = Some(directory.to_owned()),
         ("menu", ["sample", "off"]) => app.menus.sample = None,
+        ("menu", ["run", path, "bar"]) => {
+            let line = match app.now_playing_target(Surface::NowPlaying) {
+                Some(target) => run_path(app, &target, path, window, cx),
+                None => "nothing playing".to_owned(),
+            };
+            write("menu-run.txt", line);
+        }
+        ("menu", ["run", path, kind, uri, context @ ..]) if context.len() <= 1 => {
+            let line = match Target::parse(kind, uri, context.first().copied(), app) {
+                Some(target) => run_path(app, &target, path, window, cx),
+                None => format!("unknown kind {kind}"),
+            };
+            write("menu-run.txt", line);
+        }
         ("menu", [kind, uri, context @ ..]) if context.len() <= 1 => {
             let Some(target) = Target::parse(kind, uri, context.first().copied(), app) else {
                 return true;
