@@ -117,7 +117,7 @@ impl OpenMusic {
         if self.discovery.search_query.is_empty() {
             return self.search_landing(card_side, palette, cx);
         }
-        let body = match tab.kind() {
+        let body = match self.discovery.tab_kind(tab) {
             None => self.search_all(card_side, palette, cx),
             Some(kind) => self.search_tab_page(kind, card_side, palette, cx),
         };

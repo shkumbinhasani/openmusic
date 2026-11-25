@@ -106,7 +106,10 @@ pub enum Event {
         result: Result<Vec<Hit>, String>,
         notice: Option<String>,
     },
-    DirectTrack(Result<Track, String>),
+    DirectTrack {
+        link: String,
+        result: Result<Track, String>,
+    },
     Artist {
         uri: String,
         result: Result<Artist, String>,
@@ -130,7 +133,9 @@ impl Event {
             Self::RecentSearches {
                 result: Ok(hits), ..
             } => return hits.iter().filter_map(|hit| hit.image().cloned()).collect(),
-            Self::DirectTrack(Ok(track)) => vec![track],
+            Self::DirectTrack {
+                result: Ok(track), ..
+            } => vec![track],
             Self::Discovered(discovery) => return discovery.images(),
             Self::Home {
                 result: Ok(home), ..
@@ -261,13 +266,14 @@ async fn search(api: Api, query: String) -> crate::worker::Event {
             query,
             result: Err(error.to_string()),
         },
-        Ok(Some(uri)) if uri.starts_with("spotify:track:") => Event::DirectTrack(
-            catalog::tracks(&api, &[uri])
+        Ok(Some(uri)) if uri.starts_with("spotify:track:") => Event::DirectTrack {
+            result: catalog::tracks(&api, &[uri])
                 .await
                 .ok()
                 .and_then(|mut tracks| tracks.pop())
                 .ok_or_else(|| "Could not load this song from Spotify.".to_owned()),
-        ),
+            link: query,
+        },
         Ok(Some(_)) => Event::Search {
             query,
             result: Err("OpenMusic can’t open this kind of Spotify link.".to_owned()),

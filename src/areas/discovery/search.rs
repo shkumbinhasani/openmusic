@@ -158,6 +158,18 @@ fn is_link(text: &str) -> bool {
     !matches!(catalog::parse_link(text), Ok(None))
 }
 
+fn is_song_link(text: &str) -> bool {
+    catalog::parse_link(text)
+        .is_ok_and(|uri| uri.is_some_and(|uri| uri.starts_with("spotify:track:")))
+}
+
+fn result_tab(page: &Page, query: &str) -> SearchTab {
+    match page {
+        Page::Search(tab) if !is_song_link(query) => *tab,
+        _ => SearchTab::All,
+    }
+}
+
 pub fn link_page(text: &str) -> Option<Page> {
     let uri = catalog::parse_link(text).ok()??;
     if uri.starts_with("spotify:track:") {
@@ -234,6 +246,40 @@ impl super::state::State {
         match &self.search {
             Some(Ok(results)) => Some(results),
             _ => None,
+        }
+    }
+
+    pub fn tab_kind(&self, tab: SearchTab) -> Option<SearchKind> {
+        tab.kind().filter(|_| !is_song_link(&self.search_query))
+    }
+
+    pub fn receive_direct_track(
+        &mut self,
+        link: String,
+        result: Result<Track, String>,
+    ) -> Option<Track> {
+        if link != self.search_query {
+            return None;
+        }
+        self.search_pending = false;
+        match result {
+            Ok(track) => {
+                let results = SearchResults {
+                    query: link,
+                    tracks: spotify_client::search::Paged {
+                        items: vec![track.clone()],
+                        total: 1,
+                        next: None,
+                    },
+                    ..SearchResults::default()
+                };
+                self.search = Some(Ok(Box::new(results)));
+                Some(track)
+            }
+            Err(error) => {
+                self.search = Some(Err(error));
+                None
+            }
         }
     }
 
@@ -364,11 +410,9 @@ impl OpenMusic {
             cx.notify();
             return;
         }
-        let tab = match self.page {
-            Page::Search(tab) => tab,
-            _ => SearchTab::All,
-        };
-        let same = query == self.discovery.search_query
+        let tab = result_tab(&self.page, &query);
+        let same = !is_song_link(&query)
+            && query == self.discovery.search_query
             && (self.discovery.search_pending || matches!(self.discovery.search, Some(Ok(_))));
         if !same {
             self.discovery.search_query = query.clone();
@@ -391,7 +435,7 @@ impl OpenMusic {
             self.load_browse_all(false);
             return;
         }
-        if let Some(kind) = tab.kind() {
+        if let Some(kind) = self.discovery.tab_kind(tab) {
             let waiting = self
                 .discovery
                 .search_tabs
@@ -772,25 +816,11 @@ impl OpenMusic {
                     self.discovery.search = Some(result);
                 }
             }
-            Event::DirectTrack(result) => {
-                self.discovery.search_pending = false;
-                match result {
-                    Ok(track) => {
-                        let results = SearchResults {
-                            query: self.discovery.search_query.clone(),
-                            tracks: spotify_client::search::Paged {
-                                items: vec![track.clone()],
-                                total: 1,
-                                next: None,
-                            },
-                            ..SearchResults::default()
-                        };
-                        self.discovery.search = Some(Ok(Box::new(results)));
-                        if !self.refuses_track(Some(&track), None, cx) {
-                            self.play(&[track], 0, cx);
-                        }
-                    }
-                    Err(error) => self.discovery.search = Some(Err(error)),
+            Event::DirectTrack { link, result } => {
+                if let Some(track) = self.discovery.receive_direct_track(link, result)
+                    && !self.refuses_track(Some(&track), None, cx)
+                {
+                    self.play(&[track], 0, cx);
                 }
             }
             Event::SearchTab {
@@ -1190,6 +1220,44 @@ mod tests {
         for (text, page) in cases {
             assert_eq!(link_page(text), page, "{text}");
         }
+    }
+
+    #[test]
+    fn a_pasted_song_link_shows_all_results_and_no_type_tab() {
+        let link = "https://open.spotify.com/track/70LcF31zb1H0PyJoS1Sx1r";
+        let songs = Page::Search(SearchTab::Tracks);
+        assert_eq!(result_tab(&songs, link), SearchTab::All);
+        assert_eq!(result_tab(&songs, "radiohead"), SearchTab::Tracks);
+        assert_eq!(result_tab(&Page::Home, "radiohead"), SearchTab::All);
+        let mut state = super::super::state::State {
+            search_query: link.into(),
+            ..Default::default()
+        };
+        assert_eq!(state.tab_kind(SearchTab::Tracks), None);
+        state.search_query = "radiohead".into();
+        assert_eq!(state.tab_kind(SearchTab::Tracks), Some(SearchKind::Tracks));
+    }
+
+    #[test]
+    fn a_song_link_reply_counts_only_while_its_link_is_the_query() {
+        let link = "spotify:track:70LcF31zb1H0PyJoS1Sx1r";
+        let song = Track::placeholder(link);
+        let mut state = super::super::state::State {
+            search_query: link.into(),
+            search_pending: true,
+            ..Default::default()
+        };
+        let played = state.receive_direct_track(link.into(), Ok(song.clone()));
+        assert_eq!(played.map(|track| track.uri), Some(link.to_owned()));
+        assert!(!state.search_pending);
+        assert_eq!(state.search_tracks(), std::slice::from_ref(&song));
+        let mut cleared = super::super::state::State::default();
+        assert!(
+            cleared
+                .receive_direct_track(link.into(), Ok(song))
+                .is_none()
+        );
+        assert!(cleared.search.is_none());
     }
 
     #[test]
