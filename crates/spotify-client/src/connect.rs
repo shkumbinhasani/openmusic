@@ -807,14 +807,15 @@ pub async fn transfer(
     restore: Restore,
     alias: Option<u32>,
 ) -> Result<()> {
-    api.request(
-        Method::POST,
-        &format!("/connect-state/v1/connect/transfer/from/{from}/to/{to}"),
-        Body::Json(transfer_body(restore, &command_id(), alias)),
-        "application/json",
-    )
-    .await?;
-    Ok(())
+    let (status, bytes) = api
+        .send(
+            Method::POST,
+            &format!("/connect-state/v1/connect/transfer/from/{from}/to/{to}"),
+            Body::Json(transfer_body(restore, &command_id(), alias)),
+            "application/json",
+        )
+        .await?;
+    command_reply(status, &bytes).map(|_| ())
 }
 
 pub fn play_command(uris: &[String], index: usize, position_ms: u32) -> Value {
