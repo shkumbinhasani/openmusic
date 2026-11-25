@@ -27,6 +27,7 @@ use crate::{
 const REFRESH_AFTER_PLAYBACK_MS: u64 = 3000;
 const REFRESH_AFTER_MARK_MS: u64 = 1500;
 const PROGRESS_REDRAW: Duration = Duration::from_secs(2);
+const LOOKUP_PATIENCE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -48,6 +49,7 @@ pub struct State {
     pub marking: HashMap<String, Option<bool>>,
     pub unavailable: HashSet<String>,
     pub progress_drawn: Option<Instant>,
+    pub wanted: HashMap<String, (bool, Instant)>,
 }
 
 impl State {
@@ -125,6 +127,21 @@ impl State {
 
 fn is_episode(uri: &str) -> bool {
     uri.starts_with("spotify:episode:")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveStep {
+    Keep,
+    Write,
+    LookUp,
+}
+
+fn save_step(current: Option<bool>, saved: bool) -> SaveStep {
+    match current {
+        Some(current) if current == saved => SaveStep::Keep,
+        Some(_) => SaveStep::Write,
+        None => SaveStep::LookUp,
+    }
 }
 
 impl OpenMusic {
@@ -361,6 +378,78 @@ impl OpenMusic {
         self.content.show_error = None;
         self.load_more_episodes();
     }
+
+    pub fn saved_or_known(&self, uri: &str) -> Option<bool> {
+        self.is_saved(uri).or_else(|| {
+            self.content
+                .loaded_show()
+                .filter(|show| show.uri == uri)
+                .map(|show| show.saved)
+        })
+    }
+
+    pub fn saving(&self, uri: &str) -> bool {
+        self.saved.pending.contains_key(uri) || self.content.wanted.contains_key(uri)
+    }
+
+    pub fn save_when_known(&mut self, uri: &str, saved: bool) {
+        match save_step(self.saved_or_known(uri), saved) {
+            SaveStep::Keep => {}
+            SaveStep::Write => self.set_saved(vec![uri.to_owned()], saved),
+            SaveStep::LookUp => {
+                self.content
+                    .wanted
+                    .insert(uri.to_owned(), (saved, Instant::now()));
+                self.lookup_saved([uri.to_owned()]);
+            }
+        }
+    }
+
+    pub fn toggle_saved_uri(&mut self, uri: &str) {
+        let saved = self.saved_or_known(uri).unwrap_or(false);
+        self.save_when_known(uri, !saved);
+    }
+
+    fn settle_wanted(&mut self) -> bool {
+        if self.content.wanted.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        for (uri, (saved, since)) in std::mem::take(&mut self.content.wanted) {
+            match self.is_saved(&uri) {
+                Some(current) => {
+                    if current != saved {
+                        self.set_saved(vec![uri], saved);
+                    }
+                    changed = true;
+                }
+                None if since.elapsed() >= LOOKUP_PATIENCE => {
+                    self.show_toast(
+                        if saved {
+                            "Couldn’t add this to your library. Try again."
+                        } else {
+                            "Couldn’t remove this from your library. Try again."
+                        },
+                        None,
+                    );
+                    changed = true;
+                }
+                None => {
+                    self.content.wanted.insert(uri, (saved, since));
+                }
+            }
+        }
+        changed
+    }
+
+    fn lookup_episodes(&mut self, episodes: &[Episode]) {
+        let uris: Vec<String> = episodes
+            .iter()
+            .filter(|episode| !episode.chapter && !episode.restricted())
+            .map(|episode| episode.uri.clone())
+            .collect();
+        self.lookup_saved(uris);
+    }
 }
 
 pub fn web_link(uri: &str) -> Option<String> {
@@ -464,6 +553,7 @@ pub fn on_event(
             }
             if let Ok(show) = &result {
                 app.content.note(&show.episodes);
+                app.lookup_episodes(&show.episodes);
             }
             app.content.show = Some((uri, result.map(|show| *show)));
             app.content.show_loading = false;
@@ -486,6 +576,7 @@ pub fn on_event(
                     let episodes = page.episodes.clone();
                     if show.append(offset, page) {
                         app.content.note(&episodes);
+                        app.lookup_episodes(&episodes);
                     }
                 }
                 Err(message) => app.content.show_error = Some(message),
@@ -583,14 +674,26 @@ fn describe_show(app: &OpenMusic, show: &Show, lines: &mut String) {
     for (index, episode) in show.episodes.iter().enumerate() {
         let _ = writeln!(
             lines,
-            "  {index} {} {:?} {} {}ms video={} {:?}",
+            "  {index} {} {:?} {} {}ms video={} saved={} {:?}",
             episode.uri,
             episode.availability,
             describe_played(app.played(episode)),
             episode.duration_ms,
             episode.video,
+            describe_saved(app, &episode.uri),
             episode.name,
         );
+    }
+}
+
+fn describe_saved(app: &OpenMusic, uri: &str) -> String {
+    let state = app
+        .is_saved(uri)
+        .map_or("unknown".to_owned(), |saved| saved.to_string());
+    if app.saving(uri) {
+        format!("{state}+pending")
+    } else {
+        state
     }
 }
 
@@ -620,6 +723,9 @@ pub fn debug(
         ("markplayed", [uri, setting @ ("on" | "off")]) => {
             app.mark_played(vec![(*uri).to_owned()], *setting == "on");
         }
+        ("episodesave" | "showfollow", [uri, setting @ ("on" | "off")]) => {
+            app.save_when_known(uri, *setting == "on");
+        }
         ("content", []) => {
             let mut lines = String::new();
             match &app.content.show {
@@ -631,9 +737,7 @@ pub fn debug(
             }
             match &app.content.episode {
                 Some((uri, Ok(episode))) => {
-                    let saved = app
-                        .is_saved(uri)
-                        .map_or("unknown".to_owned(), |saved| saved.to_string());
+                    let saved = describe_saved(app, uri);
                     let _ = writeln!(
                         lines,
                         "episode {uri} {:?} {} {}ms chapter={} video={} saved={saved} show={:?} transcripts={} {:?}",
@@ -659,6 +763,9 @@ pub fn debug(
                     ""
                 };
                 let _ = writeln!(lines, "mark {uri} {mark}{pending}");
+            }
+            for (uri, (saved, _)) in &app.content.wanted {
+                let _ = writeln!(lines, "wanted {uri} saved={saved}");
             }
             let _ = std::fs::write(directory.join("content.txt"), lines);
         }
@@ -711,9 +818,7 @@ pub fn on_press(
         "show-play" => app.play_show(cx),
         "show-follow" => {
             if let Some(uri) = show_uri() {
-                let fallback = app.content.loaded_show().is_some_and(|show| show.saved);
-                let saved = app.is_saved(&uri).unwrap_or(fallback);
-                app.set_saved(vec![uri], !saved);
+                app.toggle_saved_uri(&uri);
             }
         }
         "show-open" | "episode-open" => {
@@ -740,8 +845,7 @@ pub fn on_press(
         }
         "episode-save" => {
             if let Some(uri) = episode_uri() {
-                let saved = app.is_saved(&uri).unwrap_or(false);
-                app.set_saved(vec![uri], !saved);
+                app.toggle_saved_uri(&uri);
             }
         }
         "episode-played" => {
@@ -777,6 +881,9 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if app.settle_wanted() {
+        cx.notify();
+    }
     if matches!(app.page, Page::Show(_)) && app.content.show_end.take() {
         app.load_more_episodes();
         cx.notify();
@@ -881,6 +988,16 @@ mod tests {
         state.marks.insert("spotify:episode:a".into(), false);
         state.patch(&fresh);
         assert_eq!(state.marks.get("spotify:episode:a"), Some(&false));
+    }
+
+    #[test]
+    fn saves_only_what_is_known_to_differ() {
+        assert_eq!(save_step(Some(true), true), SaveStep::Keep);
+        assert_eq!(save_step(Some(false), false), SaveStep::Keep);
+        assert_eq!(save_step(Some(false), true), SaveStep::Write);
+        assert_eq!(save_step(Some(true), false), SaveStep::Write);
+        assert_eq!(save_step(None, true), SaveStep::LookUp);
+        assert_eq!(save_step(None, false), SaveStep::LookUp);
     }
 
     #[test]

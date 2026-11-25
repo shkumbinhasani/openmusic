@@ -373,7 +373,7 @@ impl OpenMusic {
             uri: show.uri.clone(),
         };
         let has_menu = self.has_menu(&target);
-        let saved = self.is_saved(&show.uri).unwrap_or(show.saved);
+        let saved = self.saved_or_known(&show.uri).unwrap_or(false);
         let book = show.book.as_ref();
         let byline = match book {
             Some(book) if !book.authors.is_empty() => book
@@ -802,6 +802,52 @@ impl OpenMusic {
             }))
     }
 
+    fn episode_save_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        uri: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let saved = self.is_saved(uri) == Some(true);
+        let busy = self.saving(uri);
+        let uri = uri.to_owned();
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .size(px(32.))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .map(|button| {
+                if saved {
+                    button
+                        .bg(rgb(palette.accent))
+                        .child(icon(icons::CHECK, 14., 0xffffff))
+                } else {
+                    button
+                        .border_1()
+                        .border_color(rgba(palette.line))
+                        .child(icon(icons::PLUS, 14., palette.muted))
+                }
+            })
+            .when(busy, |button| button.opacity(0.6))
+            .hover(move |button| {
+                if saved {
+                    button.opacity(0.85)
+                } else {
+                    button.bg(rgba(palette.press))
+                }
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_saved_uri(&uri);
+                cx.notify();
+            }))
+    }
+
     fn episode_row(
         &self,
         index: usize,
@@ -907,6 +953,14 @@ impl OpenMusic {
                                 palette,
                                 cx,
                             ))
+                            .when(!episode.restricted(), |line| {
+                                line.child(self.episode_save_button(
+                                    ("show-episode-save", index),
+                                    &episode.uri,
+                                    palette,
+                                    cx,
+                                ))
+                            })
                             .child(
                                 div()
                                     .min_w_0()
@@ -1259,28 +1313,79 @@ impl OpenMusic {
 }
 
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    let uri = match target {
-        Target::Episode { uri } => uri.clone(),
+    match target {
+        Target::Episode { uri } => episode_items(uri, app),
         Target::Track(track) if track.track.uri.starts_with("spotify:episode:") => {
-            track.track.uri.clone()
+            episode_items(&track.track.uri, app)
         }
-        _ => return Vec::new(),
-    };
-    let finished = app.played_uri(&uri).is_some_and(Played::finished);
-    let pending = app.content.marking.contains_key(&uri);
+        Target::Show { uri } => show_items(uri, app),
+        _ => Vec::new(),
+    }
+}
+
+fn library_item(app: &OpenMusic, uri: &str, titles: [(&'static str, &'static str); 2]) -> MenuItem {
+    let saved = app.saved_or_known(uri) == Some(true);
+    let (title, symbol) = titles[usize::from(saved)];
+    let target = uri.to_owned();
+    MenuItem::action(title, move |app, _, _| {
+        app.save_when_known(&target, !saved);
+    })
+    .symbol(symbol)
+    .enabled(!app.saving(uri))
+}
+
+fn episode_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    let chapter = app
+        .content
+        .loaded_episode(uri)
+        .is_some_and(|episode| episode.chapter);
+    let mut items = Vec::new();
+    if !chapter {
+        items.push((
+            Group::Library,
+            library_item(
+                app,
+                uri,
+                [
+                    ("Save to Your Episodes", "plus.circle"),
+                    ("Remove from Your Episodes", "minus.circle"),
+                ],
+            ),
+        ));
+    }
+    let finished = app.played_uri(uri).is_some_and(Played::finished);
+    let pending = app.content.marking.contains_key(uri);
     let (title, symbol) = if finished {
         ("Mark as not started", "arrow.counterclockwise.circle")
     } else {
         ("Mark as finished", "checkmark.circle")
     };
-    vec![(
+    let target = uri.to_owned();
+    items.push((
         Group::Library,
         MenuItem::action(title, move |app, _, _| {
-            app.mark_played(vec![uri.clone()], !finished)
+            app.mark_played(vec![target.clone()], !finished)
         })
         .symbol(symbol)
         .enabled(!pending),
-    )]
+    ));
+    items
+}
+
+fn show_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    let book = app
+        .content
+        .loaded_show()
+        .is_some_and(|show| show.uri == uri && show.kind == ShowKind::Audiobook);
+    let titles = if book {
+        [
+            ("Add to Your Library", "plus.circle"),
+            ("Remove from Your Library", "minus.circle"),
+        ]
+    } else {
+        [("Follow", "plus.circle"), ("Unfollow", "minus.circle")]
+    };
+    vec![(Group::Library, library_item(app, uri, titles))]
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
