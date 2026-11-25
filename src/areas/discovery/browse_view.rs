@@ -195,7 +195,6 @@ impl OpenMusic {
                 return page
                     .child(
                         bone("browse-header-bone", 0, palette)
-                            .w_full()
                             .h(px(HEADER_HEIGHT))
                             .rounded(px(16.)),
                     )
@@ -254,7 +253,6 @@ impl OpenMusic {
         let tint = page.color.unwrap_or(palette.accent);
         div()
             .relative()
-            .w_full()
             .h(px(HEADER_HEIGHT))
             .rounded(px(16.))
             .overflow_hidden()
@@ -287,7 +285,8 @@ impl OpenMusic {
                         div()
                             .text_size(px(40.))
                             .font_weight(FontWeight::BOLD)
-                            .truncate()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .child(page.title.clone()),
                     )
                     .when_some(page.subtitle.clone(), |header, subtitle| {
@@ -295,7 +294,8 @@ impl OpenMusic {
                             div()
                                 .text_size(px(14.))
                                 .opacity(0.8)
-                                .truncate()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
                                 .child(subtitle),
                         )
                     }),
