@@ -431,7 +431,9 @@ fn now_playing(now: &mut NowPlaying, ctx: &mut Ctx) {
         if duration > 0 {
             track.duration_ms = duration;
         }
-    } else if track.cover.is_none() || track.title.is_empty() {
+    } else if (track.cover.is_none() || track.title.is_empty())
+        && (track.uri.starts_with("spotify:track:") || track.uri.starts_with("spotify:episode:"))
+    {
         let api = ctx.api.clone();
         let uri = track.uri.clone();
         ctx.known.tracks.insert(uri.clone(), track.clone());

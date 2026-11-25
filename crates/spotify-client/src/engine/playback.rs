@@ -20,6 +20,7 @@ pub use device::{MAX_NAME, device_name};
 use gain::{Gains, fetch_loudness, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
+use narration::is_narration;
 use quality::Automatic;
 pub use quality::{Quality, Stream, StreamKind, codec_of};
 use sleep::Sleep;
@@ -31,6 +32,7 @@ mod device;
 mod gain;
 mod join;
 mod local;
+mod narration;
 mod quality;
 mod sleep;
 mod source;
@@ -250,6 +252,8 @@ pub(super) struct State {
     sleep: Sleep,
     automatic: Automatic,
     notes: Vec<String>,
+    narration_run: u32,
+    narration_told: bool,
 }
 
 impl State {
@@ -796,6 +800,10 @@ impl Engine {
             .track()
             .cloned()
             .context("Spotify sent no track to play.")?;
+        if is_narration(&track) {
+            return Box::pin(self.skip_narration(playing)).await;
+        }
+        self.audio.narration_run = 0;
         let uri = playing.uri().to_owned();
         let show = show_of(&playing.machine, playing.index);
         playing.state_speed = state_speed(&playing.machine, playing.index);

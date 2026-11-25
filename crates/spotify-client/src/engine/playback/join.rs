@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::{
     AudioSettings, Playing, ReportPrepared,
     gain::{fetch_loudness, linear},
+    narration::is_narration,
     quality::{choose, reported_quality},
     source::Pick,
     speed::{show_of, starting_speed, state_speed},
@@ -51,6 +52,9 @@ pub(super) fn preparable(machine: &Value, target: &Target) -> bool {
     let Some(state) = machine["states"].get(target.index) else {
         return false;
     };
+    if track_at(machine, target.index).is_none_or(is_narration) {
+        return false;
+    }
     let unset = |key: &str| state.get(key).is_none_or(Value::is_null);
     let zero = |key: &str| state[key].as_u64().unwrap_or(0) == 0;
     !target.paused
@@ -604,6 +608,17 @@ mod tests {
         assert_eq!(file.quality.as_deref(), Some("HIGH"));
         assert_eq!(choose_file(track_at(&machine, 2).unwrap(), None), None);
         assert_eq!(choose_file(track_at(&machine, 3).unwrap(), None), None);
+    }
+
+    #[test]
+    fn never_prepares_a_voice_clip() {
+        let mut machine = machine();
+        machine["tracks"][1]["metadata"]["uri"] = json!("spotify:media:0000000000000000000001");
+        let next = target(&machine, 0, "advance").unwrap();
+        assert!(!preparable(&machine, &next));
+        machine["tracks"][1]["metadata"]["uri"] = json!("spotify:track:b");
+        machine["tracks"][1]["metadata"]["is_narration"] = json!("true");
+        assert!(!preparable(&machine, &next));
     }
 
     #[test]
