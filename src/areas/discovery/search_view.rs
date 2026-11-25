@@ -8,7 +8,7 @@ use spotify_client::{
 };
 
 use super::{
-    search::{DropRow, TOP_SONGS, top_result_plays},
+    search::{DropRow, SONGS_ONLY, TOP_SONGS, top_result_plays},
     state::SearchTab,
 };
 use crate::{
@@ -205,6 +205,9 @@ impl OpenMusic {
         if results.is_empty() {
             return self.search_nothing(palette).into_any_element();
         }
+        if results.fallback {
+            return self.search_songs_only(results, palette, cx);
+        }
         div()
             .flex()
             .flex_col()
@@ -307,6 +310,34 @@ impl OpenMusic {
                 .children(top)
                 .children(songs)
         }
+    }
+
+    fn search_songs_only(
+        &self,
+        results: &SearchResults,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(palette.muted))
+                    .child(SONGS_ONLY),
+            )
+            .child(self.search_heading("Songs", None, "search-songs", palette, cx))
+            .child(self.track_list(
+                &results.tracks.items,
+                "search-track",
+                0,
+                &self.search_row_options(true),
+                palette,
+                cx,
+            ))
+            .into_any_element()
     }
 
     fn search_nothing(&self, palette: Palette) -> Div {

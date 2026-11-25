@@ -31,6 +31,7 @@ pub const ENTITY_ROWS: usize = 6;
 pub const RECENT_ROWS: usize = 8;
 pub const TOP_SONGS: usize = 4;
 pub const SONG_ROWS: [&str; 2] = ["search-track", "search-tab-track"];
+pub const SONGS_ONLY: &str = "Showing songs only.";
 
 impl SearchTab {
     pub fn kind(self) -> Option<SearchKind> {
@@ -296,7 +297,8 @@ impl super::state::State {
                 None => "none".to_owned(),
                 Some(Err(_)) => "error".to_owned(),
                 Some(Ok(results)) => format!(
-                    "ok search_top={} search_songs={}/{} search_featured={} search_chips={}",
+                    "ok search_fallback={} search_top={} search_songs={}/{} search_featured={} search_chips={}",
+                    results.fallback,
                     results.top.len(),
                     results.tracks.items.len(),
                     results.tracks.total,

@@ -273,7 +273,7 @@ async fn search(api: Api, query: String) -> crate::worker::Event {
             result: Err("OpenMusic can’t open this kind of Spotify link.".to_owned()),
         },
         Ok(None) => {
-            let result = search::search(&api, &query)
+            let result = search::search_or_songs(&api, &query)
                 .await
                 .map(Box::new)
                 .map_err(search_error);
@@ -290,9 +290,12 @@ async fn search_tab(
     offset: u32,
     limit: u32,
 ) -> crate::worker::Event {
-    let result = search::search_kind(&api, &query, kind, offset, limit)
-        .await
-        .map_err(search_error);
+    let result = if kind == SearchKind::Tracks && offset == 0 {
+        search::songs_page_or_songs(&api, &query, limit).await
+    } else {
+        search::search_kind(&api, &query, kind, offset, limit).await
+    }
+    .map_err(search_error);
     Event::SearchTab {
         query,
         kind,

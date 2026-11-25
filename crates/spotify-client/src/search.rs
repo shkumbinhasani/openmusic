@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    api::Api,
-    catalog::Track,
+    api::{Api, HttpStatus},
+    catalog::{self, Track},
     entity::{self, Card, Kind},
-    pathfinder::{self, Operation},
+    pathfinder::{self, Operation, PathfinderError},
 };
 
 pub const SEARCH_DESKTOP: Operation = Operation::query(
@@ -245,9 +245,25 @@ pub struct SearchResults {
     pub cards: Vec<(SearchKind, Paged<Card>)>,
     pub chips: Vec<SearchKind>,
     pub unplayable: HashSet<String>,
+    pub fallback: bool,
 }
 
 impl SearchResults {
+    pub fn songs_only(query: &str, tracks: Vec<Track>) -> Self {
+        let total = u32::try_from(tracks.len()).unwrap_or(u32::MAX);
+        Self {
+            query: query.to_owned(),
+            tracks: Paged {
+                items: tracks,
+                total,
+                next: None,
+            },
+            chips: Vec::new(),
+            fallback: true,
+            ..Self::default()
+        }
+    }
+
     pub fn featuring(&self) -> Option<&str> {
         self.top
             .iter()
@@ -576,6 +592,7 @@ pub fn parse_results(query: &str, data: &Value) -> SearchResults {
         cards,
         chips: Vec::new(),
         unplayable,
+        fallback: false,
     };
     let ordered: Vec<SearchKind> = search["chipOrder"]["items"]
         .as_array()
@@ -652,9 +669,46 @@ pub fn check_write(data: &Value, key: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn falls_back(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<PathfinderError>().is_some() {
+        return true;
+    }
+    if let Some(HttpStatus(status)) = error.downcast_ref::<HttpStatus>() {
+        return status.is_server_error();
+    }
+    error.chain().any(|cause| cause.is::<reqwest::Error>())
+}
+
 pub async fn search(api: &Api, query: &str) -> Result<SearchResults> {
     let data = pathfinder::query(api, SEARCH_DESKTOP, all_variables(query)).await?;
     Ok(parse_results(query, &data))
+}
+
+pub async fn search_or_songs(api: &Api, query: &str) -> Result<SearchResults> {
+    let error = match search(api, query).await {
+        Ok(results) => return Ok(results),
+        Err(error) if falls_back(&error) => error,
+        Err(error) => return Err(error),
+    };
+    match catalog::search(api, query).await {
+        Ok(tracks) => Ok(SearchResults::songs_only(query, tracks)),
+        Err(_) => Err(error),
+    }
+}
+
+pub async fn songs_page_or_songs(api: &Api, query: &str, limit: u32) -> Result<SearchPage> {
+    let error = match search_kind(api, query, SearchKind::Tracks, 0, limit).await {
+        Ok(page) => return Ok(page),
+        Err(error) if falls_back(&error) => error,
+        Err(error) => return Err(error),
+    };
+    match catalog::search(api, query).await {
+        Ok(tracks) => Ok(SearchPage::Tracks {
+            page: SearchResults::songs_only(query, tracks).tracks,
+            unplayable: HashSet::new(),
+        }),
+        Err(_) => Err(error),
+    }
 }
 
 pub async fn search_kind(
@@ -1165,5 +1219,78 @@ mod tests {
         );
         assert!(remember(&api, &[]).await.is_ok());
         assert!(forget(&api, &[]).await.is_ok());
+    }
+
+    #[test]
+    fn falls_back_to_songs_when_pathfinder_fails() {
+        let stale = pathfinder::interpret(
+            SEARCH_DESKTOP,
+            reqwest::StatusCode::PRECONDITION_FAILED,
+            b"Invalid query hash",
+        )
+        .unwrap_err();
+        assert!(falls_back(&stale));
+        let refused = pathfinder::interpret(SEARCH_DESKTOP, reqwest::StatusCode::FORBIDDEN, b"{}")
+            .unwrap_err();
+        assert!(falls_back(&refused));
+        let down = pathfinder::interpret(SEARCH_DESKTOP, reqwest::StatusCode::BAD_GATEWAY, b"")
+            .unwrap_err();
+        assert!(falls_back(&down));
+        let expired = pathfinder::interpret(SEARCH_DESKTOP, reqwest::StatusCode::UNAUTHORIZED, b"")
+            .unwrap_err();
+        assert!(!falls_back(&expired));
+        let busy =
+            pathfinder::interpret(SEARCH_DESKTOP, reqwest::StatusCode::TOO_MANY_REQUESTS, b"")
+                .unwrap_err();
+        assert!(!falls_back(&busy));
+        assert!(!falls_back(&anyhow::anyhow!("something else")));
+    }
+
+    #[tokio::test]
+    async fn treats_an_unreachable_host_as_a_network_error() {
+        let api = Api::new(
+            reqwest::Client::new(),
+            "https://spclient.example",
+            String::new(),
+        );
+        let error = api
+            .send_with(
+                reqwest::Method::GET,
+                "http://127.0.0.1:9/",
+                crate::api::Body::Empty,
+                "application/json",
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(falls_back(&error));
+    }
+
+    #[test]
+    fn songs_only_results_carry_the_flag() {
+        let tracks = vec![
+            Track {
+                uri: "spotify:track:70LcF31zb1H0PyJoS1Sx1r".into(),
+                title: "Creep".into(),
+                ..Track::default()
+            },
+            Track {
+                uri: "spotify:track:2nrG5UtAcqXbYttu7MXP1p".into(),
+                title: "Karma Police".into(),
+                ..Track::default()
+            },
+        ];
+        let results = SearchResults::songs_only("radiohead", tracks);
+        assert!(results.fallback);
+        assert_eq!(results.query, "radiohead");
+        assert_eq!(results.tracks.items.len(), 2);
+        assert_eq!(results.tracks.total, 2);
+        assert_eq!(results.tracks.next, None);
+        assert!(results.chips.is_empty());
+        assert!(results.top.is_empty());
+        assert!(!results.is_empty());
+        assert!(SearchResults::songs_only("x", Vec::new()).is_empty());
+        let parsed = parse_results("radiohead", &json!({"searchV2": {}}));
+        assert!(!parsed.fallback);
     }
 }
