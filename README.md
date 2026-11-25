@@ -37,10 +37,10 @@ OpenMusic against the official Spotify app on the same Mac, measured with `scrip
 
 <sub>MacBook Pro with Apple M4 Pro and 24 GB of memory, macOS 27.0, 23 November 2026. Launch time is the median of five launches, from <code>open</code> until the first window is on screen. Memory is the physical footprint of every process the app runs, added together; this is the figure Activity Monitor shows. CPU is the share of one core over 30 seconds. Each app was measured alone, signed in, 20 seconds after launch and again 20 seconds after it started playing the same album.</sub>
 
-These figures come from before this release added podcasts, video, Jam, local files and the other features below, so the current app may differ. Run the benchmark yourself after building the app. It needs OpenMusic signed in, and Spotify installed if you want the comparison. It plays music in both apps for about a minute.
+These figures come from before this release added podcasts, video, Jam, local files and the other features below, so the current app may differ. Run the benchmark yourself after building the app. It needs OpenMusic signed in, and Spotify installed if you want the comparison. It plays music in both apps for about a minute. The script drives OpenMusic through a command folder that only exists in builds with the `debug-dir` feature, so build the app with it.
 
 ```sh
-./scripts/bundle-macos.sh
+FEATURES=debug-dir ./scripts/bundle-macos.sh
 ./scripts/bench.sh
 ```
 

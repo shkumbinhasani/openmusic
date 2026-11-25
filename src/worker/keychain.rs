@@ -34,7 +34,7 @@ pub fn clear() -> Result<(), native::Error> {
 }
 
 fn debug_file() -> Option<PathBuf> {
-    crate::debug::directory().map(|directory| directory.join("refresh-token"))
+    crate::debug::secrets().map(|directory| directory.join("refresh-token"))
 }
 
 #[cfg(target_os = "macos")]

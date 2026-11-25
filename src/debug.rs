@@ -1,11 +1,21 @@
 use std::path::PathBuf;
 
 pub fn directory() -> Option<PathBuf> {
+    if !cfg!(any(debug_assertions, feature = "debug-dir")) {
+        return None;
+    }
     std::env::var_os("OPENMUSIC_DEBUG_DIR").map(PathBuf::from)
 }
 
+pub fn secrets() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    directory()
+}
+
 pub fn write_token(token: &str) {
-    if let Some(directory) = directory() {
+    if let Some(directory) = secrets() {
         write_private(&directory.join("token"), token);
     }
 }

@@ -7,12 +7,17 @@ version="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1
 build="${BUILD_NUMBER:-1}"
 triple="${TARGET:-}"
 
+set -- --release --locked --target-dir "$target_dir"
+if [ -n "${FEATURES:-}" ]; then
+    set -- "$@" --features "$FEATURES"
+fi
+
 if [ -n "$triple" ]; then
-    cargo build --release --locked --target "$triple" --target-dir "$target_dir"
+    cargo build "$@" --target "$triple"
     binary="$target_dir/$triple/release/openmusic"
     bundle="$target_dir/$triple/OpenMusic.app"
 else
-    cargo build --release --locked --target-dir "$target_dir"
+    cargo build "$@"
     binary="$target_dir/release/openmusic"
     bundle="$target_dir/OpenMusic.app"
 fi

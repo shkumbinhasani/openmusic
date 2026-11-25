@@ -338,7 +338,7 @@ async fn connected(
 
     let mut dealer_seen = false;
     let mut debug_tasks = JoinSet::new();
-    if crate::debug::directory().is_some() {
+    if crate::debug::secrets().is_some() {
         let api = ctx.api.clone();
         debug_tasks.spawn(async move {
             loop {

@@ -88,12 +88,13 @@ openmusic_state() {
 }
 
 measure_openmusic() {
-    [ -d "$openmusic" ] || { echo "OpenMusic not found at $openmusic; run scripts/bundle-macos.sh" >&2; exit 1; }
+    [ -d "$openmusic" ] || { echo "OpenMusic not found at $openmusic; run FEATURES=debug-dir scripts/bundle-macos.sh" >&2; exit 1; }
     om_size="$(du -sm "$openmusic" | cut -f1)"
     om_launch="$(launches "$openmusic" OpenMusic "OPENMUSIC_DEBUG_DIR=$debug")"
     sleep "$settle"
     case "$(openmusic_state)" in
         account=true*) ;;
+        "") echo "OpenMusic did not answer. Build it with FEATURES=debug-dir scripts/bundle-macos.sh, then run again." >&2; quit "$openmusic"; exit 1 ;;
         *) echo "OpenMusic is not signed in. Sign in once, allow Keychain access, then run again." >&2; quit "$openmusic"; exit 1 ;;
     esac
     om_idle="$(footprint_mb "$openmusic")"
