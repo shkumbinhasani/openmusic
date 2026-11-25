@@ -236,7 +236,6 @@ impl OpenMusic {
             return;
         }
         let tracks: Vec<_> = list.iter().map(|episode| episode.as_track()).collect();
-        self.refresh_current_episode();
         self.play_context(your_episodes::CONTEXT, &tracks, index, cx);
     }
 

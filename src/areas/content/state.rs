@@ -85,6 +85,7 @@ pub struct State {
     pub kinds: HashMap<String, ShowKind>,
     pub shows: HashMap<String, String>,
     pub locating: Option<(String, Instant)>,
+    pub watched: Option<(String, bool)>,
     pub canvas: Canvases,
     pub screen: Screen,
 }
@@ -205,6 +206,17 @@ fn is_episode(uri: &str) -> bool {
     uri.starts_with("spotify:episode:")
 }
 
+fn left_episode<'a>(
+    before: Option<&'a (String, bool)>,
+    track: Option<&str>,
+    playing: bool,
+) -> Option<&'a str> {
+    let (uri, was_playing) = before?;
+    let changed = track != Some(uri.as_str());
+    let paused = *was_playing && !playing;
+    (changed || paused).then_some(uri.as_str())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SaveStep {
     Keep,
@@ -313,30 +325,16 @@ impl OpenMusic {
     }
 
     fn watch_episode(&mut self, now: &NowPlaying) {
-        let Some(before) = self
-            .track()
-            .map(|track| track.uri.clone())
+        let track = now.track.as_ref().map(|track| track.uri.as_str());
+        let next = track
             .filter(|uri| is_episode(uri))
-        else {
-            return;
-        };
-        let changed = now.track.as_ref().is_none_or(|track| track.uri != before);
-        let paused = self.playback.now.playing && !now.playing;
-        if (changed || paused) && self.content.loaded_episode(&before).is_some() {
-            self.send(Command::Refresh {
-                uris: vec![before],
-                delay_ms: REFRESH_AFTER_PLAYBACK_MS,
-            });
-        }
-    }
-
-    pub(super) fn refresh_current_episode(&self) {
-        if let Some(track) = self.track()
-            && is_episode(&track.uri)
-            && self.content.loaded_episode(&track.uri).is_some()
+            .map(|uri| (uri.to_owned(), now.playing));
+        let before = std::mem::replace(&mut self.content.watched, next);
+        if let Some(uri) = left_episode(before.as_ref(), track, now.playing)
+            && self.content.loaded_episode(uri).is_some()
         {
             self.send(Command::Refresh {
-                uris: vec![track.uri.clone()],
+                uris: vec![uri.to_owned()],
                 delay_ms: REFRESH_AFTER_PLAYBACK_MS,
             });
         }
@@ -399,7 +397,6 @@ impl OpenMusic {
             return;
         }
         let (uri, tracks) = (uri.clone(), show.tracks());
-        self.refresh_current_episode();
         self.play_context(&uri, &tracks, index, cx);
     }
 
@@ -411,7 +408,6 @@ impl OpenMusic {
             self.toggle(cx);
             return;
         }
-        self.refresh_current_episode();
         let track = episode.as_track();
         self.play_context(&episode.uri, &[track], 0, cx);
     }
@@ -1485,6 +1481,31 @@ mod tests {
             Some(&ShowKind::Podcast)
         );
         assert!(!state.kinds.contains_key("spotify:album:x"));
+    }
+
+    #[test]
+    fn refreshes_an_episode_once_playback_leaves_or_pauses_it() {
+        let a = "spotify:episode:a";
+        let playing = Some((a.to_owned(), true));
+        let paused = Some((a.to_owned(), false));
+        assert_eq!(left_episode(None, Some(a), true), None);
+        assert_eq!(left_episode(playing.as_ref(), Some(a), true), None);
+        assert_eq!(
+            left_episode(playing.as_ref(), Some("spotify:track:song"), true),
+            Some(a)
+        );
+        assert_eq!(
+            left_episode(playing.as_ref(), Some("spotify:episode:b"), true),
+            Some(a)
+        );
+        assert_eq!(left_episode(playing.as_ref(), None, false), Some(a));
+        assert_eq!(left_episode(playing.as_ref(), Some(a), false), Some(a));
+        assert_eq!(left_episode(paused.as_ref(), Some(a), false), None);
+        assert_eq!(left_episode(paused.as_ref(), Some(a), true), None);
+        assert_eq!(
+            left_episode(paused.as_ref(), Some("spotify:track:song"), true),
+            Some(a)
+        );
     }
 
     #[test]
