@@ -45,10 +45,19 @@ pub struct FairPlay {
     pub token: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
+pub struct HlsKey {
+    pub asset_id: String,
+    pub certificate: Arc<Vec<u8>>,
+    pub license_url: String,
+    pub token: String,
+}
+
+#[derive(Clone)]
 pub struct Hls {
     pub playlists: Vec<(String, Vec<u8>)>,
     pub root: String,
+    pub key: Option<HlsKey>,
 }
 
 #[derive(Clone)]
@@ -327,17 +336,51 @@ thread_local! {
 }
 
 static PLAYLISTS: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
-static LICENSING: OnceLock<Mutex<Option<Licensing>>> = OnceLock::new();
+static LICENSING: OnceLock<Mutex<Licenses>> = OnceLock::new();
 static FILES: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static SHARED: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
 static SNAPSHOT: Mutex<Option<Snapshot>> = Mutex::new(None);
+
+#[derive(Default)]
+struct Licenses {
+    by_content: HashMap<String, Licensing>,
+    latest: Option<String>,
+}
+
+impl Licenses {
+    fn insert(&mut self, content: &str, licensing: Licensing) {
+        self.by_content.insert(content.to_owned(), licensing);
+        self.latest = Some(content.to_owned());
+    }
+
+    fn remove(&mut self, content: &str) {
+        self.by_content.remove(content);
+        if self.latest.as_deref() == Some(content) {
+            self.latest = self.by_content.keys().next().cloned();
+        }
+    }
+
+    fn find(&self, content: &str) -> Option<&Licensing> {
+        self.by_content.get(content).or_else(|| {
+            self.latest
+                .as_ref()
+                .and_then(|latest| self.by_content.get(latest))
+        })
+    }
+
+    fn set_token(&mut self, token: &str) {
+        for licensing in self.by_content.values_mut() {
+            licensing.token = token.to_owned();
+        }
+    }
+}
 
 fn playlists() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     PLAYLISTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn licensing() -> &'static Mutex<Option<Licensing>> {
-    LICENSING.get_or_init(|| Mutex::new(None))
+fn licensing() -> &'static Mutex<Licenses> {
+    LICENSING.get_or_init(|| Mutex::new(Licenses::default()))
 }
 
 fn files() -> &'static Mutex<HashMap<String, u64>> {
@@ -465,8 +508,9 @@ fn content_id(request: &AVContentKeyRequest) -> String {
 }
 
 fn provide_key(request: &AVContentKeyRequest) {
-    let Some((certificate, license_url, token)) = licensing().lock().ok().and_then(|licensing| {
-        licensing.as_ref().map(|licensing| {
+    let identifier = content_id(request);
+    let Some((certificate, license_url, token)) = licensing().lock().ok().and_then(|licenses| {
+        licenses.find(&identifier).map(|licensing| {
             (
                 licensing.certificate.clone(),
                 licensing.license_url.clone(),
@@ -479,7 +523,6 @@ fn provide_key(request: &AVContentKeyRequest) {
     let Some(shared) = shared() else {
         return;
     };
-    let identifier = content_id(request);
     let captured = Sendable(request.retain());
     let handler = RcBlock::new(move |spc: *mut NSData, _error: *mut NSError| {
         let request = Sendable(captured.0.clone());
@@ -786,19 +829,25 @@ impl MainState {
                 map.insert(playlist_key(&key, name), bytes);
             }
         };
+        let license = |content: &str, service: Licensing| {
+            if let Ok(mut licenses) = licensing().lock() {
+                licenses.insert(content, service);
+            }
+            if let Ok(mut files) = files().lock() {
+                files.insert(content.to_owned(), generation);
+            }
+        };
         let (url, file_id, loaded, keyed) = match &media.source {
             Source::FairPlay(fairplay) => {
                 store("playlist.m3u8", playlist(fairplay));
-                if let Ok(mut licensing) = licensing().lock() {
-                    *licensing = Some(Licensing {
+                license(
+                    &fairplay.file_id,
+                    Licensing {
                         certificate: fairplay.certificate.clone(),
                         license_url: fairplay.license_url.clone(),
                         token: fairplay.token.clone(),
-                    });
-                }
-                if let Ok(mut files) = files().lock() {
-                    files.insert(fairplay.file_id.clone(), generation);
-                }
+                    },
+                );
                 (
                     NSURL::URLWithString(&NSString::from_str(&format!(
                         "{SCHEME}://{key}/playlist.m3u8"
@@ -812,14 +861,26 @@ impl MainState {
                 for (name, bytes) in &hls.playlists {
                     store(name, bytes.clone());
                 }
+                if let Some(protection) = &hls.key {
+                    license(
+                        &protection.asset_id,
+                        Licensing {
+                            certificate: protection.certificate.clone(),
+                            license_url: protection.license_url.clone(),
+                            token: protection.token.clone(),
+                        },
+                    );
+                }
                 (
                     NSURL::URLWithString(&NSString::from_str(&format!(
                         "{SCHEME}://{key}/{}",
                         hls.root.trim_start_matches('/')
                     ))),
-                    None,
+                    hls.key
+                        .as_ref()
+                        .map(|protection| protection.asset_id.clone()),
                     true,
-                    false,
+                    hls.key.is_some(),
                 )
             }
             Source::Url(url) => (
@@ -882,6 +943,9 @@ impl MainState {
             && files.get(file_id) == Some(&generation)
         {
             files.remove(file_id);
+            if let Ok(mut licenses) = licensing().lock() {
+                licenses.remove(file_id);
+            }
         }
     }
 
@@ -1515,10 +1579,8 @@ impl Player {
     }
 
     pub fn update_token(&self, token: String) {
-        if let Ok(mut licensing) = licensing().lock()
-            && let Some(licensing) = licensing.as_mut()
-        {
-            licensing.token = token;
+        if let Ok(mut licenses) = licensing().lock() {
+            licenses.set_token(&token);
         }
     }
 
@@ -1646,6 +1708,52 @@ mod tests {
         assert_eq!(clamped.elapsed, Duration::from_secs(8));
         assert_eq!(clamped.lead_in, Duration::from_secs(8));
         assert_eq!(Blend::fade(6000).shape, Shape::fade());
+    }
+
+    fn service(url: &str) -> Licensing {
+        Licensing {
+            certificate: Arc::new(Vec::new()),
+            license_url: url.into(),
+            token: "old".into(),
+        }
+    }
+
+    #[test]
+    fn licenses_each_stream_with_its_own_service() {
+        let mut licenses = Licenses::default();
+        assert!(licenses.find("anything").is_none());
+        licenses.insert("6f5cc32c", service("https://spclient.example/audio"));
+        licenses.insert(
+            "0000eeee",
+            service("https://spclient.example/video/0000eeee?mpegTs=true"),
+        );
+        assert_eq!(
+            licenses.find("6f5cc32c").unwrap().license_url,
+            "https://spclient.example/audio"
+        );
+        assert_eq!(
+            licenses.find("0000eeee").unwrap().license_url,
+            "https://spclient.example/video/0000eeee?mpegTs=true"
+        );
+        assert_eq!(
+            licenses.find("unknown").unwrap().license_url,
+            "https://spclient.example/video/0000eeee?mpegTs=true"
+        );
+        licenses.set_token("fresh");
+        assert!(
+            licenses
+                .by_content
+                .values()
+                .all(|licensing| licensing.token == "fresh")
+        );
+        licenses.remove("0000eeee");
+        assert!(!licenses.by_content.contains_key("0000eeee"));
+        assert_eq!(
+            licenses.find("unknown").unwrap().license_url,
+            "https://spclient.example/audio"
+        );
+        licenses.remove("6f5cc32c");
+        assert!(licenses.find("6f5cc32c").is_none());
     }
 
     #[test]

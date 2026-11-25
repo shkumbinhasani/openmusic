@@ -10,6 +10,7 @@ use super::{
     quality::{choose, reported_quality},
     source::Pick,
     speed::{show_of, starting_speed, state_speed},
+    video::{Opened, VideoStatus, offer},
 };
 use crate::{
     automix::Plan,
@@ -169,6 +170,7 @@ pub(super) struct Prepared {
     speed: f32,
     pub(super) mix: Option<Plan>,
     start_ms: u32,
+    video: Option<VideoStatus>,
 }
 
 impl Prepared {
@@ -339,7 +341,12 @@ impl Engine {
             self.open(&pick, &target.uri)
         );
         self.store_loudness(found);
-        let Ok((media, bitrate)) = opened else {
+        let Ok(Opened {
+            media,
+            bitrate,
+            video: carried,
+        }) = opened
+        else {
             self.audio.joins.tried = Some(source);
             return;
         };
@@ -367,6 +374,7 @@ impl Engine {
             },
             join,
         );
+        let video = offer(&target.uri, &track, carried);
         self.audio.joins.prepared = Some(Prepared {
             generation,
             target,
@@ -379,6 +387,7 @@ impl Engine {
             speed,
             mix,
             start_ms,
+            video,
         });
     }
 
@@ -475,6 +484,7 @@ impl Engine {
         next.gain_db = prepared.gain_db;
         next.speed = prepared.speed;
         next.state_speed = state_speed(&next.machine, next.index);
+        next.video = prepared.video;
         self.playing = Some(next);
         self.audio.joins.tried = None;
         self.audio
@@ -597,6 +607,7 @@ mod tests {
             speed: 1.,
             mix: None,
             start_ms: 0,
+            video: None,
         }
     }
 

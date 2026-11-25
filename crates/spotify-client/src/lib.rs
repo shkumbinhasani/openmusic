@@ -19,6 +19,7 @@ pub mod home;
 pub mod jam;
 pub mod library;
 pub mod loudness;
+pub mod music_video;
 pub mod oauth;
 pub mod pathfinder;
 pub mod playback_settings;

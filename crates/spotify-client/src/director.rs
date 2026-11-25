@@ -6,6 +6,9 @@ use crate::api::Api;
 pub const AUDIO_PLAYLIST: &str = "audio.m3u8";
 pub const MASTER_PLAYLIST: &str = "master.m3u8";
 
+const PROTECTED: &str =
+    "This stream is protected in a way macOS can’t play, so OpenMusic can’t open it.";
+
 pub type Playlists = Vec<(String, Vec<u8>)>;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +20,23 @@ pub struct Profile {
     pub bitrate: u64,
     pub width: u32,
     pub height: u32,
+    pub encryption: Vec<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Protection {
+    pub index: i64,
+    pub endpoint: String,
+    pub asset_id: String,
+}
+
+impl Protection {
+    pub fn key_line(&self) -> String {
+        format!(
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://{}\",KEYFORMATVERSIONS=\"1\",KEYFORMAT=\"com.apple.streamingkeydelivery\"",
+            self.asset_id
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +51,7 @@ pub struct Director {
     pub audio: Option<Profile>,
     pub video: Vec<Profile>,
     pub encrypted: bool,
+    pub protection: Option<Protection>,
     pub loudness: Option<(f32, f32)>,
 }
 
@@ -41,6 +62,18 @@ impl Director {
 
     pub fn base(&self) -> Option<&str> {
         self.bases.first().map(String::as_str)
+    }
+
+    pub fn has_video(&self) -> bool {
+        self.audio.is_some() && !self.video.is_empty()
+    }
+
+    pub fn aspect(&self) -> Option<f32> {
+        self.video
+            .iter()
+            .filter(|profile| profile.width > 0 && profile.height > 0)
+            .max_by_key(|profile| profile.height)
+            .map(|profile| profile.width as f32 / profile.height as f32)
     }
 }
 
@@ -72,15 +105,44 @@ fn profile(value: &Value) -> Option<Profile> {
             .unwrap_or_default(),
         width: value["video_width"].as_u64().unwrap_or_default() as u32,
         height: value["video_height"].as_u64().unwrap_or_default() as u32,
+        encryption: value["encryption_indices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_i64)
+            .chain(
+                value["encryption_index"]
+                    .as_i64()
+                    .filter(|_| value["encryption_indices"].is_null()),
+            )
+            .collect(),
     })
 }
 
-fn clear_audio(profile: &Profile) -> bool {
-    profile.file_type == "mp4" && profile.codec.starts_with("mp4a.40")
+fn protection(infos: &[Value], encoding_id: &str) -> Option<Protection> {
+    infos.iter().enumerate().find_map(|(index, info)| {
+        if info["key_system"].as_str() != Some("fairplay") {
+            return None;
+        }
+        let endpoint = info["license_server_endpoint"].as_str()?;
+        if !endpoint.starts_with('/') || encoding_id.is_empty() {
+            return None;
+        }
+        Some(Protection {
+            index: index as i64,
+            endpoint: endpoint.to_owned(),
+            asset_id: encoding_id.to_owned(),
+        })
+    })
 }
 
-fn clear_video(profile: &Profile) -> bool {
-    profile.file_type == "mp4" && profile.codec.starts_with("avc1")
+fn usable(profile: &Profile, encrypted: bool, protection: Option<&Protection>) -> bool {
+    match protection {
+        Some(protection) => {
+            profile.file_type == "ts" && profile.encryption.contains(&protection.index)
+        }
+        None => !encrypted && profile.file_type == "mp4" && profile.encryption.is_empty(),
+    }
 }
 
 pub fn parse(json: &Value) -> Result<Director> {
@@ -94,12 +156,29 @@ pub fn parse(json: &Value) -> Result<Director> {
         .flatten()
         .filter_map(profile)
         .collect();
+    let encoding_id = content["encoding_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let infos = content["encryption_infos"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let encrypted = !infos.is_empty();
+    let protection = protection(&infos, &encoding_id);
+    let fits = |profile: &&Profile| usable(profile, encrypted, protection.as_ref());
     let audio = profiles
         .iter()
-        .filter(|profile| clear_audio(profile))
+        .filter(fits)
+        .filter(|profile| profile.codec.starts_with("mp4a.40"))
         .max_by_key(|profile| profile.bitrate)
         .cloned();
-    let mut video: Vec<Profile> = profiles.into_iter().filter(clear_video).collect();
+    let mut video: Vec<Profile> = profiles
+        .iter()
+        .filter(fits)
+        .filter(|profile| profile.codec.starts_with("avc1"))
+        .cloned()
+        .collect();
     video.sort_by_key(|profile| (profile.height, profile.bandwidth));
     let bases = json["base_urls"]
         .as_array()
@@ -125,10 +204,7 @@ pub fn parse(json: &Value) -> Result<Director> {
     }
     let loudness = &content["original_loudness"];
     Ok(Director {
-        encoding_id: content["encoding_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned(),
+        encoding_id,
         segment_seconds: content["segment_length"]
             .as_u64()
             .filter(|seconds| *seconds > 0)
@@ -146,9 +222,8 @@ pub fn parse(json: &Value) -> Result<Director> {
             .to_owned(),
         audio,
         video,
-        encrypted: content["encryption_infos"]
-            .as_array()
-            .is_some_and(|infos| !infos.is_empty()),
+        encrypted,
+        protection,
         loudness: loudness["loudness"]
             .as_f64()
             .zip(loudness["true_peak"].as_f64())
@@ -189,11 +264,14 @@ pub fn media_playlist(director: &Director, profile: &Profile) -> Option<Vec<u8>>
         "#EXT-X-MEDIA-SEQUENCE:0".to_owned(),
         "#EXT-X-PLAYLIST-TYPE:VOD".to_owned(),
         "#EXT-X-INDEPENDENT-SEGMENTS".to_owned(),
-        format!(
+    ];
+    match &director.protection {
+        Some(protection) => lines.push(protection.key_line()),
+        None => lines.push(format!(
             "#EXT-X-MAP:URI=\"{base}{}\"",
             fill(&director.init, profile, None)
-        ),
-    ];
+        )),
+    }
     for (timestamp, seconds) in segments(director) {
         lines.push(format!("#EXTINF:{seconds:.3},"));
         lines.push(format!(
@@ -237,8 +315,8 @@ pub fn master_playlist(director: &Director) -> Option<Vec<u8>> {
 }
 
 pub fn playlists(director: &Director, with_video: bool) -> Result<(Playlists, String)> {
-    if director.encrypted {
-        bail!("This stream is protected, and OpenMusic can only play open streams of episodes.");
+    if director.encrypted && director.protection.is_none() {
+        bail!(PROTECTED);
     }
     let audio = director
         .audio
@@ -375,6 +453,105 @@ mod tests {
         ));
         assert!(!master.contains("av01"));
         assert!(!master.contains("vp9"));
+    }
+
+    fn music_video() -> Value {
+        json!({
+            "contents": [{
+                "encoding_id": "0000eeee1111ffff2222aaaa3333bbbb",
+                "segment_length": 4,
+                "start_time_millis": 0,
+                "end_time_millis": 9_000,
+                "profiles": [
+                    {"id": 15, "audio_bitrate": 160000, "audio_codec": "mp4a.40.2", "file_type": "mp4",
+                     "encryption_index": 0, "encryption_indices": [0, 1], "max_bitrate": 167566},
+                    {"id": 5, "file_type": "mp4", "video_codec": "avc1.4d400d", "video_width": 270,
+                     "video_height": 180, "encryption_indices": [0, 1], "max_bitrate": 309168},
+                    {"id": 28, "audio_bitrate": 160000, "audio_codec": "mp4a.40.2", "file_type": "ts",
+                     "encryption_index": 2, "encryption_indices": [2], "max_bitrate": 218080},
+                    {"id": 26, "file_type": "ts", "video_codec": "avc1.4d400d", "video_width": 270,
+                     "video_height": 180, "encryption_indices": [2], "max_bitrate": 332008},
+                    {"id": 21, "file_type": "ts", "video_codec": "avc1.4d4029", "video_width": 1620,
+                     "video_height": 1080, "encryption_indices": [2], "max_bitrate": 8835624},
+                    {"id": 9, "file_type": "mp4", "video_codec": "av01.0.08M.10", "video_width": 1620,
+                     "video_height": 1080, "encryption_indices": [0, 1]},
+                    {"id": 20, "audio_codec": "opus", "file_type": "webm", "encryption_indices": [0, 1]}
+                ],
+                "encryption_infos": [
+                    {"key_system": "widevine", "encryption_scheme": "cenc/ctr",
+                     "license_server_endpoint": "/widevine-license/v1/video/license"},
+                    {"key_system": "playready", "encryption_scheme": "cenc/ctr",
+                     "license_server_endpoint": "/playready-license/v1/video/license"},
+                    {"key_system": "fairplay", "encryption_scheme": "cenc/cbcs",
+                     "license_server_endpoint": "/fairplay-license/v2/video/license/0000eeee1111ffff2222aaaa3333bbbb?mpegTs=true",
+                     "key_format": "com.apple.streamingkeydelivery", "key_method": "SAMPLE-AES"}
+                ]
+            }],
+            "base_urls": ["https://video-cf.spotifycdn.com/segments/"],
+            "initialization_template": "v1/sources/src/encodings/enc/profiles/{{profile_id}}/inits/{{file_type}}?fauth=TOKEN",
+            "segment_template": "v1/sources/src/encodings/enc/profiles/{{profile_id}}/{{segment_timestamp}}.{{file_type}}?fauth=TOKEN"
+        })
+    }
+
+    #[test]
+    fn reads_fairplay_music_videos() {
+        let director = parse(&music_video()).unwrap();
+        assert!(director.encrypted);
+        let protection = director.protection.clone().unwrap();
+        assert_eq!(protection.index, 2);
+        assert_eq!(protection.asset_id, "0000eeee1111ffff2222aaaa3333bbbb");
+        assert_eq!(
+            protection.endpoint,
+            "/fairplay-license/v2/video/license/0000eeee1111ffff2222aaaa3333bbbb?mpegTs=true"
+        );
+        assert_eq!(director.audio.as_ref().unwrap().id, 28);
+        assert_eq!(
+            director
+                .video
+                .iter()
+                .map(|video| video.id)
+                .collect::<Vec<_>>(),
+            vec![26, 21]
+        );
+        assert!(director.has_video());
+        assert_eq!(director.aspect(), Some(1.5));
+
+        let (built, root) = playlists(&director, true).unwrap();
+        assert_eq!(root, MASTER_PLAYLIST);
+        let audio = String::from_utf8(built[0].1.clone()).unwrap();
+        assert!(audio.contains(
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://0000eeee1111ffff2222aaaa3333bbbb\",KEYFORMATVERSIONS=\"1\",KEYFORMAT=\"com.apple.streamingkeydelivery\""
+        ));
+        assert!(!audio.contains("EXT-X-MAP"));
+        assert!(audio.contains(
+            "#EXTINF:4.000,\nhttps://video-cf.spotifycdn.com/segments/v1/sources/src/encodings/enc/profiles/28/4.ts?fauth=TOKEN"
+        ));
+        let master = String::from_utf8(built.last().unwrap().1.clone()).unwrap();
+        assert!(master.contains("RESOLUTION=1620x1080,CODECS=\"mp4a.40.2,avc1.4d4029\""));
+        assert!(!master.contains("av01"));
+
+        let (only_audio, root) = playlists(&director, false).unwrap();
+        assert_eq!(root, AUDIO_PLAYLIST);
+        assert_eq!(only_audio.len(), 1);
+    }
+
+    #[test]
+    fn leaves_out_streams_only_other_systems_unlock() {
+        let mut other = music_video();
+        other["contents"][0]["encryption_infos"] = json!([
+            {"key_system": "widevine", "license_server_endpoint": "/widevine-license/v1/video/license"}
+        ]);
+        let director = parse(&other).unwrap();
+        assert!(director.protection.is_none());
+        assert!(director.audio.is_none());
+        assert!(director.video.is_empty());
+        assert!(!director.has_video());
+        assert!(playlists(&director, true).is_err());
+
+        let clear = parse(&fixture()).unwrap();
+        assert!(clear.protection.is_none());
+        assert_eq!(clear.aspect(), Some(1280. / 720.));
+        assert!(clear.has_video());
     }
 
     #[test]

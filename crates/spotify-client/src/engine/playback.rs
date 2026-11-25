@@ -1,6 +1,5 @@
 use std::{
     fmt,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -29,6 +28,8 @@ use sleep::Sleep;
 pub use sleep::{FADE_MS, SleepChoice};
 pub use source::MANIFEST_FORMATS;
 use speed::{Shows, read_show_speed, show_of, starting_speed, state_speed};
+use video::{Opened, Video, offer};
+pub use video::{VideoKind, VideoPrefs, VideoStatus};
 
 mod autoplay;
 mod device;
@@ -41,6 +42,7 @@ mod quality;
 mod sleep;
 mod source;
 mod speed;
+mod video;
 
 const NOTES: usize = 12;
 
@@ -59,6 +61,11 @@ pub enum Control {
     },
     Sleep(SleepChoice),
     Rename(String),
+    Video(VideoPrefs),
+    Watch {
+        uri: String,
+        position_ms: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +81,7 @@ pub struct AudioStatus {
     pub sleep: SleepState,
     pub stream: Option<Stream>,
     pub lowered: bool,
+    pub video: Option<VideoStatus>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -278,6 +286,7 @@ pub(super) struct State {
     narration_run: u32,
     narration_told: bool,
     mix: Mix,
+    video: Video,
 }
 
 impl State {
@@ -308,6 +317,7 @@ pub(super) struct Playing {
     source: &'static str,
     pub(super) speed: f32,
     state_speed: Option<f32>,
+    video: Option<VideoStatus>,
 }
 
 impl Playing {
@@ -331,6 +341,7 @@ impl Playing {
             source: "",
             speed: 1.,
             state_speed: None,
+            video: None,
         }
     }
 
@@ -344,6 +355,7 @@ impl Playing {
         let kind = match self.source {
             "fairplay" => StreamKind::FairPlay,
             "external" => StreamKind::Host,
+            "director" if self.uri().starts_with("spotify:track:") => StreamKind::MusicVideo,
             "director" => StreamKind::Video,
             _ => return None,
         };
@@ -468,6 +480,8 @@ impl Engine {
             Control::ShowSpeed { show, speed } => self.learn_show_speed(show, speed),
             Control::Sleep(choice) => self.set_sleep(choice)?,
             Control::Rename(name) => self.rename(&name).await?,
+            Control::Video(prefs) => self.set_video(prefs).await,
+            Control::Watch { uri, position_ms } => self.watch(uri, position_ms).await?,
         }
         Ok(())
     }
@@ -498,6 +512,7 @@ impl Engine {
             sleep: self.audio.sleep.state(),
             stream: self.stream(),
             lowered: self.lowered_quality(),
+            video: self.video_status(),
         };
         if self.audio.status.as_ref() != Some(&status) {
             self.audio.status = Some(status.clone());
@@ -863,7 +878,12 @@ impl Engine {
         );
         self.store_loudness(found);
         self.store_show_speed(show_speed);
-        let (media, bitrate) = opened?;
+        let (pick, opened) = self.recover(&track, &uri, pick, opened).await;
+        let Opened {
+            media,
+            bitrate,
+            video: carried,
+        } = opened?;
         let Some(playing) = self
             .playing
             .as_ref()
@@ -881,10 +901,12 @@ impl Engine {
         if let Some(playing) = self.playing.as_mut() {
             playing.gain_db = gain_db;
             playing.speed = speed;
-            if bitrate > 0 {
-                playing.bitrate = bitrate;
-            }
+            playing.format = pick.format();
+            playing.source = pick.name();
+            playing.codec = pick.codec();
+            playing.bitrate = if bitrate > 0 { bitrate } else { pick.bitrate() };
             playing.audio_quality = pick.reported_quality(playing.bitrate);
+            playing.video = offer(&uri, &track, carried);
         }
         let media = Media {
             start_ms: seek.unwrap_or(initial),
@@ -942,24 +964,7 @@ impl Engine {
         let init_size = seektable["offset"]
             .as_u64()
             .context("Missing init segment size.")?;
-        let certificate = match &self.certificate {
-            Some(certificate) => certificate.clone(),
-            None => {
-                let bytes = self
-                    .api
-                    .request(
-                        Method::GET,
-                        "/fairplay-license/v1/application-certificate",
-                        Body::Empty,
-                        "*/*",
-                    )
-                    .await
-                    .context("Could not get Spotify's FairPlay certificate.")?;
-                let certificate = Arc::new(bytes);
-                self.certificate = Some(certificate.clone());
-                certificate
-            }
-        };
+        let certificate = self.certificate().await?;
         let license_url = match &self.license_url {
             Some((url, expires)) if *expires > Instant::now() => url.clone(),
             _ => {

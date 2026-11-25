@@ -62,6 +62,7 @@ pub enum StreamKind {
     FairPlay,
     Host,
     Video,
+    MusicVideo,
     File,
 }
 
@@ -84,6 +85,7 @@ impl Stream {
             StreamKind::FairPlay => format!("{format}, FairPlay"),
             StreamKind::Host => format!("{format} from the podcast’s host"),
             StreamKind::Video => format!("{format} from the video podcast"),
+            StreamKind::MusicVideo => format!("{format} from the music video, FairPlay"),
             StreamKind::File => format!("{format} file on this Mac"),
         }
     }
@@ -326,6 +328,15 @@ mod tests {
             kbps: Some(96),
         };
         assert_eq!(video.describe(), "AAC 96 kbps from the video podcast");
+        let music_video = Stream {
+            kind: StreamKind::MusicVideo,
+            codec: Some("AAC".into()),
+            kbps: Some(160),
+        };
+        assert_eq!(
+            music_video.describe(),
+            "AAC 160 kbps from the music video, FairPlay"
+        );
         let file = Stream {
             kind: StreamKind::File,
             codec: codec_of("/Users/someone/Music/Song.FLAC"),
