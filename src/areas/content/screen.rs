@@ -102,6 +102,7 @@ impl Switch {
 
 pub fn switch_for(
     status: Option<VideoStatus>,
+    wanted: impl Fn(VideoKind) -> bool,
     local: bool,
     track: &Track,
     known_video: Option<&str>,
@@ -111,6 +112,7 @@ pub fn switch_for(
     }
     match status {
         Some(status) if status.on => Some(Switch::ToAudio(status.kind)),
+        Some(status) if wanted(status.kind) => None,
         Some(status) => Some(Switch::ToVideo(status.kind)),
         None if track.is_track() => known_video
             .filter(|video| *video != track.uri)
@@ -255,8 +257,13 @@ impl OpenMusic {
             .get(&track.uri)
             .cloned()
             .flatten();
+        let prefs = &self.settings.content;
         switch_for(
             self.video_status(),
+            |kind| match kind {
+                VideoKind::Music => prefs.music_videos,
+                VideoKind::Podcast => prefs.video_podcasts,
+            },
             self.playback.now.local,
             track,
             known.as_deref(),
@@ -1006,9 +1013,12 @@ mod tests {
 
     #[test]
     fn offers_the_switch_that_fits_what_plays() {
+        let off = |_: VideoKind| false;
+        let on = |_: VideoKind| true;
         assert_eq!(
             switch_for(
                 status(VideoKind::Podcast, true),
+                on,
                 true,
                 &track(EPISODE),
                 None
@@ -1016,19 +1026,39 @@ mod tests {
             Some(Switch::ToAudio(VideoKind::Podcast))
         );
         assert_eq!(
-            switch_for(status(VideoKind::Music, false), true, &track(VIDEO), None),
+            switch_for(
+                status(VideoKind::Music, false),
+                off,
+                true,
+                &track(VIDEO),
+                None
+            ),
             Some(Switch::ToVideo(VideoKind::Music))
         );
         assert_eq!(
-            switch_for(None, true, &track(SONG), Some(VIDEO)),
+            switch_for(
+                status(VideoKind::Music, false),
+                on,
+                true,
+                &track(VIDEO),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            switch_for(None, off, true, &track(SONG), Some(VIDEO)),
             Some(Switch::Watch(VIDEO.into()))
         );
-        assert_eq!(switch_for(None, true, &track(SONG), Some(SONG)), None);
-        assert_eq!(switch_for(None, true, &track(SONG), None), None);
-        assert_eq!(switch_for(None, true, &track(EPISODE), Some(VIDEO)), None);
+        assert_eq!(switch_for(None, on, true, &track(SONG), Some(SONG)), None);
+        assert_eq!(switch_for(None, on, true, &track(SONG), None), None);
+        assert_eq!(
+            switch_for(None, on, true, &track(EPISODE), Some(VIDEO)),
+            None
+        );
         assert_eq!(
             switch_for(
                 status(VideoKind::Podcast, true),
+                on,
                 false,
                 &track(EPISODE),
                 None
