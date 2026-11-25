@@ -316,15 +316,18 @@ impl OpenMusic {
                         row.bg(rgba(palette.accent << 8 | 0x33))
                     })
                     .hover(move |row| row.bg(rgba(palette.press)))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| match (&click, &context) {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.refuses_skipped(queue.get(index), context.as_deref(), cx) {
+                            return;
+                        }
+                        match (&click, &context) {
                             (Some(click), _) => click(this, &queue, index, window, cx),
                             (None, _) if this.refuses_explicit(queue.get(index), cx) => {}
                             (None, _) if this.plays_local_row(&queue, index, cx) => {}
                             (None, Some(context)) => this.play_context(context, &queue, index, cx),
                             (None, None) => this.play(&queue, index, cx),
-                        }),
-                    )
+                        }
+                    }))
                     .when_some(options.menu_surface, |row_element, surface| {
                         row_element.on_mouse_down(
                             MouseButton::Right,

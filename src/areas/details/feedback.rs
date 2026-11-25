@@ -29,6 +29,7 @@ pub const INCLUDE: &str = "Include in your taste profile";
 pub const BAN: &str = "Don't play this artist";
 pub const UNBAN: &str = "Allow this artist to play";
 pub const BANNED: &str = "Ok, we won’t play music from this artist again.";
+pub const ARTIST_REFUSED: &str = "You asked us not to play this artist.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Load {
@@ -270,6 +271,30 @@ fn mark_in(set: &mut HashSet<String>, uri: &str, on: bool) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Artist(String),
+    Hidden(Ban),
+}
+
+pub fn refusal(sets: &Sets, track: &Track, context: Option<&str>) -> Option<Refusal> {
+    if !track.is_track() {
+        return None;
+    }
+    if let Some(artist) = first_artist(track).filter(|artist| sets.is_banned(artist)) {
+        return Some(Refusal::Artist(artist.to_owned()));
+    }
+    context
+        .and_then(hide_context)
+        .filter(|context| sets.is_hidden(&track.uri, context))
+        .map(|context| {
+            Refusal::Hidden(Ban {
+                track: track.uri.clone(),
+                context,
+            })
+        })
+}
+
 pub fn first_artist(track: &Track) -> Option<&str> {
     track
         .artists
@@ -458,6 +483,43 @@ impl OpenMusic {
         self.send(Command::Ban { uri, banned });
     }
 
+    pub fn refuses_skipped(
+        &mut self,
+        track: Option<&Track>,
+        context: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(refused) = track.and_then(|track| refusal(&self.details.sets, track, context))
+        else {
+            return false;
+        };
+        match refused {
+            Refusal::Artist(artist) => self.show_toast(
+                ARTIST_REFUSED,
+                Some(Rc::new(
+                    move |app: &mut OpenMusic, cx: &mut Context<OpenMusic>| {
+                        app.set_artist_banned(artist.clone(), false);
+                        cx.notify();
+                    },
+                )),
+            ),
+            Refusal::Hidden(ban) => {
+                let name = self.context_name(&ban.context);
+                self.show_toast(
+                    format!("You hid this song in {name}."),
+                    Some(Rc::new(
+                        move |app: &mut OpenMusic, cx: &mut Context<OpenMusic>| {
+                            app.set_hidden(ban.clone(), BanProvider::Context, false);
+                            cx.notify();
+                        },
+                    )),
+                );
+            }
+        }
+        cx.notify();
+        true
+    }
+
     fn playing_in(&self, ban: &Ban) -> bool {
         let now = &self.playback.now;
         now.track
@@ -538,6 +600,44 @@ mod tests {
         assert!(sets.is_banned(RADIOHEAD));
         sets.banned_written(RADIOHEAD, true, false);
         assert!(!sets.is_banned(RADIOHEAD));
+    }
+
+    #[test]
+    fn refuses_hidden_songs_and_banned_artists() {
+        let mut sets = Sets::default();
+        sets.apply(Ok(Snapshot {
+            hidden: vec![ban()],
+            banned: vec![BOWIE.into()],
+            ..Snapshot::default()
+        }));
+        let song = Track::placeholder(SONG);
+        assert_eq!(
+            refusal(&sets, &song, Some(RADIO)),
+            Some(Refusal::Hidden(ban()))
+        );
+        assert_eq!(
+            refusal(
+                &sets,
+                &song,
+                Some("spotify:user:someone:playlist:37i9dQZF1E8Redacted001")
+            ),
+            Some(Refusal::Hidden(ban()))
+        );
+        assert_eq!(refusal(&sets, &song, Some("spotify:playlist:other")), None);
+        assert_eq!(refusal(&sets, &song, None), None);
+        let by_bowie = Track {
+            artist_uri: Some(BOWIE.into()),
+            ..Track::placeholder("spotify:track:0000000000000000000002")
+        };
+        assert_eq!(
+            refusal(&sets, &by_bowie, None),
+            Some(Refusal::Artist(BOWIE.into()))
+        );
+        let episode = Track {
+            artist_uri: Some(BOWIE.into()),
+            ..Track::placeholder("spotify:episode:0000000000000000000003")
+        };
+        assert_eq!(refusal(&sets, &episode, Some(RADIO)), None);
     }
 
     #[test]

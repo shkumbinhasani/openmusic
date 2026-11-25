@@ -1,8 +1,8 @@
 use gpui::{AnyElement, Context, prelude::*};
-use spotify_client::{Track, details::hide_context};
+use spotify_client::Track;
 
 use super::{
-    feedback::first_artist,
+    feedback::refusal,
     go,
     menu::{self, Facts},
     track::ALBUM_ROWS,
@@ -55,16 +55,7 @@ pub fn row_accessories(
 }
 
 pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, options: &RowOptions) -> bool {
-    let sets = &app.details.sets;
-    let hidden = || {
-        options
-            .context
-            .as_deref()
-            .and_then(hide_context)
-            .is_some_and(|context| sets.is_hidden(&track.uri, &context))
-    };
-    let banned = || first_artist(track).is_some_and(|artist| sets.is_banned(artist));
-    track.is_track() && (hidden() || banned())
+    refusal(&app.details.sets, track, options.context.as_deref()).is_some()
 }
 
 pub fn row_highlighted(app: &OpenMusic, track: &Track, row: Row) -> bool {
