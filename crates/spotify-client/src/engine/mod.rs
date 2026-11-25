@@ -821,6 +821,9 @@ impl Engine {
             return Ok(());
         };
         let position = playback.position_ms;
+        if matches!(self.revive_here(Restore::Resume).await, Ok(true)) {
+            return Ok(());
+        }
         let own = self.device_id.clone();
         self.send_command(&own, connect::play_command(&[track.uri], 0, position))
             .await

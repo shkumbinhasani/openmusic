@@ -1060,7 +1060,7 @@ impl OpenMusic {
         let Some(device) = model.devices.iter().find(|device| device.id == id) else {
             return;
         };
-        let idle_here = device.this_mac && model.active_device_id.is_none();
+        let idle_here = device.this_mac && model.active_device_id.is_none() && !model.orphaned();
         if device.active || device.blocked.is_some() || idle_here {
             return;
         }

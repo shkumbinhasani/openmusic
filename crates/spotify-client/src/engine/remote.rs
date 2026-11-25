@@ -331,8 +331,15 @@ impl Engine {
         let name = device_name(&device);
         let playback = self.playback.as_ref();
         let nothing_active = playback.is_none_or(|playback| playback.active_device_id.is_none());
-        if device.active || (here && nothing_active) {
+        if device.active {
             return Ok(());
+        }
+        if here && nothing_active {
+            return self
+                .revive_here(Restore::Keep)
+                .await
+                .map(|_| ())
+                .map_err(|_| anyhow!("Couldn’t connect to {name}."));
         }
         if let Some(reason) = &device.blocked {
             bail!(blocked_notice(&name, reason));
@@ -349,6 +356,15 @@ impl Engine {
                 Err(anyhow!("Couldn’t connect to {name}."))
             }
         }
+    }
+
+    pub(super) async fn revive_here(&mut self, restore: Restore) -> Result<bool> {
+        if self.redirected() || !self.playback.as_ref().is_some_and(Playback::orphaned) {
+            return Ok(false);
+        }
+        let own = self.device_id.clone();
+        connect::transfer(&self.api, &own, &own, restore, None).await?;
+        Ok(true)
     }
 
     async fn device_volume(&mut self, id: String, volume: u16) -> Result<()> {

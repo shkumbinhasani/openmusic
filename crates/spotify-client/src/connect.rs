@@ -332,6 +332,10 @@ impl Playback {
     pub fn active_device(&self) -> Option<&ConnectDevice> {
         self.devices.iter().find(|device| device.active)
     }
+
+    pub fn orphaned(&self) -> bool {
+        self.active_device_id.is_none() && self.track.is_some()
+    }
 }
 
 pub fn playback(cluster: &Cluster, own_device_id: &str) -> Playback {
@@ -1754,12 +1758,15 @@ mod tests {
         assert_eq!(model.position_ms, 30_000);
         assert!(model.allowed.resume && !model.allowed.pause);
         assert!(model.track.is_some());
+        assert!(model.orphaned());
+        assert!(!playback(&self::cluster(), OWN).orphaned());
 
         let empty = Cluster {
             device: cluster.device.clone(),
             ..Default::default()
         };
         let model = playback(&empty, OWN);
+        assert!(!model.orphaned());
         assert_eq!(model.allowed, Allowed::default());
         assert_eq!(model.queue, Queue::default());
         assert!(model.track.is_none());
