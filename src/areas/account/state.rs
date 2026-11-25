@@ -3,7 +3,10 @@ use std::{collections::HashSet, path::Path};
 use gpui::{App, Context, Entity, PromptButton, PromptLevel, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spotify_client::account::{AccountInfo, Explicit};
+use spotify_client::{
+    Track,
+    account::{AccountInfo, Explicit},
+};
 
 use super::{
     friends::{self, Friends},
@@ -14,6 +17,7 @@ use super::{
     privacy::{self, PrivacyState},
     profile::{self, Profiles},
     profile_view::{FOLLOW_PROFILE, MORE_PROFILE, UNBLOCK_PROFILE},
+    view::filtered,
     worker::{Command, Event},
 };
 use crate::{
@@ -212,6 +216,8 @@ pub const FAMILY_URL: &str = "https://www.spotify.com/account/family/";
 pub const PREMIUM_URL: &str = "https://www.spotify.com/premium/";
 pub const PREMIUM_KEY: &str = "account-premium";
 pub const FREE_NOTICE: &str = "Playing on this Mac needs Spotify Premium.";
+pub const EXPLICIT_NOTICE: &str =
+    "This song is explicit, and your account filters explicit content.";
 pub const FREE_MESSAGE: &str = "Playing on this Mac needs Spotify Premium. You can still browse your library and control Spotify on your other devices.";
 
 #[derive(Default)]
@@ -252,6 +258,15 @@ impl OpenMusic {
             return false;
         }
         self.show_toast(FREE_NOTICE, None);
+        cx.notify();
+        true
+    }
+
+    pub fn refuses_explicit(&mut self, track: Option<&Track>, cx: &mut Context<Self>) -> bool {
+        if !track.is_some_and(|track| filtered(self.account(), track)) {
+            return false;
+        }
+        self.show_toast(EXPLICIT_NOTICE, None);
         cx.notify();
         true
     }
