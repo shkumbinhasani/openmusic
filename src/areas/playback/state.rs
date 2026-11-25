@@ -129,6 +129,13 @@ pub struct ContextShuffle {
     requested: bool,
 }
 
+impl ContextShuffle {
+    pub fn remembered(&self) -> Option<Shuffle> {
+        self.chosen
+            .or_else(|| self.server.map(|options| options.shuffle))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingTransfer {
     pub id: String,
@@ -522,11 +529,7 @@ impl OpenMusic {
         self.playback
             .contexts
             .get(uri)
-            .and_then(|state| {
-                state
-                    .chosen
-                    .or_else(|| state.server.map(|options| options.shuffle))
-            })
+            .and_then(ContextShuffle::remembered)
             .unwrap_or_default()
     }
 
@@ -534,9 +537,22 @@ impl OpenMusic {
         if self.playing_context(uri) {
             return self.smart_shuffle_allowed();
         }
-        self.playback.contexts.get(uri).is_some_and(|state| {
-            state.smart == Some(true) && state.server.is_none_or(|options| options.smart_allowed)
-        })
+        !self.in_jam()
+            && self.playback.contexts.get(uri).is_some_and(|state| {
+                state.smart == Some(true)
+                    && state.server.is_none_or(|options| options.smart_allowed)
+            })
+    }
+
+    pub fn context_shuffle_allowed(&self, uri: &str) -> bool {
+        if self.playing_context(uri) {
+            return self.playback_allowed().shuffle;
+        }
+        self.playback
+            .contexts
+            .get(uri)
+            .and_then(|state| state.server)
+            .is_none_or(|options| options.shuffle_allowed)
     }
 
     pub fn toggle_context_shuffle(&mut self, uri: &str, cx: &mut Context<Self>) {
@@ -544,15 +560,9 @@ impl OpenMusic {
             self.toggle_shuffle(cx);
             return;
         }
-        let allowed = self
-            .playback
-            .contexts
-            .get(uri)
-            .and_then(|state| state.server)
-            .is_none_or(|options| options.shuffle_allowed);
         let next = next_shuffle(
             self.context_shuffle(uri),
-            allowed,
+            self.context_shuffle_allowed(uri),
             self.context_smart_available(uri),
         );
         self.playback
@@ -564,12 +574,15 @@ impl OpenMusic {
     }
 
     pub fn context_play_options(&self, uri: &str) -> PlayOptions {
+        if self.playing_context(uri) {
+            return PlayOptions::default();
+        }
         PlayOptions {
             shuffle_override: self
                 .playback
                 .contexts
                 .get(uri)
-                .and_then(|state| state.chosen),
+                .and_then(ContextShuffle::remembered),
             ..PlayOptions::default()
         }
     }
@@ -585,7 +598,7 @@ impl OpenMusic {
         self.playback.notice = None;
         self.send(Command::ShufflePlay {
             uri: uri.to_owned(),
-            options: self.titled_options(uri, PlayOptions::default()),
+            options: self.titled_options(uri, self.context_play_options(uri)),
         });
         cx.notify();
     }
@@ -884,6 +897,13 @@ impl OpenMusic {
             .is_some_and(|(mode, _)| mode == playback.repeat)
         {
             self.playback.pending_repeat = None;
+        }
+        if let Some(state) = playback
+            .context_uri
+            .as_ref()
+            .and_then(|uri| self.playback.contexts.get_mut(uri))
+        {
+            state.chosen = Some(playback.shuffle);
         }
         if self
             .playback
@@ -1872,6 +1892,25 @@ mod tests {
         assert_eq!(next_shuffle(Shuffle::On, true, false), Shuffle::Off);
         assert_eq!(next_shuffle(Shuffle::Smart, true, false), Shuffle::Off);
         assert_eq!(next_shuffle(Shuffle::Off, false, true), Shuffle::Off);
+    }
+
+    #[test]
+    fn remembers_the_pick_before_the_server_mode() {
+        assert_eq!(ContextShuffle::default().remembered(), None);
+        let server = ContextShuffle {
+            server: Some(ContextOptions {
+                shuffle: Shuffle::On,
+                shuffle_allowed: true,
+                smart_allowed: true,
+            }),
+            ..ContextShuffle::default()
+        };
+        assert_eq!(server.remembered(), Some(Shuffle::On));
+        let picked = ContextShuffle {
+            chosen: Some(Shuffle::Smart),
+            ..server
+        };
+        assert_eq!(picked.remembered(), Some(Shuffle::Smart));
     }
 
     #[test]

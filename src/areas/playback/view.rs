@@ -586,8 +586,15 @@ pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
 }
 
 fn shuffle_button(app: &OpenMusic) -> ButtonSpec {
-    let mode = app.shuffle_mode();
-    let tooltip = match next_shuffle(mode, true, app.smart_shuffle_allowed()) {
+    shuffle_spec(
+        app.shuffle_mode(),
+        app.playback_allowed().shuffle,
+        app.smart_shuffle_allowed(),
+    )
+}
+
+pub fn shuffle_spec(mode: Shuffle, enabled: bool, smart: bool) -> ButtonSpec {
+    let tooltip = match next_shuffle(mode, true, smart) {
         Shuffle::On => "Enable shuffle",
         Shuffle::Smart => "Enable Smart Shuffle",
         Shuffle::Off => "Disable shuffle",
@@ -599,7 +606,7 @@ fn shuffle_button(app: &OpenMusic) -> ButtonSpec {
             "shuffle"
         }),
         prominent: mode != Shuffle::Off,
-        enabled: app.playback_allowed().shuffle,
+        enabled,
         tooltip: Some(tooltip.to_owned()),
     }
 }
@@ -798,4 +805,27 @@ pub fn row_accessories(
 
 pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shows_the_shuffle_mode_and_what_a_press_does() {
+        let off = shuffle_spec(Shuffle::Off, true, true);
+        assert_eq!(off.label, Label::Symbol("shuffle"));
+        assert!(!off.prominent && off.enabled);
+        assert_eq!(off.tooltip.as_deref(), Some("Enable shuffle"));
+        let on = shuffle_spec(Shuffle::On, false, true);
+        assert!(on.prominent && !on.enabled);
+        assert_eq!(on.tooltip.as_deref(), Some("Enable Smart Shuffle"));
+        assert_eq!(
+            shuffle_spec(Shuffle::On, true, false).tooltip.as_deref(),
+            Some("Disable shuffle")
+        );
+        let smart = shuffle_spec(Shuffle::Smart, true, true);
+        assert_eq!(smart.label, Label::Symbol("sparkles"));
+        assert_eq!(smart.tooltip.as_deref(), Some("Disable shuffle"));
+    }
 }

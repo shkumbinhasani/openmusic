@@ -14,6 +14,7 @@ use spotify_client::{
     Track,
     blend::{self, Invitation, InvitationState},
     catalog::{Capabilities, Collection},
+    connect::{self, Shuffle},
     playlist::{
         self, Details, EditTarget, Folder, ItemPosition, Level, Permissions, Push, RootEntry,
         RootNode, RootPlace, RootPlaylist, Rootlist, TargetKind,
@@ -745,16 +746,26 @@ impl OpenMusic {
         cx.notify();
     }
 
-    pub fn shuffle_collection(&mut self, cx: &mut Context<Self>) {
+    pub fn play_collection(&mut self, cx: &mut Context<Self>) {
         let Some((uri, Ok(collection))) = &self.playlists.collection else {
             return;
         };
-        if collection.tracks.is_empty() {
-            return;
-        }
         let (uri, tracks) = (uri.clone(), collection.tracks.clone());
-        if !self.shuffles_local_rows(&tracks, cx) {
+        let options = self.context_play_options(&uri);
+        if options
+            .shuffle_override
+            .is_none_or(|mode| mode == Shuffle::Off)
+        {
+            self.play_context_from(&uri, &tracks, 0, connect::ORIGIN, options, cx);
+        } else if !self.shuffles_local_rows(&tracks, cx) {
             self.shuffle_play(&uri, cx);
+        }
+    }
+
+    pub fn toggle_collection_shuffle(&mut self, cx: &mut Context<Self>) {
+        if let Some((uri, Ok(_))) = &self.playlists.collection {
+            let uri = uri.clone();
+            self.toggle_context_shuffle(&uri, cx);
         }
     }
 
@@ -2043,7 +2054,7 @@ pub fn debug(
             row_dropped(app, &drag, at, window, cx);
         }
         ("playlist-members", [uri]) => app.show_collaborators(uri, window, cx),
-        ("playlist-shuffle", []) => app.shuffle_collection(cx),
+        ("playlist-shuffle", []) => app.toggle_collection_shuffle(cx),
         ("blend", []) => write("blend.txt", describe_blend(app)),
         ("blend", [input]) => {
             if app.open_blend_invitation(input) {
@@ -2215,13 +2226,8 @@ pub fn on_press(
     cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
-        "play-collection" => {
-            if let Some((uri, Ok(collection))) = &app.playlists.collection {
-                let (uri, tracks) = (uri.clone(), collection.tracks.clone());
-                app.play_context(&uri, &tracks, 0, cx);
-            }
-        }
-        "shuffle-collection" => app.shuffle_collection(cx),
+        "play-collection" => app.play_collection(cx),
+        "shuffle-collection" => app.toggle_collection_shuffle(cx),
         "blend-action" => app.blend_action(),
         "follow-collection" => {
             if let Page::Collection(uri) = &app.page

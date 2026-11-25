@@ -20,6 +20,7 @@ use spotify_client::{
 use super::state::{BlendWork, PlaylistInfo, owner_label, source_name};
 use crate::{
     app::{OpenMusic, Page},
+    areas::playback::view::shuffle_spec,
     icons,
     overlay::Label,
     ui::{
@@ -422,11 +423,16 @@ impl OpenMusic {
                     .w(px(96.)),
             )
             .when(!collection.tracks.is_empty(), |actions| {
+                let shuffle = shuffle_spec(
+                    self.context_shuffle(loaded),
+                    self.context_shuffle_allowed(loaded),
+                    self.context_smart_available(loaded),
+                );
                 actions.child(
-                    self.control(
+                    self.glass_control(
                         "shuffle-collection",
-                        Label::Symbol("shuffle"),
-                        false,
+                        shuffle,
+                        !self.modal_open(),
                         palette,
                         cx,
                     )
