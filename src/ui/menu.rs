@@ -193,6 +193,7 @@ pub enum MenuItem {
         search: Option<&'static str>,
         id: Option<&'static str>,
     },
+    Volume(f32),
 }
 
 impl MenuItem {
@@ -358,6 +359,7 @@ fn lower(
             MenuItem::Note(text) => Entry::Note(text),
             MenuItem::Header(text) => Entry::Header(text),
             MenuItem::Separator => Entry::Separator,
+            MenuItem::Volume(value) => Entry::Volume(value),
             MenuItem::Submenu {
                 title,
                 symbol,
@@ -419,6 +421,7 @@ pub fn dump(entries: &[Entry], depth: usize, lines: &mut Vec<String>) {
             Entry::Note(text) => lines.push(format!("{indent}{text} [x]")),
             Entry::Header(text) => lines.push(format!("{indent}# {text}")),
             Entry::Separator => lines.push(format!("{indent}──")),
+            Entry::Volume(value) => lines.push(format!("{indent}[volume {value:.2}]")),
             Entry::Submenu {
                 title,
                 symbol,
@@ -440,9 +443,17 @@ pub fn dump(entries: &[Entry], depth: usize, lines: &mut Vec<String>) {
     }
 }
 
+pub fn describe_items(items: Vec<MenuItem>) -> Vec<String> {
+    let entries = lower(items, &mut Vec::new(), &mut HashMap::new());
+    let mut lines = Vec::new();
+    dump(&entries, 0, &mut lines);
+    lines
+}
+
 pub enum Place {
     Point(Point<Pixels>),
     Under(&'static str),
+    Above(&'static str),
 }
 
 #[derive(Default)]
@@ -481,6 +492,7 @@ impl OpenMusic {
         let opened = match place {
             Place::Point(at) => overlay::context_menu(entries, at),
             Place::Under(anchor) => overlay::menu_at(anchor, entries),
+            Place::Above(anchor) => overlay::menu_above(anchor, entries),
         };
         if opened {
             self.menus.row = row;
@@ -732,6 +744,7 @@ mod tests {
                 MenuItem::Action { title, .. } | MenuItem::Submenu { title, .. } => title.clone(),
                 MenuItem::Note(text) | MenuItem::Header(text) => text.clone(),
                 MenuItem::Separator => "--".into(),
+                MenuItem::Volume(_) => "volume".into(),
             })
             .collect()
     }

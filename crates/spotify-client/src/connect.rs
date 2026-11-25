@@ -17,6 +17,7 @@ use crate::{
     api::{Api, Body, HttpStatus},
     catalog::{Track, image_url},
     dealer::Message,
+    pathfinder::{self, Operation},
 };
 
 pub const CLUSTER_URI: &str = "hm://connect-state/v1/cluster";
@@ -201,6 +202,25 @@ pub struct Queue {
     pub next_up: Vec<QueueItem>,
     pub raw_next: Vec<ProvidedTrack>,
     pub raw_prev: Vec<ProvidedTrack>,
+}
+
+impl Queue {
+    pub fn recent(&self, limit: usize) -> Vec<QueueItem> {
+        let mut seen = HashSet::new();
+        self.raw_prev
+            .iter()
+            .rev()
+            .filter(|track| {
+                !DELIMITERS.contains(&track.uri.as_str())
+                    && !track.uri.starts_with("spotify:meta:")
+                    && !flagged(track, "hidden")
+                    && !flagged(track, "hidden_in_queue")
+            })
+            .filter(|track| track.uid.is_empty() || seen.insert(track.uid.as_str()))
+            .take(limit)
+            .map(QueueItem::of)
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -858,6 +878,350 @@ pub fn play_context_command(
     })
 }
 
+pub fn shuffle_play_command(context: &str, origin: &str, options: &PlayOptions) -> Value {
+    let options = PlayOptions {
+        shuffle_override: Some(
+            options
+                .shuffle_override
+                .filter(|mode| *mode != Shuffle::Off)
+                .unwrap_or(Shuffle::On),
+        ),
+        ..options.clone()
+    };
+    let mut command = play_context_command(context, 0, None, origin, &options);
+    if let Some(play_options) = command["options"].as_object_mut() {
+        play_options.remove("skip_to");
+    }
+    command
+}
+
+fn enhancement(mode: Shuffle) -> &'static str {
+    if mode == Shuffle::Smart {
+        "RECOMMENDATION"
+    } else {
+        "NONE"
+    }
+}
+
+pub fn shuffle_command(mode: Shuffle, use_options: bool) -> Value {
+    if use_options {
+        json!({
+            "endpoint": "set_options",
+            "shuffling_context": mode != Shuffle::Off,
+            "modes": { "context_enhancement": enhancement(mode) },
+        })
+    } else {
+        json!({ "endpoint": "set_shuffling_context", "value": mode != Shuffle::Off })
+    }
+}
+
+pub fn repeat_commands(mode: Repeat, allowed: &Allowed, use_options: bool) -> Vec<Value> {
+    let context = mode != Repeat::Off;
+    let track = mode == Repeat::Track;
+    if use_options {
+        let mut command = json!({ "endpoint": "set_options" });
+        if allowed.repeat_context {
+            command["repeating_context"] = json!(context);
+        }
+        if allowed.repeat_track {
+            command["repeating_track"] = json!(track);
+        }
+        return if command.as_object().is_some_and(|fields| fields.len() > 1) {
+            vec![command]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut commands = Vec::new();
+    if allowed.repeat_context {
+        commands.push(json!({ "endpoint": "set_repeating_context", "value": context }));
+    }
+    if allowed.repeat_track {
+        commands.push(json!({ "endpoint": "set_repeating_track", "value": track }));
+    }
+    commands
+}
+
+pub fn queue_item(track: &ProvidedTrack) -> Value {
+    let mut item = json!({
+        "uri": track.uri,
+        "uid": track.uid,
+        "metadata": track.metadata,
+        "provider": track.provider,
+    });
+    if !track.removed.is_empty() {
+        item["removed"] = json!(track.removed);
+    }
+    if !track.blocked.is_empty() {
+        item["blocked"] = json!(track.blocked);
+    }
+    item
+}
+
+pub fn set_queue_command(next: &[ProvidedTrack], prev: &[ProvidedTrack], revision: &str) -> Value {
+    json!({
+        "endpoint": "set_queue",
+        "next_tracks": next.iter().map(queue_item).collect::<Vec<_>>(),
+        "prev_tracks": prev.iter().map(queue_item).collect::<Vec<_>>(),
+        "queue_revision": revision,
+    })
+}
+
+pub fn skip_to_command(item: &ProvidedTrack) -> Value {
+    json!({ "endpoint": "skip_next", "track": queue_item(item) })
+}
+
+pub fn add_to_queue_command(uri: &str) -> Value {
+    json!({
+        "endpoint": "add_to_queue",
+        "track": { "uri": uri, "metadata": { "is_queued": "true" }, "provider": "queue" },
+    })
+}
+
+pub fn play_next_command(uris: &[String]) -> Value {
+    json!({
+        "endpoint": "play_as_next_in_queue",
+        "tracks": uris
+            .iter()
+            .map(|uri| json!({ "uri": uri, "uid": "", "metadata": {} }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+pub const RESTART_AFTER_MS: u32 = 3000;
+
+pub fn previous_command(position_ms: u32, allowed: &Allowed) -> Option<Value> {
+    let restart = json!({ "endpoint": "seek_to", "value": 0 });
+    if position_ms >= RESTART_AFTER_MS && allowed.seek {
+        return Some(restart);
+    }
+    if allowed.skip_prev {
+        return Some(json!({ "endpoint": "skip_prev" }));
+    }
+    allowed.seek.then_some(restart)
+}
+
+pub const KEY_VOLUME_STEP: u16 = 4096;
+
+pub fn volume_unit(steps: u32) -> f64 {
+    f64::from(u16::MAX) / f64::from(steps.max(1))
+}
+
+pub fn volume_step(steps: u32) -> u16 {
+    volume_unit(steps)
+        .max(f64::from(KEY_VOLUME_STEP))
+        .ceil()
+        .min(f64::from(u16::MAX)) as u16
+}
+
+pub fn stepped_volume(current: u16, up: bool, steps: u32) -> u16 {
+    let unit = volume_unit(steps);
+    let step = f64::from(volume_step(steps));
+    let wanted = f64::from(current) + if up { step } else { -step };
+    ((wanted / unit).round() * unit)
+        .round()
+        .clamp(0., f64::from(u16::MAX)) as u16
+}
+
+pub fn update_context_command(context_uri: &str, session_id: &str) -> Value {
+    json!({
+        "endpoint": "update_context",
+        "context": { "url": format!("context://{context_uri}") },
+        "session_id": session_id,
+    })
+}
+
+fn same_item(track: &ProvidedTrack, key: &QueueKey) -> bool {
+    if !track.uid.is_empty() && !key.uid.is_empty() {
+        let iteration = track.metadata.get("iteration").map_or("", String::as_str);
+        return track.uid == key.uid && iteration == key.iteration;
+    }
+    track.uri == key.uri
+}
+
+fn is_queued(track: &ProvidedTrack) -> bool {
+    track.provider == "queue"
+}
+
+fn mark_queued(track: &mut ProvidedTrack) {
+    track.provider = "queue".into();
+    track.metadata.insert("is_queued".into(), "true".into());
+}
+
+pub fn queue_without(next: &[ProvidedTrack], keys: &[QueueKey]) -> Vec<ProvidedTrack> {
+    next.iter()
+        .filter(|track| !keys.iter().any(|key| same_item(track, key)))
+        .cloned()
+        .collect()
+}
+
+pub fn queue_cleared(next: &[ProvidedTrack]) -> Vec<ProvidedTrack> {
+    next.iter()
+        .filter(|track| !is_queued(track))
+        .cloned()
+        .collect()
+}
+
+pub fn queue_moved(
+    next: &[ProvidedTrack],
+    moved: &[QueueKey],
+    anchor: &QueueKey,
+    after: bool,
+) -> Vec<ProvidedTrack> {
+    if moved.iter().any(|key| key == anchor) {
+        return next.to_vec();
+    }
+    let (mut taken, mut rest): (Vec<ProvidedTrack>, Vec<ProvidedTrack>) = next
+        .iter()
+        .cloned()
+        .partition(|track| moved.iter().any(|key| same_item(track, key)));
+    let Some(position) = rest.iter().position(|track| same_item(track, anchor)) else {
+        return next.to_vec();
+    };
+    if taken.is_empty() {
+        return next.to_vec();
+    }
+    if is_queued(&rest[position]) {
+        taken.iter_mut().for_each(mark_queued);
+    }
+    let at = if after { position + 1 } else { position };
+    rest.splice(at..at, taken);
+    rest
+}
+
+fn transparent(track: &ProvidedTrack) -> bool {
+    track.uri.starts_with("spotify:meta:")
+        || flagged(track, "hidden")
+        || flagged(track, "is_narration")
+}
+
+pub fn queue_with_added(next: &[ProvidedTrack], uris: &[String]) -> Vec<ProvidedTrack> {
+    let mut at = 0;
+    for (index, track) in next.iter().enumerate() {
+        if DELIMITERS.contains(&track.uri.as_str()) {
+            break;
+        }
+        if is_queued(track) || flagged(track, "is_narration") {
+            at = index + 1;
+        } else if !transparent(track) {
+            break;
+        }
+    }
+    let added = uris.iter().map(|uri| {
+        let mut track = ProvidedTrack {
+            uri: uri.clone(),
+            ..Default::default()
+        };
+        mark_queued(&mut track);
+        track
+    });
+    let mut list = next.to_vec();
+    list.splice(at..at, added);
+    list
+}
+
+pub const SMART_SHUFFLE: Operation = Operation::query(
+    "smartShuffle",
+    "3384085be84fbf2f855b024f99bc06cded1c0fd71af3a8fb8abb84e9656faba2",
+);
+pub const CONTEXT_PLAYER_OPTIONS: Operation = Operation::query(
+    "centralisedStatePlayerOptions",
+    "e2dcfcab470854d4d1c7cb1a851438f14fe0a94d57db7f0b9dde492559d5395d",
+);
+pub const LIKED_SONGS_LENS: &str = "spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ";
+const PLAYER_CLIENT_VERSION: &str = "harmony:4.67.0-887cfb0c3";
+
+pub fn smart_shuffle_uri(context: &str) -> String {
+    if crate::entity::is_liked_songs(context) {
+        LIKED_SONGS_LENS.to_owned()
+    } else {
+        context.to_owned()
+    }
+}
+
+pub fn parse_smart_shuffle(data: &Value) -> bool {
+    data["lookup"]
+        .as_array()
+        .and_then(|lookup| lookup.first())
+        .and_then(|entry| entry["data"]["smartShuffle"]["available"].as_bool())
+        .unwrap_or(false)
+}
+
+pub async fn smart_shuffle(api: &Api, context: &str) -> Result<bool> {
+    let data = pathfinder::query(
+        api,
+        SMART_SHUFFLE,
+        json!({ "uris": [smart_shuffle_uri(context)] }),
+    )
+    .await?;
+    Ok(parse_smart_shuffle(&data))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextOptions {
+    pub shuffle: Shuffle,
+    pub shuffle_allowed: bool,
+    pub smart_allowed: bool,
+}
+
+pub fn context_options_variables(context: &str, device_id: &str) -> Value {
+    json!({
+        "uri": context,
+        "deviceInfo": {
+            "deviceId": device_id,
+            "deviceType": "computer",
+            "clientId": crate::oauth::DESKTOP_CLIENT_ID,
+            "clientVersion": PLAYER_CLIENT_VERSION,
+            "productId": "1",
+        },
+    })
+}
+
+pub fn parse_context_options(data: &Value) -> Option<ContextOptions> {
+    let options = data
+        .get("playerOptions")
+        .filter(|value| value.is_object())?;
+    let modes = options["modes"].as_array();
+    let enhancement = modes
+        .into_iter()
+        .flatten()
+        .find(|mode| mode["modeKey"] == "context_enhancement")
+        .and_then(|mode| mode["modeValue"].as_str())
+        .unwrap_or("NONE");
+    let shuffling = options["shufflingContext"].as_bool().unwrap_or(false);
+    let restrictions = &options["restrictions"];
+    let empty = |value: &Value| value.as_array().is_none_or(|reasons| reasons.is_empty());
+    let shuffle_allowed = empty(&restrictions["disallowTogglingShuffleReasons"]);
+    let recommendation_free = restrictions["disallowSettingModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|mode| mode["modeKey"] == "context_enhancement")
+        .flat_map(|mode| mode["modeRestrictions"].as_array().into_iter().flatten())
+        .filter(|restriction| restriction["modeValue"] == "RECOMMENDATION")
+        .flat_map(|restriction| restriction["reasons"].as_array().into_iter().flatten())
+        .all(|reason| reason == "already_set");
+    Some(ContextOptions {
+        shuffle: match (shuffling, enhancement) {
+            (true, "RECOMMENDATION") => Shuffle::Smart,
+            (true, _) => Shuffle::On,
+            _ => Shuffle::Off,
+        },
+        shuffle_allowed,
+        smart_allowed: shuffle_allowed && recommendation_free,
+    })
+}
+
+pub async fn context_options(api: &Api, context: &str, device_id: &str) -> Result<ContextOptions> {
+    let data = pathfinder::query(
+        api,
+        CONTEXT_PLAYER_OPTIONS,
+        context_options_variables(context, device_id),
+    )
+    .await?;
+    parse_context_options(&data).ok_or_else(|| anyhow::anyhow!("Spotify sent no player options."))
+}
+
 #[cfg(test)]
 mod tests {
     use spotify_proto::connectstate::{
@@ -1256,6 +1620,43 @@ mod tests {
     }
 
     #[test]
+    fn lists_recently_played_newest_first() {
+        let queue = Queue {
+            raw_prev: vec![
+                item("spotify:track:0000000000000000000000", "p0", "context", &[]),
+                item(
+                    "spotify:delimiter",
+                    "delimiter0",
+                    "context",
+                    &[("hidden", "true")],
+                ),
+                item("spotify:track:1111111111111111111111", "p1", "context", &[]),
+                item("spotify:meta:page:0", "", "context", &[]),
+                item(
+                    "spotify:track:2222222222222222222222",
+                    "p2",
+                    "context",
+                    &[("hidden", "true")],
+                ),
+                item("spotify:track:3333333333333333333333", "p1", "context", &[]),
+                item(
+                    "spotify:track:4444444444444444444444",
+                    "p4",
+                    "queue",
+                    &[("title", "Queued")],
+                ),
+            ],
+            ..Queue::default()
+        };
+        let recent = queue.recent(10);
+        let uids: Vec<&str> = recent.iter().map(|item| item.uid.as_str()).collect();
+        assert_eq!(uids, vec!["p4", "p1", "p0"]);
+        assert_eq!(recent[0].title.as_deref(), Some("Queued"));
+        assert_eq!(recent[1].uri, "spotify:track:3333333333333333333333");
+        assert_eq!(queue.recent(2).len(), 2);
+    }
+
+    #[test]
     fn lists_devices() {
         let devices = playback(&cluster(), OWN).devices;
         let summary: Vec<_> = devices
@@ -1508,6 +1909,448 @@ mod tests {
             player_options(Shuffle::Off),
             json!({"shuffling_context": false, "modes": {"context_enhancement": "NONE"}})
         );
+    }
+
+    #[test]
+    fn builds_shuffle_and_repeat_commands() {
+        assert_eq!(
+            shuffle_command(Shuffle::On, true),
+            json!({"endpoint": "set_options", "shuffling_context": true, "modes": {"context_enhancement": "NONE"}})
+        );
+        assert_eq!(
+            shuffle_command(Shuffle::Smart, true),
+            json!({"endpoint": "set_options", "shuffling_context": true, "modes": {"context_enhancement": "RECOMMENDATION"}})
+        );
+        assert_eq!(
+            shuffle_command(Shuffle::Off, true),
+            json!({"endpoint": "set_options", "shuffling_context": false, "modes": {"context_enhancement": "NONE"}})
+        );
+        assert_eq!(
+            shuffle_command(Shuffle::On, false),
+            json!({"endpoint": "set_shuffling_context", "value": true})
+        );
+        assert_eq!(
+            shuffle_command(Shuffle::Off, false),
+            json!({"endpoint": "set_shuffling_context", "value": false})
+        );
+
+        let all = Allowed {
+            repeat_context: true,
+            repeat_track: true,
+            ..Allowed::default()
+        };
+        assert_eq!(
+            repeat_commands(Repeat::Off, &all, true),
+            vec![
+                json!({"endpoint": "set_options", "repeating_context": false, "repeating_track": false})
+            ]
+        );
+        assert_eq!(
+            repeat_commands(Repeat::Context, &all, true),
+            vec![
+                json!({"endpoint": "set_options", "repeating_context": true, "repeating_track": false})
+            ]
+        );
+        assert_eq!(
+            repeat_commands(Repeat::Track, &all, true),
+            vec![
+                json!({"endpoint": "set_options", "repeating_context": true, "repeating_track": true})
+            ]
+        );
+        let track_only = Allowed {
+            repeat_track: true,
+            ..Allowed::default()
+        };
+        assert_eq!(
+            repeat_commands(Repeat::Track, &track_only, true),
+            vec![json!({"endpoint": "set_options", "repeating_track": true})]
+        );
+        assert!(repeat_commands(Repeat::Track, &Allowed::default(), true).is_empty());
+        assert_eq!(
+            repeat_commands(Repeat::Track, &all, false),
+            vec![
+                json!({"endpoint": "set_repeating_context", "value": true}),
+                json!({"endpoint": "set_repeating_track", "value": true}),
+            ]
+        );
+        assert_eq!(
+            repeat_commands(Repeat::Off, &track_only, false),
+            vec![json!({"endpoint": "set_repeating_track", "value": false})]
+        );
+    }
+
+    #[test]
+    fn builds_queue_commands() {
+        let next = vec![
+            item(
+                "spotify:track:1111111111111111111111",
+                "q1",
+                "queue",
+                &[("is_queued", "true")],
+            ),
+            ProvidedTrack {
+                removed: vec!["x".into()],
+                ..item(
+                    "spotify:delimiter",
+                    "delimiter0",
+                    "context",
+                    &[("hidden", "true")],
+                )
+            },
+        ];
+        let prev = vec![item(
+            "spotify:track:9999999999999999999999",
+            "p1",
+            "context",
+            &[],
+        )];
+        assert_eq!(
+            set_queue_command(&next, &prev, "42"),
+            json!({
+                "endpoint": "set_queue",
+                "next_tracks": [
+                    {"uri": "spotify:track:1111111111111111111111", "uid": "q1", "metadata": {"is_queued": "true"}, "provider": "queue"},
+                    {"uri": "spotify:delimiter", "uid": "delimiter0", "metadata": {"hidden": "true"}, "provider": "context", "removed": ["x"]},
+                ],
+                "prev_tracks": [
+                    {"uri": "spotify:track:9999999999999999999999", "uid": "p1", "metadata": {}, "provider": "context"},
+                ],
+                "queue_revision": "42",
+            })
+        );
+        assert_eq!(
+            skip_to_command(&next[0]),
+            json!({
+                "endpoint": "skip_next",
+                "track": {"uri": "spotify:track:1111111111111111111111", "uid": "q1", "metadata": {"is_queued": "true"}, "provider": "queue"},
+            })
+        );
+        assert_eq!(
+            add_to_queue_command("spotify:track:1"),
+            json!({"endpoint": "add_to_queue", "track": {"uri": "spotify:track:1", "metadata": {"is_queued": "true"}, "provider": "queue"}})
+        );
+        assert_eq!(
+            play_next_command(&["spotify:track:1".into(), "spotify:track:2".into()]),
+            json!({"endpoint": "play_as_next_in_queue", "tracks": [
+                {"uri": "spotify:track:1", "uid": "", "metadata": {}},
+                {"uri": "spotify:track:2", "uid": "", "metadata": {}},
+            ]})
+        );
+        assert_eq!(
+            update_context_command("spotify:playlist:1", "session"),
+            json!({"endpoint": "update_context", "context": {"url": "context://spotify:playlist:1"}, "session_id": "session"})
+        );
+        assert_eq!(
+            shuffle_play_command(
+                "spotify:playlist:1",
+                ORIGIN,
+                &PlayOptions {
+                    description: Some("Mix".into()),
+                    shuffle_override: None,
+                }
+            ),
+            json!({
+                "endpoint": "play",
+                "context": {"uri": "spotify:playlist:1", "url": "context://spotify:playlist:1", "metadata": {"context_description": "Mix"}},
+                "play_origin": {"feature_identifier": "openmusic"},
+                "options": {"player_options_override": {"shuffling_context": true, "modes": {"context_enhancement": "NONE"}}},
+            })
+        );
+        assert_eq!(
+            shuffle_play_command(
+                "spotify:playlist:1",
+                ORIGIN,
+                &PlayOptions {
+                    description: None,
+                    shuffle_override: Some(Shuffle::Smart),
+                }
+            )["options"]["player_options_override"]["modes"]["context_enhancement"],
+            "RECOMMENDATION"
+        );
+    }
+
+    #[test]
+    fn goes_back_or_restarts_like_the_desktop() {
+        let both = Allowed {
+            seek: true,
+            skip_prev: true,
+            ..Allowed::default()
+        };
+        let restart = json!({"endpoint": "seek_to", "value": 0});
+        let back = json!({"endpoint": "skip_prev"});
+        assert_eq!(previous_command(2999, &both), Some(back.clone()));
+        assert_eq!(previous_command(3000, &both), Some(restart.clone()));
+        assert_eq!(previous_command(95_000, &both), Some(restart.clone()));
+        let no_seek = Allowed {
+            skip_prev: true,
+            ..Allowed::default()
+        };
+        assert_eq!(previous_command(95_000, &no_seek), Some(back));
+        let first_track = Allowed {
+            seek: true,
+            ..Allowed::default()
+        };
+        assert_eq!(previous_command(500, &first_track), Some(restart));
+        assert_eq!(previous_command(95_000, &Allowed::default()), None);
+    }
+
+    #[test]
+    fn steps_volume_on_the_device_grid() {
+        assert_eq!(volume_step(64), KEY_VOLUME_STEP);
+        assert_eq!(volume_step(0), u16::MAX);
+        assert_eq!(volume_step(10), 6554);
+        assert_eq!(stepped_volume(0, true, 64), 4096);
+        assert_eq!(stepped_volume(4096, false, 64), 0);
+        assert_eq!(stepped_volume(65_000, true, 64), u16::MAX);
+        assert_eq!(stepped_volume(1000, false, 64), 0);
+        assert_eq!(stepped_volume(30_000, true, 10), 39_321);
+        assert_eq!(stepped_volume(30_000, false, 10), 26_214);
+        assert_eq!(stepped_volume(65_535, false, 100), 61_603);
+    }
+
+    fn uids(list: &[ProvidedTrack]) -> Vec<String> {
+        list.iter()
+            .map(|track| {
+                if track.uid.is_empty() {
+                    track.uri.clone()
+                } else {
+                    track.uid.clone()
+                }
+            })
+            .collect()
+    }
+
+    fn raw_next() -> Vec<ProvidedTrack> {
+        cluster().player_state.unwrap().next_tracks
+    }
+
+    fn key(uid: &str, iteration: &str, uri: &str) -> QueueKey {
+        QueueKey {
+            uid: uid.into(),
+            iteration: iteration.into(),
+            uri: uri.into(),
+        }
+    }
+
+    #[test]
+    fn removes_and_clears_queue_items() {
+        let next = raw_next();
+        let without = queue_without(
+            &next,
+            &[
+                key("q2", "", "spotify:track:2222222222222222222222"),
+                key("c4", "0", "spotify:track:8888888888888888888888"),
+            ],
+        );
+        assert_eq!(
+            uids(&without),
+            vec![
+                "q1",
+                "spotify:meta:page:1",
+                "c1",
+                "c1",
+                "c2",
+                "c3",
+                "q3",
+                "delimiter0",
+                "c4"
+            ]
+        );
+        let by_uri = queue_without(
+            &next,
+            &[key("", "", "spotify:track:7777777777777777777777")],
+        );
+        assert!(by_uri.iter().all(|track| track.uid != "q3"));
+        assert_eq!(by_uri.len(), next.len() - 1);
+        let removed = without
+            .iter()
+            .find(|track| track.uri == "spotify:meta:page:1")
+            .unwrap();
+        assert_eq!(removed.metadata["hidden"], "true");
+
+        let cleared = queue_cleared(&next);
+        assert_eq!(
+            uids(&cleared),
+            vec![
+                "spotify:meta:page:1",
+                "c1",
+                "c1",
+                "c2",
+                "c3",
+                "delimiter0",
+                "c4"
+            ]
+        );
+    }
+
+    #[test]
+    fn moves_queue_items() {
+        let next = raw_next();
+        let q1 = key("q1", "", "spotify:track:1111111111111111111111");
+        let q2 = key("q2", "", "spotify:track:2222222222222222222222");
+        let c3 = key("c3", "", "spotify:track:6666666666666666666666");
+        let swapped = queue_moved(&next, std::slice::from_ref(&q2), &q1, false);
+        assert_eq!(&uids(&swapped)[..3], &["q2", "q1", "spotify:meta:page:1"]);
+        assert_eq!(swapped.len(), next.len());
+
+        let mut with_context = next.clone();
+        with_context[3].uid = "c0".into();
+        let c0 = key("c0", "0", "spotify:track:3333333333333333333333");
+        let queued = queue_moved(&with_context, std::slice::from_ref(&c0), &q1, true);
+        let moved = queued.iter().find(|track| track.uid == "c0").unwrap();
+        assert_eq!(uids(&queued)[..2], ["q1", "c0"]);
+        assert_eq!(moved.provider, "queue");
+        assert_eq!(moved.metadata["is_queued"], "true");
+        assert_eq!(moved.metadata["iteration"], "0");
+
+        let after_context = queue_moved(&next, std::slice::from_ref(&q1), &c3, true);
+        let position = after_context
+            .iter()
+            .position(|track| track.uid == "q1")
+            .unwrap();
+        assert_eq!(after_context[position - 1].uid, "c3");
+        assert_eq!(after_context[position].provider, "queue");
+
+        assert_eq!(
+            queue_moved(&next, std::slice::from_ref(&q1), &q1, true),
+            next
+        );
+        let missing = key("nope", "", "spotify:track:0000000000000000000000");
+        assert_eq!(
+            queue_moved(&next, std::slice::from_ref(&q1), &missing, true),
+            next
+        );
+        assert_eq!(
+            queue_moved(&next, std::slice::from_ref(&missing), &q1, true),
+            next
+        );
+    }
+
+    #[test]
+    fn adds_items_after_the_queued_ones() {
+        let next = raw_next();
+        let added = queue_with_added(&next, &["spotify:track:aaaaaaaaaaaaaaaaaaaaaa".into()]);
+        assert_eq!(added.len(), next.len() + 1);
+        assert_eq!(added[3].uri, "spotify:track:aaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(added[3].provider, "queue");
+        assert_eq!(added[3].metadata["is_queued"], "true");
+        assert_eq!(added[2].uid, "q2");
+        assert_eq!(added[4].uid, "c1");
+
+        let context_first = vec![
+            item(
+                "spotify:media:narration",
+                "n1",
+                "context",
+                &[("is_narration", "true")],
+            ),
+            item("spotify:track:3333333333333333333333", "c1", "context", &[]),
+        ];
+        let added = queue_with_added(
+            &context_first,
+            &["spotify:track:a".into(), "spotify:track:b".into()],
+        );
+        assert_eq!(
+            uids(&added),
+            vec!["n1", "spotify:track:a", "spotify:track:b", "c1"]
+        );
+        let empty = queue_with_added(&[], &["spotify:track:a".into()]);
+        assert_eq!(uids(&empty), vec!["spotify:track:a"]);
+    }
+
+    #[test]
+    fn reads_smart_shuffle_and_context_options() {
+        assert_eq!(
+            smart_shuffle_uri("spotify:collection:tracks"),
+            LIKED_SONGS_LENS
+        );
+        assert_eq!(
+            smart_shuffle_uri("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"),
+            "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
+        );
+        assert!(parse_smart_shuffle(&json!({"lookup": [{
+            "__typename": "PlaylistResponseWrapper",
+            "_uri": "spotify:playlist:37i9dQZF1F5p3rmiWPIYgZ",
+            "data": {"__typename": "Playlist", "smartShuffle": {"available": true, "uri": ""}},
+        }]})));
+        assert!(!parse_smart_shuffle(&json!({"lookup": [{
+            "__typename": "PlaylistResponseWrapper",
+            "_uri": "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
+            "data": {"__typename": "Playlist", "smartShuffle": {"available": false, "uri": ""}},
+        }]})));
+        assert!(!parse_smart_shuffle(
+            &json!({"lookup": [{"__typename": "AlbumResponseWrapper"}]})
+        ));
+        assert!(!parse_smart_shuffle(&json!({})));
+
+        let variables = context_options_variables("spotify:playlist:1", OWN);
+        assert_eq!(variables["uri"], "spotify:playlist:1");
+        assert_eq!(variables["deviceInfo"]["deviceId"], OWN);
+        assert_eq!(variables["deviceInfo"]["deviceType"], "computer");
+        assert_eq!(
+            variables["deviceInfo"]["clientId"],
+            crate::oauth::DESKTOP_CLIENT_ID
+        );
+        assert_eq!(variables["deviceInfo"]["productId"], "1");
+
+        let data = json!({"playerOptions": {
+            "__typename": "PlayerOptions",
+            "modes": [
+                {"modeKey": "context_enhancement", "modeValue": "NONE"},
+                {"modeKey": "media", "modeValue": "audio"},
+                {"modeKey": "jam", "modeValue": "off"},
+            ],
+            "restrictions": {
+                "disallowSettingModes": [
+                    {"modeKey": "context_enhancement", "modeRestrictions": [
+                        {"modeValue": "NONE", "reasons": ["already_set"]},
+                        {"modeValue": "RECOMMENDATION", "reasons": []},
+                    ]},
+                    {"modeKey": "media", "modeRestrictions": [
+                        {"modeValue": "audio", "reasons": ["already_set"]},
+                        {"modeValue": "video", "reasons": ["not_playing_track"]},
+                    ]},
+                ],
+                "disallowTogglingShuffleReasons": [],
+            },
+            "shufflingContext": false,
+        }});
+        assert_eq!(
+            parse_context_options(&data),
+            Some(ContextOptions {
+                shuffle: Shuffle::Off,
+                shuffle_allowed: true,
+                smart_allowed: true,
+            })
+        );
+        let mut smart = data.clone();
+        smart["playerOptions"]["shufflingContext"] = json!(true);
+        smart["playerOptions"]["modes"][0]["modeValue"] = json!("RECOMMENDATION");
+        smart["playerOptions"]["restrictions"]["disallowSettingModes"][0]["modeRestrictions"][1]
+            ["reasons"] = json!(["already_set"]);
+        assert_eq!(
+            parse_context_options(&smart),
+            Some(ContextOptions {
+                shuffle: Shuffle::Smart,
+                shuffle_allowed: true,
+                smart_allowed: true,
+            })
+        );
+        let mut blocked = data.clone();
+        blocked["playerOptions"]["shufflingContext"] = json!(true);
+        blocked["playerOptions"]["restrictions"]["disallowSettingModes"][0]["modeRestrictions"]
+            [1]["reasons"] = json!(["not_supported_by_content_type"]);
+        assert_eq!(
+            parse_context_options(&blocked),
+            Some(ContextOptions {
+                shuffle: Shuffle::On,
+                shuffle_allowed: true,
+                smart_allowed: false,
+            })
+        );
+        blocked["playerOptions"]["restrictions"]["disallowTogglingShuffleReasons"] = json!(["dj"]);
+        assert!(!parse_context_options(&blocked).unwrap().shuffle_allowed);
+        assert_eq!(parse_context_options(&json!({"playerOptions": null})), None);
     }
 
     #[test]

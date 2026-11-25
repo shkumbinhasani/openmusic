@@ -478,9 +478,7 @@ impl Engine {
     }
 
     async fn send_command(&mut self, target: &str, command: Value) -> Result<Option<String>> {
-        let target = self.remote.redirect(target);
-        let (to, alias) = connect::device_target(&target);
-        connect::command(&self.api, &self.device_id, to, command, alias).await
+        self.routed_command(target, command).await
     }
 
     async fn register(&mut self) -> Result<()> {
@@ -698,7 +696,7 @@ impl Engine {
             Control::Audio(control) => return self.audio(control).await,
             control => control,
         };
-        if let Some(target) = self.remote_target().filter(|_| {
+        if let Some(target) = self.control_target(&control).filter(|_| {
             !matches!(
                 control,
                 Control::PlayTracks { .. } | Control::PlayContext { .. } | Control::PlayHere

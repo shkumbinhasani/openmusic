@@ -49,6 +49,7 @@ pub enum Entry {
         search: Option<&'static str>,
         id: Option<u32>,
     },
+    Volume(f32),
 }
 
 #[derive(Clone)]
@@ -107,6 +108,13 @@ pub fn menu_at(anchor: &'static str, entries: Vec<Entry>) -> bool {
     native::popup(entries, point(bounds.origin.x, bounds.bottom() + px(4.)))
 }
 
+pub fn menu_above(anchor: &'static str, entries: Vec<Entry>) -> bool {
+    let Some(bounds) = ANCHORS.with_borrow(|anchors| anchors.get(anchor).copied()) else {
+        return false;
+    };
+    native::popup_above(entries, point(bounds.origin.x, bounds.origin.y - px(4.)))
+}
+
 pub fn key(name: &str) -> Option<&'static str> {
     native::key(name)
         .or_else(|| ANCHORS.with_borrow(|anchors| anchors.keys().copied().find(|key| *key == name)))
@@ -157,10 +165,24 @@ pub fn now_playing(state: NowPlaying) -> impl IntoElement {
     .size_full()
 }
 
-pub fn volume(fraction: f32, corner: f32) -> impl IntoElement {
+pub fn volume(
+    fraction: f32,
+    corner: f32,
+    enabled: bool,
+    tooltip: Option<String>,
+) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| native::volume(fraction, corner, bounds, window),
+        move |bounds, _, window, _| {
+            native::volume(
+                fraction,
+                corner,
+                enabled,
+                tooltip.as_deref(),
+                bounds,
+                window,
+            )
+        },
     )
     .absolute()
     .top_0()
@@ -192,11 +214,11 @@ mod native {
         sel,
     };
     use objc2_app_kit::{
-        NSApplication, NSBezelStyle, NSButton, NSCellImagePosition, NSColor, NSControl,
-        NSControlBorderShape, NSControlSize, NSControlStateValueOn, NSEvent, NSEventModifierFlags,
-        NSEventTrackingRunLoopMode, NSEventType, NSGlassEffectView, NSImage, NSImageScaling,
-        NSImageView, NSMenu, NSMenuDelegate, NSMenuItem, NSResponder, NSSearchField, NSSlider,
-        NSTextAlignment, NSTextField, NSView, NSWindowOrderingMode,
+        NSApplication, NSAutoresizingMaskOptions, NSBezelStyle, NSButton, NSCellImagePosition,
+        NSColor, NSControl, NSControlBorderShape, NSControlSize, NSControlStateValueOn, NSEvent,
+        NSEventModifierFlags, NSEventTrackingRunLoopMode, NSEventType, NSGlassEffectView, NSImage,
+        NSImageScaling, NSImageView, NSMenu, NSMenuDelegate, NSMenuItem, NSResponder,
+        NSSearchField, NSSlider, NSTextAlignment, NSTextField, NSView, NSWindowOrderingMode,
     };
     use objc2_foundation::{NSArray, NSData, NSObjectProtocol, NSPoint, NSRect};
 
@@ -293,6 +315,7 @@ mod native {
         glass: Retained<NSGlassEffectView>,
         icon: Retained<NSImageView>,
         slider: Retained<NSSlider>,
+        tooltip: Option<String>,
         placed: bool,
     }
 
@@ -319,7 +342,7 @@ mod native {
         buttons: HashMap<&'static str, Control>,
         dock: Option<Dock>,
         volume: Option<Volume>,
-        pending: Option<(Vec<Entry>, Point<Pixels>)>,
+        pending: Option<(Vec<Entry>, Point<Pixels>, bool)>,
         context: Option<Retained<NSMenu>>,
         tracking: Option<Retained<NSMenu>>,
         built: Built,
@@ -690,7 +713,14 @@ mod native {
         OVERLAY.with_borrow(|overlay| overlay.dock.as_ref().map(|dock| dock.art.clone()))
     }
 
-    pub fn volume(fraction: f32, corner: f32, bounds: Bounds<Pixels>, window: &Window) {
+    pub fn volume(
+        fraction: f32,
+        corner: f32,
+        enabled: bool,
+        tooltip: Option<&str>,
+        bounds: Bounds<Pixels>,
+        window: &Window,
+    ) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -731,6 +761,7 @@ mod native {
                     glass,
                     icon,
                     slider,
+                    tooltip: None,
                     placed: false,
                 });
             }
@@ -738,6 +769,21 @@ mod native {
                 return;
             };
             let volume = overlay.volume.as_mut().expect("volume was created");
+            if volume.slider.isEnabled() != enabled {
+                volume.slider.setEnabled(enabled);
+                let tint = if enabled {
+                    NSColor::secondaryLabelColor()
+                } else {
+                    NSColor::tertiaryLabelColor()
+                };
+                volume.icon.setContentTintColor(Some(&tint));
+            }
+            if volume.tooltip.as_deref() != tooltip {
+                let tip = tooltip.map(string);
+                volume.glass.setToolTip(tip.as_deref());
+                volume.slider.setToolTip(tip.as_deref());
+                volume.tooltip = tooltip.map(str::to_owned);
+            }
             volume.placed = shown;
             volume.glass.setHidden(!shown);
             if !shown {
@@ -798,6 +844,14 @@ mod native {
     }
 
     pub fn popup(entries: Vec<Entry>, at: Point<Pixels>) -> bool {
+        schedule(entries, at, false)
+    }
+
+    pub fn popup_above(entries: Vec<Entry>, at: Point<Pixels>) -> bool {
+        schedule(entries, at, true)
+    }
+
+    fn schedule(entries: Vec<Entry>, at: Point<Pixels>, above: bool) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
@@ -805,7 +859,7 @@ mod native {
             return false;
         }
         let delegate = OVERLAY.with_borrow_mut(|overlay| {
-            overlay.pending = Some((entries, at));
+            overlay.pending = Some((entries, at, above));
             delegate(overlay, mtm)
         });
         unsafe {
@@ -826,9 +880,9 @@ mod native {
         let Some(view) = container() else {
             return;
         };
-        let Some((entries, at, delegate)) = OVERLAY.with_borrow_mut(|overlay| {
-            let (entries, at) = overlay.pending.take()?;
-            Some((entries, at, delegate(overlay, mtm)))
+        let Some((entries, at, above, delegate)) = OVERLAY.with_borrow_mut(|overlay| {
+            let (entries, at, above) = overlay.pending.take()?;
+            Some((entries, at, above, delegate(overlay, mtm)))
         }) else {
             return;
         };
@@ -849,9 +903,10 @@ mod native {
             overlay.context = Some(menu.clone());
             overlay.built = built;
         });
+        let lift = if above { menu.size().height } else { 0. };
         let location = NSPoint::new(
             f64::from(f32::from(at.x)),
-            view.bounds().size.height - f64::from(f32::from(at.y)),
+            view.bounds().size.height - f64::from(f32::from(at.y)) + lift,
         );
         menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(&view));
         OVERLAY.with_borrow_mut(|overlay| {
@@ -867,7 +922,7 @@ mod native {
             return;
         };
         let found = OVERLAY.with_borrow_mut(|overlay| {
-            if let Some((pending, _)) = overlay.pending.as_mut()
+            if let Some((pending, ..)) = overlay.pending.as_mut()
                 && replace(pending, id, &entries)
             {
                 return None;
@@ -1066,6 +1121,44 @@ mod native {
         item
     }
 
+    fn volume_item(value: f32, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+        let target = OVERLAY.with_borrow_mut(|overlay| target(overlay, mtm));
+        let receiver: &AnyObject = &target;
+        let holder = NSView::initWithFrame(NSView::alloc(mtm), rect(0., 0., 264., 30.));
+        holder.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        let speaker = |name: &str, frame: NSRect| {
+            let image = NSImageView::imageViewWithImage(&symbol(name).unwrap_or_default(), mtm);
+            image.setFrame(frame);
+            image.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+            image
+        };
+        let quiet = speaker("speaker.fill", rect(14., 7., 16., 16.));
+        let loud = speaker("speaker.wave.3.fill", rect(230., 7., 22., 16.));
+        loud.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+        let slider = unsafe {
+            NSSlider::sliderWithValue_minValue_maxValue_target_action(
+                f64::from(value.clamp(0., 1.)),
+                0.,
+                1.,
+                Some(receiver),
+                Some(sel!(activate:)),
+                mtm,
+            )
+        };
+        slider.setContinuous(true);
+        slider.setControlSize(NSControlSize::Small);
+        slider.setTag(VOLUME);
+        slider.setFrame(rect(36., 5., 188., 20.));
+        slider.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        holder.addSubview(&quiet);
+        holder.addSubview(&slider);
+        holder.addSubview(&loud);
+        let item = NSMenuItem::new(mtm);
+        item.setView(Some(&holder));
+        item.setTag(VOLUME);
+        item
+    }
+
     fn search_item(
         placeholder: &str,
         delegate: &MenuDelegate,
@@ -1130,6 +1223,7 @@ mod native {
                     }
                 }
                 Entry::Note(text) => menu.addItem(&note(text, mtm)),
+                Entry::Volume(value) => menu.addItem(&volume_item(*value, mtm)),
                 Entry::Header(text) => {
                     menu.addItem(&NSMenuItem::sectionHeaderWithTitle(&string(text), mtm))
                 }
@@ -1226,6 +1320,13 @@ mod native {
     ) -> String {
         if item.isSeparatorItem() {
             return "──".to_owned();
+        }
+        if let Some(view) = item.view().filter(|_| item.tag() == VOLUME) {
+            let value = view
+                .viewWithTag(VOLUME)
+                .and_then(|slider| slider.downcast::<NSSlider>().ok())
+                .map_or(0., |slider| slider.doubleValue());
+            return format!("[volume {value:.2}]");
         }
         if item.view().is_some() {
             let text = searches
@@ -1408,6 +1509,15 @@ mod native {
                     dock.slider.doubleValue()
                 ));
             }
+            if let Some(volume) = overlay.volume.as_ref() {
+                lines.push(format!(
+                    "volume value={:.4} enabled={} tooltip={:?} hidden={}",
+                    volume.slider.doubleValue(),
+                    volume.slider.isEnabled(),
+                    volume.tooltip,
+                    volume.glass.isHidden(),
+                ));
+            }
         });
         lines
     }
@@ -1433,13 +1543,17 @@ mod native {
 
     pub fn now_playing(_: &NowPlaying, _: Bounds<Pixels>, _: &Window) {}
 
-    pub fn volume(_: f32, _: f32, _: Bounds<Pixels>, _: &Window) {}
+    pub fn volume(_: f32, _: f32, _: bool, _: Option<&str>, _: Bounds<Pixels>, _: &Window) {}
 
     pub fn finish() {}
 
     pub fn progress(_: u32, _: u32) {}
 
     pub fn popup(_: Vec<Entry>, _: Point<Pixels>) -> bool {
+        false
+    }
+
+    pub fn popup_above(_: Vec<Entry>, _: Point<Pixels>) -> bool {
         false
     }
 
