@@ -7,11 +7,12 @@ use std::{
 
 use gpui::{
     App, AppContext, ClipboardItem, Context, PromptButton, PromptLevel, SharedString, Subscription,
-    WeakEntity, Window,
+    WeakEntity, Window, point,
 };
 use gpui_component::WindowExt;
 use spotify_client::{
     Track,
+    blend::{self, Invitation, InvitationState},
     catalog::{Capabilities, Collection},
     connect::{self, PlayOptions, Shuffle},
     playlist::{
@@ -21,10 +22,10 @@ use spotify_client::{
 };
 
 use super::{
-    dialogs::{self, Collaborators, Draft, EditDetails, FolderName, SaveTo},
+    dialogs::{self, BlendMembers, Collaborators, Draft, EditDetails, FolderName, SaveTo},
     image,
-    view::{ADD_MENU, AddSource, LibraryDrag, TRACK_ROW, add_menu},
-    worker::{Command, Cover, Event, Ready, Write},
+    view::{ADD_MENU, AddSource, LibraryDrag, TRACK_ROW, add_menu, create_menu},
+    worker::{Command, Cover, Event, Ready, Write, blend_faces},
 };
 use crate::{
     app::{OpenMusic, Page},
@@ -32,7 +33,7 @@ use crate::{
     menus::{self, Handle},
     ui::{
         components::Sentinel,
-        menu::Target,
+        menu::{Place, Target},
         tracks::{RowDrag, RowDrop},
     },
 };
@@ -44,6 +45,12 @@ const EDITABLE_WAIT: Duration = Duration::from_secs(30);
 const EDITABLE_KEEP: usize = 16;
 const PUSH_DELAY: Duration = Duration::from_millis(500);
 const FOCUS_REFRESH: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlendWork {
+    Inviting,
+    Joining(String),
+}
 
 #[derive(Default)]
 pub struct Pushes {
@@ -101,6 +108,8 @@ pub struct State {
     pub menu_source: Option<AddSource>,
     pub snapshots: HashMap<String, Snapshot>,
     pub save_to: Option<WeakEntity<SaveTo>>,
+    pub invitation: Option<(String, Result<Invitation, String>)>,
+    pub blend_work: Option<BlendWork>,
     pub pushes: Pushes,
     pub activation: Option<Subscription>,
     pub refreshed: Option<Instant>,
@@ -124,6 +133,16 @@ impl State {
                         .filter_map(|member| member.image.clone()),
                 );
             }
+            urls.extend(blend_faces(collection));
+        }
+        if let Some((_, Ok(invitation))) = &self.invitation {
+            urls.extend(
+                invitation
+                    .members
+                    .iter()
+                    .chain(invitation.recipient.iter())
+                    .filter_map(|member| member.image.clone()),
+            );
         }
         if let Some(sheet) = &self.save_to
             && sheet.upgrade().is_some()
@@ -1305,6 +1324,87 @@ impl OpenMusic {
             });
         }
     }
+
+    pub fn create_blend(&mut self) {
+        self.navigate(Page::BlendInvitation(String::new()));
+    }
+
+    pub fn open_blend_invitation(&mut self, input: &str) -> bool {
+        match blend::invitation_id(input) {
+            Some(id) => {
+                self.navigate(Page::BlendInvitation(id));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn blend_invite(&mut self) {
+        if self.playlists.blend_work.is_some() {
+            return;
+        }
+        self.playlists.blend_work = Some(BlendWork::Inviting);
+        self.write(Write::BlendInvite, None);
+    }
+
+    pub fn join_blend(&mut self, id: String) {
+        if self.playlists.blend_work.is_some() || id.is_empty() {
+            return;
+        }
+        self.playlists.blend_work = Some(BlendWork::Joining(id.clone()));
+        self.write(Write::JoinBlend { id }, None);
+    }
+
+    pub fn blend_action(&mut self) {
+        let Page::BlendInvitation(id) = &self.page else {
+            return;
+        };
+        if id.is_empty() {
+            self.blend_invite();
+            return;
+        }
+        let state = match &self.playlists.invitation {
+            Some((loaded, Ok(invitation))) if loaded == id => invitation.state.clone(),
+            _ => return,
+        };
+        if state.joins() {
+            self.join_blend(id.clone());
+        } else if state.invites() {
+            self.blend_invite();
+        }
+    }
+
+    pub fn inviter_name(&self) -> Option<String> {
+        self.account()
+            .map(|account| account.name.clone())
+            .filter(|name| !name.trim().is_empty())
+    }
+
+    fn replace_page(&mut self, page: Page) {
+        let current = self.page.clone();
+        self.navigate(page);
+        if self.history.last() == Some(&current) {
+            self.history.pop();
+        }
+    }
+
+    pub fn show_blend_members(&mut self, uri: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(collection) = self.open_playlist(uri) else {
+            return;
+        };
+        let members = blend::members(&collection.metadata);
+        if members.is_empty() {
+            return;
+        }
+        let title: SharedString = collection.name.clone().into();
+        let app = cx.weak_entity();
+        let view = cx.new(|_| BlendMembers::new(app, members));
+        dialogs::open_blend_members(window, cx, title, view);
+    }
+
+    pub fn open_create_menu(&mut self, window: &mut Window) -> bool {
+        self.show_menu(create_menu(), Place::Point(window.mouse_position()), None)
+    }
 }
 
 fn after_write(app: &mut OpenMusic, uri: Option<String>, rootlist: bool) {
@@ -1317,6 +1417,13 @@ fn after_write(app: &mut OpenMusic, uri: Option<String>, rootlist: bool) {
 }
 
 pub fn load(app: &mut OpenMusic, page: &Page) {
+    if let Page::BlendInvitation(id) = page {
+        app.playlists.invitation = None;
+        if !id.is_empty() {
+            app.send(Command::BlendInvitation(id.clone()));
+        }
+        return;
+    }
     if let Page::Collection(uri) = page {
         if app
             .playlists
@@ -1366,9 +1473,10 @@ pub fn on_event(
                 return;
             }
             match result {
-                Ok((tracks, next)) => {
-                    collection.tracks.extend(tracks);
-                    collection.next = next;
+                Ok(more) => {
+                    collection.tracks.extend(more.tracks);
+                    collection.attributions.extend(more.attributions);
+                    collection.next = more.next;
                 }
                 Err(message) => {
                     collection.next = None;
@@ -1497,6 +1605,36 @@ pub fn on_event(
             if stale {
                 app.reload_playlist(&uri);
             }
+        }
+        Event::Invitation { id, result } => {
+            if app.page != Page::BlendInvitation(id.clone()) {
+                return;
+            }
+            if let Ok(invitation) = &result
+                && invitation.state == InvitationState::Joined
+                && let Some(uri) = invitation.playlist_uri.clone()
+            {
+                app.replace_page(Page::Collection(uri));
+                return;
+            }
+            app.playlists.invitation = Some((id, result.map(|invitation| *invitation)));
+        }
+        Event::BlendInvited { link } => {
+            app.playlists.blend_work = None;
+            let text = blend::share_text(&link, app.inviter_name().as_deref());
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            app.show_toast("Link copied to clipboard", None);
+        }
+        Event::BlendJoined { id, uri } => {
+            app.playlists.blend_work = None;
+            app.refresh_rootlist();
+            if app.page == Page::BlendInvitation(id) {
+                app.replace_page(Page::Collection(uri));
+            }
+        }
+        Event::BlendFailed { message } => {
+            app.playlists.blend_work = None;
+            app.show_toast(message, None);
         }
         Event::Changed {
             uri,
@@ -1652,16 +1790,24 @@ pub fn describe_playlist(app: &OpenMusic) -> String {
         ),
     ];
     lines.push(format!(
-        "pushes={} push_due={}",
+        "blend={} attributed_rows={} pushes={} push_due={}",
+        flag(blend::is_blend_list(&collection.metadata)),
+        collection.attributions.len(),
         app.playlists.pushes.seen,
         flag(app.playlists.pushes.due.is_some()),
     ));
     lines.extend(collection.tracks.iter().enumerate().map(|(index, track)| {
+        let by = attribution_line(collection, track);
         format!(
-            "{index} {} {} {:?}",
+            "{index} {} {} {:?}{}",
             track.uid.as_deref().unwrap_or("-"),
             track.uri,
-            track.title
+            track.title,
+            if by.is_empty() {
+                String::new()
+            } else {
+                format!(" by={by}")
+            }
         )
     }));
     lines.join("\n")
@@ -1906,6 +2052,22 @@ pub fn debug(
         }
         ("playlist-members", [uri]) => app.show_collaborators(uri, window, cx),
         ("playlist-shuffle", []) => app.shuffle_collection(cx),
+        ("blend", []) => write("blend.txt", describe_blend(app)),
+        ("blend", [input]) => {
+            if app.open_blend_invitation(input) {
+                return true;
+            }
+            if blend::valid_id(input) {
+                app.navigate(Page::BlendInvitation((*input).to_owned()));
+            } else {
+                write("blend.txt", format!("invalid {input}"));
+            }
+        }
+        ("blend-create", []) => app.create_blend(),
+        ("blend-action", []) => app.blend_action(),
+        ("blend-invite", []) => app.blend_invite(),
+        ("blend-join", [id]) => app.join_blend((*id).to_owned()),
+        ("blend-members", [uri]) => app.show_blend_members(uri, window, cx),
         ("push", ["rootlist", revision @ ..]) => {
             let user = app.playlists.user.clone().unwrap_or_default();
             app.on_playlist_push(Push::Rootlist {
@@ -1929,9 +2091,101 @@ pub fn debug(
             app.playlists.refreshed = None;
             app.refresh_on_focus();
         }
+        ("create-menu", []) => {
+            let size = window.viewport_size();
+            let center = point(size.width / 2., size.height / 2.);
+            app.show_menu(create_menu(), Place::Point(center), None);
+        }
         _ => return false,
     }
     true
+}
+
+pub fn describe_blend(app: &OpenMusic) -> String {
+    let mut lines = vec![format!(
+        "page={} work={:?} pushes={} push_due={}",
+        app.page.describe(),
+        app.playlists.blend_work,
+        app.playlists.pushes.seen,
+        flag(app.playlists.pushes.due.is_some()),
+    )];
+    match &app.playlists.invitation {
+        None => lines.push("invitation=none".to_owned()),
+        Some((id, Err(error))) => lines.push(format!("invitation={id} error={error}")),
+        Some((id, Ok(invitation))) => {
+            lines.push(format!(
+                "invitation={id} state={:?} joins={} invites={} playlist={:?}",
+                invitation.state,
+                flag(invitation.state.joins()),
+                flag(invitation.state.invites()),
+                invitation.playlist_uri,
+            ));
+            lines.push(format!(
+                "title={:?} subtitle={:?} button={:?} footnote={:?} members_title={:?}",
+                invitation.title,
+                invitation.subtitle,
+                invitation.button,
+                invitation.footnote,
+                invitation.members_title,
+            ));
+            lines.extend(invitation.members.iter().map(|member| {
+                format!(
+                    "member {} {:?} image={}",
+                    member.username,
+                    member.name,
+                    flag(member.image.is_some())
+                )
+            }));
+            if let Some(recipient) = &invitation.recipient {
+                lines.push(format!(
+                    "recipient {} {:?} image={}",
+                    recipient.username,
+                    recipient.name,
+                    flag(recipient.image.is_some())
+                ));
+            }
+        }
+    }
+    if let Some((_, Ok(collection))) = &app.playlists.collection
+        && blend::is_blend_list(&collection.metadata)
+    {
+        let members = blend::members(&collection.metadata);
+        lines.push(format!(
+            "blend={} creators={:?}",
+            collection.uri,
+            blend::creators(&members)
+        ));
+        lines.extend(members.iter().map(|member| {
+            format!(
+                "blend-member {} {:?} image={}",
+                member.username,
+                member.name,
+                flag(member.image.is_some())
+            )
+        }));
+    }
+    lines.join("\n")
+}
+
+pub fn attribution_line(collection: &Collection, track: &Track) -> String {
+    let key = track.uid.as_ref().unwrap_or(&track.uri);
+    collection
+        .attributions
+        .get(key)
+        .map(|found| {
+            found
+                .iter()
+                .map(|attribution| {
+                    format!(
+                        "{}:{}",
+                        attribution.username.as_deref().unwrap_or("-"),
+                        attribution.reason(&collection.metadata)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default()
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
@@ -1975,6 +2229,7 @@ pub fn on_press(
             }
         }
         "shuffle-collection" => app.shuffle_collection(cx),
+        "blend-action" => app.blend_action(),
         "follow-collection" => {
             if let Page::Collection(uri) = &app.page
                 && let Some(info) = app.playlist_info(&uri.clone())

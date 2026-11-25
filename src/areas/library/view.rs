@@ -104,6 +104,7 @@ impl OpenMusic {
                                         .text_size(px(12.5))
                                         .child(playlist.name.clone()),
                                 )
+                                .children(self.playlist_glyph(playlist.format.as_deref(), palette))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.navigate(page.clone());
                                     cx.notify();

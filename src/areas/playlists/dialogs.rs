@@ -14,10 +14,17 @@ use gpui_component::{
     dialog::DialogButtonProps,
     input::{Input, InputEvent, InputState, SelectAll},
 };
-use spotify_client::playlist::{Details, EditTarget, Level, Member, TargetKind, editable_tree};
+use spotify_client::{
+    blend,
+    playlist::{Details, EditTarget, Level, Member, TargetKind, editable_tree},
+};
 
 use super::{image, worker::Cover};
-use crate::{app::OpenMusic, icons, worker::trusted_image};
+use crate::{
+    app::{OpenMusic, Page},
+    icons,
+    worker::trusted_image,
+};
 
 pub struct Draft {
     pub uri: String,
@@ -560,6 +567,113 @@ pub fn open_collaborators(
         dialog
             .title(title.clone())
             .w(px(520.))
+            .bg(cx.theme().popover)
+            .child(view.clone())
+    });
+}
+
+pub struct BlendMembers {
+    app: WeakEntity<OpenMusic>,
+    members: Vec<blend::Member>,
+}
+
+impl BlendMembers {
+    pub fn new(app: WeakEntity<OpenMusic>, members: Vec<blend::Member>) -> Self {
+        Self { app, members }
+    }
+}
+
+impl Render for BlendMembers {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (text, muted, fill, hover) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.muted,
+            theme.list_hover,
+        );
+        let body = div().flex().flex_col().gap_1().text_color(text);
+        let Some(app) = self.app.upgrade() else {
+            return body;
+        };
+        let app = app.read(cx);
+        let me = app.playlists.user.clone();
+        let rows: Vec<(blend::Member, Option<Arc<Image>>)> = self
+            .members
+            .iter()
+            .map(|member| {
+                let image = member
+                    .image
+                    .as_deref()
+                    .filter(|url| trusted_image(url))
+                    .and_then(|url| app.covers.get(url).cloned());
+                (member.clone(), image)
+            })
+            .collect();
+        body.child(
+            div()
+                .pb_1()
+                .text_size(px(12.))
+                .text_color(muted)
+                .child(blend::creators(&self.members)),
+        )
+        .children(
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, (member, image))| {
+                    let mine = me.as_deref() == Some(member.username.as_str());
+                    let name: SharedString = if mine {
+                        format!("{} (you)", member.label()).into()
+                    } else {
+                        member.label().to_owned().into()
+                    };
+                    let page = member.uri().map(Page::Profile);
+                    div()
+                        .id(("blend-member", index))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_1p5()
+                        .rounded(px(8.))
+                        .when(page.is_some(), |row| {
+                            row.cursor_pointer().hover(move |row| row.bg(hover))
+                        })
+                        .child(face(member.label(), image, fill, text))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .truncate()
+                                .child(name),
+                        )
+                        .when_some(page, |row, page| {
+                            row.on_click(cx.listener(move |this, _, window, cx| {
+                                window.close_dialog(cx);
+                                let page = page.clone();
+                                let _ = this.app.update(cx, |app, cx| {
+                                    app.navigate(page);
+                                    cx.notify();
+                                });
+                            }))
+                        })
+                }),
+        )
+    }
+}
+
+pub fn open_blend_members(
+    window: &mut Window,
+    cx: &mut App,
+    title: SharedString,
+    view: Entity<BlendMembers>,
+) {
+    window.open_dialog(cx, move |dialog, _, cx| {
+        dialog
+            .title(title.clone())
+            .w(px(420.))
             .bg(cx.theme().popover)
             .child(view.clone())
     });

@@ -1,17 +1,22 @@
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Mutex, OnceLock, PoisonError},
+};
 
 use gpui::{
     AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, Stateful, Window, div,
     hsla, prelude::*, px, rgb, rgba,
 };
+use gpui_component::tooltip::Tooltip;
 use spotify_client::{
     Track,
+    blend::{self, Attribution, Invitation, InvitationState, Member},
     catalog::Collection,
     entity,
     playlist::{self, ItemPosition, Level, RootNode, RootPlace, Rootlist},
 };
 
-use super::state::{PlaylistInfo, owner_label, source_name};
+use super::state::{BlendWork, PlaylistInfo, owner_label, source_name};
 use crate::{
     app::{OpenMusic, Page},
     icons,
@@ -19,7 +24,7 @@ use crate::{
     ui::{
         Palette,
         cards::Face,
-        components::{artwork, icon, link, scroll_sentinel, skeleton_header, skeleton_rows},
+        components::{artwork, bone, icon, link, scroll_sentinel, skeleton_header, skeleton_rows},
         dock::DockItem,
         menu::{Group, MenuItem, Row, Surface, Target, TrackTarget},
         sidebar::NavEntry,
@@ -29,6 +34,20 @@ use crate::{
 
 pub const TRACK_ROW: &str = "collection-track";
 pub const ADD_MENU: &str = "add-to-playlist";
+pub const ATTRIBUTION_WIDTH: f32 = 96.;
+pub const ATTRIBUTION_SHOWN: usize = 5;
+const UNDATED_FORMATS: [&str; 6] = [
+    "daily-mix",
+    "my-mix",
+    "car-mix",
+    "personalized-podcasts",
+    "daylist",
+    "inspiredby-mix",
+];
+const CREATE_TITLE: &str = "Invite friends";
+const CREATE_SUBTITLE: &str = "Pick a friend to create a Blend with\u{2014}a playlist that shows how your music taste matches up.";
+const CREATE_FOOTNOTE: &str = "Note: You may invite up to 10 people. Connected people will see your profile picture and username. Inviting friends will create playlists and use other recommendation features that match your taste.";
+const CREATE_BUTTON: &str = "Invite";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AddSource {
@@ -77,6 +96,72 @@ impl Render for LibraryGhost {
             ))
             .child(div().min_w_0().truncate().child(self.name.clone()))
     }
+}
+
+pub fn shows_added(format: Option<&str>) -> bool {
+    !blend::is_blend(format) && !format.is_some_and(|format| UNDATED_FORMATS.contains(&format))
+}
+
+pub fn static_label(text: &str) -> &'static str {
+    static LABELS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut labels = LABELS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(found) = labels.get(text) {
+        return found;
+    }
+    let leaked: &'static str = Box::leak(text.to_owned().into_boxed_str());
+    labels.insert(leaked);
+    leaked
+}
+
+fn faces(members: &[Member]) -> Vec<Face> {
+    members
+        .iter()
+        .map(|member| Face {
+            name: member.label().to_owned(),
+            image: member.image.clone(),
+        })
+        .collect()
+}
+
+fn blend_glyph(side: f32, color: u32) -> Div {
+    let ring = |left: f32| {
+        div()
+            .absolute()
+            .top_0()
+            .left(px(left))
+            .size(px(side))
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(color))
+    };
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(side * 1.55))
+        .h(px(side))
+        .child(ring(0.))
+        .child(ring(side * 0.55))
+}
+
+pub fn create_menu() -> Vec<MenuItem> {
+    vec![
+        MenuItem::action("Playlist", |app, _, _| {
+            app.create_playlist(None, None, Vec::new(), true)
+        })
+        .symbol("music.note.list")
+        .subtitle("Create a playlist with songs or episodes"),
+        MenuItem::action("Blend", |app, _, _| app.create_blend())
+            .symbol("person.2")
+            .subtitle("Combine your friends' tastes into a playlist"),
+        MenuItem::action("Folder", |app, _, _| {
+            app.create_folder(None, Vec::new(), true)
+        })
+        .symbol("folder")
+        .subtitle("Organize your playlists"),
+    ]
 }
 
 pub fn songs_label(count: usize) -> String {
@@ -206,7 +291,62 @@ impl OpenMusic {
                     }))
             });
 
-        let meta = if is_playlist {
+        let blend_members = if is_playlist && blend::is_blend_list(&collection.metadata) {
+            blend::members(&collection.metadata)
+        } else {
+            Vec::new()
+        };
+        let meta = if !blend_members.is_empty() {
+            let creators_uri = loaded.clone();
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .id("collection-creators")
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .min_w_0()
+                        .cursor_pointer()
+                        .child(self.facepile(
+                            &faces(&blend_members[..blend_members.len().min(3)]),
+                            px(24.),
+                            3,
+                            palette,
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .hover(|text| text.underline())
+                                .child(blend::creators(&blend_members)),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_blend_members(&creators_uri, window, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(13.5))
+                        .text_color(rgb(palette.muted))
+                        .child("•"),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(13.5))
+                        .text_color(rgb(palette.muted))
+                        .child(summary(collection)),
+                )
+        } else if is_playlist {
             let owner = collection.owner.clone();
             let owner_name = info.as_ref().and_then(|info| info.owner_name.clone());
             div()
@@ -251,6 +391,7 @@ impl OpenMusic {
         };
 
         let faces: Vec<Face> = playlist::canonical(loaded)
+            .filter(|_| blend_members.is_empty())
             .and_then(|uri| self.playlists.permissions.get(&uri))
             .filter(|permissions| permissions.members.len() > 1)
             .map(|permissions| {
@@ -382,7 +523,7 @@ impl OpenMusic {
                 numbered: album,
                 context: Some(loaded.clone()),
                 show_album: !album,
-                show_added: is_playlist,
+                show_added: is_playlist && shows_added(collection.format.as_deref()),
                 editable: editable_rows,
                 draggable: true,
                 ..RowOptions::default()
@@ -458,14 +599,342 @@ impl OpenMusic {
             }))
     }
 
+    pub fn playlist_glyph(&self, format: Option<&str>, palette: Palette) -> Option<AnyElement> {
+        blend::is_blend(format).then(|| blend_glyph(11., palette.muted).into_any_element())
+    }
+
+    fn create_invitation(&self) -> Invitation {
+        let account = self.account();
+        let username = account
+            .map(|account| account.username.clone())
+            .or_else(|| self.playlists.user.clone())
+            .unwrap_or_default();
+        let me = Member {
+            name: self.inviter_name().unwrap_or_else(|| username.clone()),
+            image: account.and_then(|account| account.avatar.clone()),
+            username,
+        };
+        Invitation {
+            state: InvitationState::Pending,
+            title: CREATE_TITLE.to_owned(),
+            subtitle: CREATE_SUBTITLE.to_owned(),
+            footnote: Some(CREATE_FOOTNOTE.to_owned()),
+            button: Some(CREATE_BUTTON.to_owned()),
+            members: vec![me],
+            members_title: None,
+            recipient: None,
+            playlist_uri: None,
+        }
+    }
+
+    fn big_face(&self, member: Option<&Member>, side: Pixels, palette: Palette) -> Div {
+        let face = match member {
+            Some(member) => self.avatar(member.label(), member.image.as_deref(), side, palette),
+            None => div()
+                .size(side)
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(palette.raised))
+                .child(icon(icons::PLUS, 44., palette.muted)),
+        };
+        div()
+            .rounded_full()
+            .border_4()
+            .border_color(rgb(palette.canvas))
+            .shadow_lg()
+            .child(face)
+    }
+
+    fn invitation_art(
+        &self,
+        invitation: &Invitation,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let side = px(128.);
+        match invitation.state {
+            InvitationState::Full | InvitationState::Deleted => div()
+                .size(side)
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(palette.raised))
+                .child(icon(
+                    if invitation.state == InvitationState::Full {
+                        icons::PERSON
+                    } else {
+                        icons::NOTE
+                    },
+                    52.,
+                    palette.muted,
+                ))
+                .into_any_element(),
+            InvitationState::ReadyExisting => {
+                let rows = invitation
+                    .members
+                    .iter()
+                    .enumerate()
+                    .map(|(index, member)| {
+                        let page = member.uri().map(Page::Profile);
+                        div()
+                            .id(("blend-invitation-member", index))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(8.))
+                            .child(self.avatar(
+                                member.label(),
+                                member.image.as_deref(),
+                                px(32.),
+                                palette,
+                            ))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(member.label().to_owned()),
+                            )
+                            .when_some(page, |row, page| {
+                                row.cursor_pointer()
+                                    .hover(move |row| row.bg(rgba(palette.press)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.navigate(page.clone());
+                                        cx.notify();
+                                    }))
+                            })
+                    });
+                div()
+                    .w(px(320.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .rounded(px(14.))
+                    .bg(rgba(palette.fill))
+                    .border_1()
+                    .border_color(rgba(palette.rim))
+                    .when_some(invitation.members_title.clone(), |list, heading| {
+                        list.child(
+                            div()
+                                .px_2()
+                                .pb_1()
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(palette.muted))
+                                .child(heading),
+                        )
+                    })
+                    .children(rows)
+                    .into_any_element()
+            }
+            _ => {
+                let first = invitation.members.first().or(invitation.recipient.as_ref());
+                let second = invitation
+                    .members
+                    .first()
+                    .and(invitation.recipient.as_ref());
+                div()
+                    .flex()
+                    .items_center()
+                    .child(self.big_face(first, side, palette))
+                    .child(self.big_face(second, side, palette).ml(side * -0.22))
+                    .into_any_element()
+            }
+        }
+    }
+
     pub fn blend_invitation_page(
         &self,
-        _id: &str,
+        id: &str,
         _card_side: Pixels,
         palette: Palette,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
+        let page = div()
+            .flex()
+            .flex_col()
+            .gap_7()
+            .child(div().child(self.back_button(palette, cx)));
+        let created;
+        let invitation = if id.is_empty() {
+            created = self.create_invitation();
+            &created
+        } else {
+            match &self.playlists.invitation {
+                Some((loaded, Ok(invitation))) if loaded == id => invitation,
+                Some((loaded, Err(error))) if loaded == id => {
+                    return page
+                        .child(self.page_status(error.clone(), palette))
+                        .into_any_element();
+                }
+                _ => {
+                    return page
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_4()
+                                .pt_4()
+                                .child(
+                                    bone("blend-invitation", 0, palette)
+                                        .size(px(128.))
+                                        .rounded_full(),
+                                )
+                                .child(
+                                    bone("blend-invitation", 1, palette)
+                                        .w(px(260.))
+                                        .h(px(22.))
+                                        .rounded(px(6.)),
+                                )
+                                .child(
+                                    bone("blend-invitation", 2, palette)
+                                        .w(px(340.))
+                                        .h(px(13.))
+                                        .rounded(px(5.)),
+                                ),
+                        )
+                        .into_any_element();
+                }
+            }
+        };
+        if let InvitationState::Other(_) = invitation.state {
+            return page
+                .child(self.page_status("Something went wrong.", palette))
+                .into_any_element();
+        }
+        let joining = matches!(&self.playlists.blend_work, Some(BlendWork::Joining(joining)) if joining == id);
+        let inviting = self.playlists.blend_work == Some(BlendWork::Inviting);
+        let actionable = invitation.state.joins() || invitation.state.invites();
+        let busy = if joining {
+            Some("Joining…")
+        } else if inviting && invitation.state.invites() {
+            Some("Creating invite link…")
+        } else {
+            None
+        };
+        let column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .pt_2()
+            .child(self.invitation_art(invitation, palette, cx))
+            .child(
+                div()
+                    .max_w(px(560.))
+                    .text_center()
+                    .text_size(px(30.))
+                    .font_weight(FontWeight::BOLD)
+                    .child(invitation.title.clone()),
+            )
+            .when(!invitation.subtitle.is_empty(), |column| {
+                column.child(
+                    div()
+                        .max_w(px(480.))
+                        .text_center()
+                        .text_size(px(14.))
+                        .text_color(rgb(palette.muted))
+                        .child(invitation.subtitle.clone()),
+                )
+            })
+            .when_some(
+                invitation
+                    .button
+                    .as_deref()
+                    .filter(|_| actionable)
+                    .map(static_label),
+                |column, label| {
+                    column.child(div().pt_2().child(self.text_control(
+                        "blend-action",
+                        label,
+                        true,
+                        palette,
+                        cx,
+                    )))
+                },
+            )
+            .when_some(busy, |column, busy| {
+                column.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(rgb(palette.muted))
+                        .child(busy),
+                )
+            })
+            .when_some(invitation.footnote.clone(), |column, footnote| {
+                column.child(
+                    div()
+                        .max_w(px(440.))
+                        .pt_2()
+                        .text_center()
+                        .text_size(px(11.5))
+                        .text_color(rgb(palette.muted))
+                        .child(footnote),
+                )
+            });
+        page.child(column).into_any_element()
+    }
+
+    fn attribution_cell(
+        &self,
+        found: Option<&Vec<Attribution>>,
+        list: &HashMap<String, String>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let side = px(22.);
+        let cell = div()
+            .w(px(ATTRIBUTION_WIDTH))
+            .flex_shrink_0()
+            .flex()
+            .items_center();
+        let Some(found) = found else {
+            return cell;
+        };
+        cell.children(found.iter().take(ATTRIBUTION_SHOWN).enumerate().map(
+            |(index, attribution)| {
+                let name: SharedString = attribution.label().to_owned().into();
+                let reason: SharedString = attribution.reason(list).into();
+                let page = attribution.uri().map(Page::Profile);
+                div()
+                    .id(("attribution", index))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .border_2()
+                    .border_color(rgb(palette.canvas))
+                    .when(index > 0, |face| face.ml(side * -0.3))
+                    .child(self.avatar(&name, attribution.image.as_deref(), side, palette))
+                    .tooltip(move |window, cx| {
+                        let (name, reason) = (name.clone(), reason.clone());
+                        Tooltip::element(move |_, _| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(div().font_weight(FontWeight::SEMIBOLD).child(name.clone()))
+                                .child(div().opacity(0.7).child(reason.clone()))
+                        })
+                        .build(window, cx)
+                    })
+                    .when_some(page, |face, page| {
+                        face.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.navigate(page.clone());
+                                cx.notify();
+                            }))
+                    })
+            },
+        ))
     }
 }
 
@@ -839,12 +1308,14 @@ pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
         return Vec::new();
     }
     vec![NavEntry::new(
-        "nav-new-playlist",
+        "nav-create",
         590,
         icons::PLUS,
-        "New Playlist",
-        false,
-        |app, _, _| app.create_playlist(None, None, Vec::new(), true),
+        "Create",
+        app.page == Page::BlendInvitation(String::new()),
+        |app, window, _| {
+            app.open_create_menu(window);
+        },
     )]
 }
 
@@ -858,14 +1329,34 @@ pub fn dock_items(
 }
 
 pub fn row_accessories(
-    _app: &OpenMusic,
-    _track: &Track,
-    _row: Row,
-    _options: &RowOptions,
-    _palette: Palette,
-    _cx: &mut Context<OpenMusic>,
+    app: &OpenMusic,
+    track: &Track,
+    row: Row,
+    options: &RowOptions,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
-    Vec::new()
+    if row.0 != TRACK_ROW {
+        return Vec::new();
+    }
+    let Some((loaded, Ok(collection))) = &app.playlists.collection else {
+        return Vec::new();
+    };
+    let attributed =
+        !collection.attributions.is_empty() || blend::is_blend_list(&collection.metadata);
+    if !attributed || options.context.as_deref() != Some(loaded.as_str()) {
+        return Vec::new();
+    }
+    let key = track.uid.as_ref().unwrap_or(&track.uri);
+    vec![
+        app.attribution_cell(
+            collection.attributions.get(key),
+            &collection.metadata,
+            palette,
+            cx,
+        )
+        .into_any_element(),
+    ]
 }
 
 pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
@@ -1092,5 +1583,54 @@ mod tests {
     fn labels_the_header() {
         assert_eq!(songs_label(1), "1 song");
         assert_eq!(songs_label(12), "12 songs");
+    }
+
+    #[test]
+    fn hides_date_added_where_the_desktop_does() {
+        assert!(shows_added(None));
+        assert!(shows_added(Some("editorial")));
+        assert!(!shows_added(Some("blend")));
+        assert!(!shows_added(Some("celebrity-blend")));
+        assert!(!shows_added(Some("daily-mix")));
+        assert!(!shows_added(Some("daylist")));
+    }
+
+    #[test]
+    fn offers_playlist_blend_and_folder_to_create() {
+        let menu: Vec<(String, Option<String>)> = create_menu()
+            .into_iter()
+            .map(|item| match item {
+                MenuItem::Action {
+                    title, subtitle, ..
+                } => (title, subtitle),
+                _ => ("?".to_owned(), None),
+            })
+            .collect();
+        assert_eq!(
+            menu,
+            [
+                (
+                    "Playlist".to_owned(),
+                    Some("Create a playlist with songs or episodes".to_owned())
+                ),
+                (
+                    "Blend".to_owned(),
+                    Some("Combine your friends' tastes into a playlist".to_owned())
+                ),
+                (
+                    "Folder".to_owned(),
+                    Some("Organize your playlists".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_one_copy_of_each_button_label() {
+        let first = static_label("Join");
+        let again = static_label(&String::from("Join"));
+        assert_eq!(first, "Join");
+        assert!(std::ptr::eq(first, again));
+        assert_ne!(static_label("Invite"), first);
     }
 }

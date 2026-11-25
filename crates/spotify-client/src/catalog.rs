@@ -178,6 +178,9 @@ fn link_uri(parts: &[&str]) -> Result<String> {
         ["genre", id] if plain(id) => Ok(format!("spotify:genre:{id}")),
         ["page", id] if plain(id) => Ok(format!("spotify:page:{id}")),
         ["socialsession", token] if plain(token) => Ok(format!("spotify:socialsession:{token}")),
+        ["blend", "taste-match", id] if crate::blend::valid_id(id) => {
+            Ok(format!("spotify:blend:taste-match:{id}"))
+        }
         _ => anyhow::bail!("OpenMusic can’t open this kind of Spotify link."),
     }
 }
@@ -513,6 +516,7 @@ pub struct Collection {
     pub total: usize,
     pub next: Option<usize>,
     pub picture: Option<String>,
+    pub attributions: HashMap<String, Vec<crate::blend::Attribution>>,
 }
 
 fn filled(value: &Value) -> Option<String> {
@@ -638,6 +642,7 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
             total,
             next: None,
             picture: None,
+            attributions: HashMap::new(),
         });
     }
     anyhow::bail!("OpenMusic can only open albums and playlists.")
@@ -955,6 +960,11 @@ mod tests {
             uri("spotify:socialsession:jamtoken123"),
             "spotify:socialsession:jamtoken123"
         );
+        assert_eq!(
+            uri("https://open.spotify.com/blend/taste-match/AbC-123_x?si=1"),
+            "spotify:blend:taste-match:AbC-123_x"
+        );
+        assert!(parse_link("https://open.spotify.com/blend/taste-match/").is_err());
         assert!(parse_link("spotify:user:").is_err());
         assert!(parse_link("spotify:collection:tracks").is_err());
     }

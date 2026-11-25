@@ -14,6 +14,7 @@ use spotify_proto::playlist4::proto::{
 
 use crate::{
     api::{Api, Body, HttpStatus},
+    blend::{self, Attribution},
     catalog::{self, Capabilities, Collection, Track},
     entity,
     pathfinder::{self, Operation},
@@ -1130,14 +1131,26 @@ pub fn build_collection(
         total: count,
         next: contents.next,
         picture: text(&attributes["picture"]),
+        attributions: blend::attributions(&contents.items),
     }
 }
 
-pub async fn more(api: &Api, uri: &str, from: usize) -> Result<(Vec<Track>, Option<usize>)> {
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct More {
+    pub tracks: Vec<Track>,
+    pub attributions: HashMap<String, Vec<Attribution>>,
+    pub next: Option<usize>,
+}
+
+pub async fn more(api: &Api, uri: &str, from: usize) -> Result<More> {
     let id = id_of(uri)?;
     let contents = parse_contents(&fetch(api, id, from, PAGE).await?);
     let tracks = tracks_for(api, &contents.items).await?;
-    Ok((tracks, contents.next.filter(|next| *next > from)))
+    Ok(More {
+        tracks,
+        attributions: blend::attributions(&contents.items),
+        next: contents.next.filter(|next| *next > from),
+    })
 }
 
 pub async fn revision(api: &Api, uri: &str) -> Result<Option<String>> {
@@ -2435,7 +2448,8 @@ mod tests {
             "contents": {"pos": 0, "truncated": true, "items": [
                 {"uri": "spotify:track:a", "attributes": {"addedBy": "someone", "timestamp": "1625150017000",
                     "itemId": "8JlT2Ym/Lzc=",
-                    "formatAttributes": [{"key": "multiUserAttributionUsernamesV2", "value": "a,b"}]}},
+                    "formatAttributes": [{"key": "multiUserAttributionUsernamesV2", "value": "a,b"},
+                    {"key": "multiUserAttributionDisplayNamesV2", "value": "A,B"}]}},
                 {"uri": "spotify:track:a", "attributes": {"itemId": "AAAAAAAAAAE="}},
                 {"uri": "spotify:local:Artist+Name:Album:Song+Title:215", "attributes": {}},
                 {"uri": "spotify:track:gone", "attributes": {}}
@@ -2484,6 +2498,14 @@ mod tests {
         assert_eq!(collection.metadata["format_list_type"], "blend");
         assert_eq!(collection.metadata["blend.userinfo-a.name"], "A");
         assert_eq!(collection.metadata["context_owner"], "spotify:user:someone");
+        assert_eq!(collection.attributions.len(), 1);
+        assert_eq!(
+            collection.attributions["f09953d989bf2f37"]
+                .iter()
+                .map(|attribution| attribution.label())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
 
         let last = parse_contents(
             &json!({"length": 2, "contents": {"pos": 1, "items": [{"uri": "spotify:track:z"}]}}),

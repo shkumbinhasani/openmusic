@@ -159,6 +159,9 @@ pub fn page_for(uri: &str) -> Option<Page> {
         ["spotify", "user", _, "folder", id] if !id.is_empty() => {
             Some(Page::Folder(uri.to_owned()))
         }
+        ["spotify", "blend", "taste-match", id] if !id.is_empty() => {
+            Some(Page::BlendInvitation((*id).to_owned()))
+        }
         _ => None,
     }
 }
@@ -353,6 +356,10 @@ mod tests {
             (
                 "spotify:user:someone:folder:f",
                 Some(Page::Folder("spotify:user:someone:folder:f".into())),
+            ),
+            (
+                "spotify:blend:taste-match:abc",
+                Some(Page::BlendInvitation("abc".into())),
             ),
             ("spotify:local:a:b:c:1", None),
             ("spotify:track:", None),

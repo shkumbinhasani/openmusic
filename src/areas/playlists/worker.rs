@@ -3,12 +3,13 @@ use std::collections::HashSet;
 use spotify_client::{
     Api, Track,
     api::HttpStatus,
+    blend::{self, Invitation},
     catalog::{self, Collection},
     dealer::Message,
     pathfinder::PathfinderError,
     playlist::{
-        self, Details, EditTarget, ItemPosition, Level, Permissions, Position, Push, RootPlace,
-        Rootlist,
+        self, Details, EditTarget, ItemPosition, Level, More, Permissions, Position, Push,
+        RootPlace, Rootlist,
     },
 };
 
@@ -99,6 +100,10 @@ pub enum Write {
         uris: Vec<String>,
         to: RootPlace,
     },
+    BlendInvite,
+    JoinBlend {
+        id: String,
+    },
 }
 
 impl Write {
@@ -111,8 +116,9 @@ impl Write {
             | Self::RenameFolder { .. }
             | Self::DeleteFolder { .. }
             | Self::MoveFolder { .. }
-            | Self::MovePlaylists { .. } => (None, true),
-            Self::Invite { .. } | Self::Curate { .. } => (None, false),
+            | Self::MovePlaylists { .. }
+            | Self::JoinBlend { .. } => (None, true),
+            Self::Invite { .. } | Self::Curate { .. } | Self::BlendInvite => (None, false),
             Self::Details { uri, .. } | Self::Private { uri, .. } | Self::Leave { uri } => {
                 (Some(uri.clone()), true)
             }
@@ -126,6 +132,10 @@ impl Write {
 
     fn rows(&self) -> bool {
         matches!(self, Self::Remove { .. } | Self::Move { .. })
+    }
+
+    fn blend(&self) -> bool {
+        matches!(self, Self::BlendInvite | Self::JoinBlend { .. })
     }
 
     fn failure(&self) -> &'static str {
@@ -153,6 +163,8 @@ impl Write {
             Self::MoveFolder { .. } | Self::MovePlaylists { .. } => {
                 "Couldn’t change the order of Your Library. Try again."
             }
+            Self::BlendInvite => "Something went wrong.",
+            Self::JoinBlend { .. } => "Something went wrong while loading the playlist.",
         }
     }
 }
@@ -181,6 +193,7 @@ pub enum Command {
     Check {
         uri: String,
     },
+    BlendInvitation(String),
     Editable(Vec<String>),
     PrepareAdd {
         target: String,
@@ -203,7 +216,7 @@ pub enum Event {
     More {
         uri: String,
         from: usize,
-        result: Result<(Vec<Track>, Option<usize>), String>,
+        result: Result<More, String>,
     },
     Rootlist(Option<(String, Rootlist)>),
     Permissions {
@@ -243,6 +256,20 @@ pub enum Event {
         uri: String,
         revision: Option<String>,
     },
+    Invitation {
+        id: String,
+        result: Result<Box<Invitation>, String>,
+    },
+    BlendInvited {
+        link: String,
+    },
+    BlendJoined {
+        id: String,
+        uri: String,
+    },
+    BlendFailed {
+        message: String,
+    },
     Changed {
         uri: Option<String>,
         rootlist: bool,
@@ -261,6 +288,21 @@ fn track_covers(tracks: &[Track]) -> impl Iterator<Item = String> + '_ {
     tracks.iter().filter_map(|track| track.cover.clone())
 }
 
+pub fn attribution_faces<'a>(
+    rows: impl Iterator<Item = &'a Vec<blend::Attribution>> + 'a,
+) -> impl Iterator<Item = String> + 'a {
+    rows.flatten()
+        .filter_map(|attribution| attribution.image.clone())
+}
+
+pub fn blend_faces(collection: &Collection) -> Vec<String> {
+    blend::members(&collection.metadata)
+        .into_iter()
+        .filter_map(|member| member.image)
+        .chain(attribution_faces(collection.attributions.values()))
+        .collect()
+}
+
 impl Event {
     pub fn covers(&self) -> Vec<String> {
         match self {
@@ -272,11 +314,22 @@ impl Event {
                 .iter()
                 .cloned()
                 .chain(track_covers(&collection.tracks))
+                .chain(blend_faces(collection))
                 .collect(),
             Self::More {
-                result: Ok((tracks, _)),
+                result: Ok(more), ..
+            } => track_covers(&more.tracks)
+                .chain(attribution_faces(more.attributions.values()))
+                .collect(),
+            Self::Invitation {
+                result: Ok(invitation),
                 ..
-            } => track_covers(tracks).collect(),
+            } => invitation
+                .members
+                .iter()
+                .chain(invitation.recipient.iter())
+                .filter_map(|member| member.image.clone())
+                .collect(),
             Self::Permissions { permissions, .. } => permissions
                 .members
                 .iter()
@@ -312,6 +365,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Check { uri } => ctx
             .tasks
             .spawn_keyed(format!("playlist-check {uri}"), check(api, uri)),
+        Command::BlendInvitation(id) => ctx
+            .tasks
+            .spawn_keyed("blend-invitation", invitation(api, id)),
         Command::Editable(uris) => ctx.tasks.spawn_keyed(
             format!("playlist-editable {}", uris.join(",")),
             editable(api, uris),
@@ -350,6 +406,14 @@ pub fn on_push(message: &Message, ctx: &mut Ctx) {
 async fn check(api: Api, uri: String) -> crate::worker::Event {
     let revision = playlist::revision(&api, &uri).await.ok().flatten();
     Event::Checked { uri, revision }.into()
+}
+
+async fn invitation(api: Api, id: String) -> crate::worker::Event {
+    let result = blend::invitation(&api, &id)
+        .await
+        .map(Box::new)
+        .map_err(|_| "Something went wrong.".to_owned());
+    Event::Invitation { id, result }.into()
 }
 
 async fn collection(api: Api, uri: String, upto: usize) -> crate::worker::Event {
@@ -465,9 +529,14 @@ pub fn readable(error: &anyhow::Error, fallback: &str) -> String {
 async fn run(api: Api, user: User, write: Write, done: Option<String>) -> crate::worker::Event {
     let (uri, rootlist) = write.affects();
     let rows = write.rows();
+    let blend = write.blend();
     let fallback = write.failure();
     match perform(&api, &user, write, done.clone()).await {
         Ok(Some(event)) => event.into(),
+        Err(error) if blend => Event::BlendFailed {
+            message: readable(&error, fallback),
+        }
+        .into(),
         Ok(None) => Event::Changed {
             uri,
             rootlist,
@@ -650,6 +719,18 @@ async fn perform(
             playlist::move_playlists_to(api, &me, &uris, &to).await?;
             Ok(None)
         }
+        Write::BlendInvite => {
+            let link = blend::invite_link(api)
+                .await
+                .map_err(|_| anyhow::anyhow!("Something went wrong."))?;
+            Ok(Some(Event::BlendInvited { link }))
+        }
+        Write::JoinBlend { id } => {
+            let uri = blend::join(api, &id)
+                .await
+                .map_err(|_| anyhow::anyhow!("Something went wrong while loading the playlist."))?;
+            Ok(Some(Event::BlendJoined { id, uri }))
+        }
     }
 }
 
@@ -709,5 +790,9 @@ mod tests {
             changes: vec![("spotify:playlist:x".into(), true)],
         };
         assert_eq!(curate.affects(), (None, false));
+        let join = Write::JoinBlend { id: "x".into() };
+        assert_eq!(join.affects(), (None, true));
+        assert!(join.blend() && Write::BlendInvite.blend() && !curate.blend());
+        assert_eq!(Write::BlendInvite.affects(), (None, false));
     }
 }
