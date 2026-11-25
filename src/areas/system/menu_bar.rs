@@ -17,6 +17,9 @@ pub const NOTIFY: &str = "Notify on Song Change";
 pub const MINI_ON_MINIMIZE: &str = "Show Mini Player When Minimized";
 pub const WINDOW: &str = "Window";
 pub const MINI_PLAYER: &str = "Mini Player";
+pub const VIEW: &str = "View";
+pub const ENTER_FULL_SCREEN: &str = "Enter Full Screen";
+pub const EXIT_FULL_SCREEN: &str = "Exit Full Screen";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
@@ -45,11 +48,20 @@ pub struct MenuState {
     pub notify: bool,
     pub mini_on_minimize: bool,
     pub mini_open: bool,
+    pub full_screen: bool,
 }
 
 impl MenuState {
     pub fn play_title(&self) -> &'static str {
         if self.playing { PAUSE } else { PLAY }
+    }
+
+    pub fn full_screen_title(&self) -> &'static str {
+        if self.full_screen {
+            EXIT_FULL_SCREEN
+        } else {
+            ENTER_FULL_SCREEN
+        }
     }
 
     pub fn like_title(&self) -> &'static str {
@@ -141,7 +153,7 @@ pub fn native_key(key: &str, control: bool, alt: bool, shift: bool, command: boo
 
 #[cfg(target_os = "macos")]
 mod native {
-    use objc2::{MainThreadMarker, rc::Retained};
+    use objc2::{MainThreadMarker, rc::Retained, sel};
     use objc2_app_kit::{
         NSApplication, NSControlStateValueMixed, NSControlStateValueOff, NSControlStateValueOn,
         NSEventModifierFlags, NSMenu,
@@ -149,8 +161,8 @@ mod native {
     use objc2_foundation::NSString;
 
     use super::{
-        Check, LIKE_TITLES, MINI_ON_MINIMIZE, MINI_PLAYER, MenuState, NOTIFY, NativeItem, PLAYBACK,
-        REPEAT, SHUFFLE, WINDOW, native_key, toggle,
+        Check, ENTER_FULL_SCREEN, EXIT_FULL_SCREEN, LIKE_TITLES, MINI_ON_MINIMIZE, MINI_PLAYER,
+        MenuState, NOTIFY, NativeItem, PLAYBACK, REPEAT, SHUFFLE, VIEW, WINDOW, native_key, toggle,
     };
 
     fn main_menu() -> Option<Retained<NSMenu>> {
@@ -181,6 +193,21 @@ mod native {
         }
     }
 
+    fn retitle_full_screen(view: &NSMenu, title: &str) {
+        let ours = (0..view.numberOfItems())
+            .filter_map(|index| view.itemAtIndex(index))
+            .find(|item| {
+                let current = item.title().to_string();
+                (current == ENTER_FULL_SCREEN || current == EXIT_FULL_SCREEN)
+                    && item.action() != Some(sel!(toggleFullScreen:))
+            });
+        if let Some(item) = ours
+            && item.title().to_string() != title
+        {
+            item.setTitle(&NSString::from_str(title));
+        }
+    }
+
     pub fn sync(state: &MenuState) {
         let Some(main) = main_menu() else {
             return;
@@ -188,6 +215,9 @@ mod native {
         if let Some(app) = main.itemAtIndex(0).and_then(|item| item.submenu()) {
             mark(&app, NOTIFY, toggle(state.notify));
             mark(&app, MINI_ON_MINIMIZE, toggle(state.mini_on_minimize));
+        }
+        if let Some(view) = find(&main, &[VIEW]).and_then(|item| item.submenu()) {
+            retitle_full_screen(&view, state.full_screen_title());
         }
         if let Some(window) = find(&main, &[WINDOW]).and_then(|item| item.submenu()) {
             mark(&window, MINI_PLAYER, toggle(state.mini_open));
@@ -289,6 +319,7 @@ mod tests {
             notify: false,
             mini_on_minimize: false,
             mini_open: false,
+            full_screen: false,
         }
     }
 
@@ -300,6 +331,16 @@ mod tests {
             ..state()
         };
         assert_eq!(playing.play_title(), "Pause");
+    }
+
+    #[test]
+    fn full_screen_item_swaps_its_title() {
+        assert_eq!(state().full_screen_title(), "Enter Full Screen");
+        let full = MenuState {
+            full_screen: true,
+            ..state()
+        };
+        assert_eq!(full.full_screen_title(), "Exit Full Screen");
     }
 
     #[test]

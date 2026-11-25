@@ -448,6 +448,7 @@ impl OpenMusic {
             notify: self.settings.system.notify_on_track_change,
             mini_on_minimize: self.settings.system.mini_player_when_minimized,
             mini_open: mini_player::is_visible(),
+            full_screen: native_window::state().full_screen,
         }
     }
 
