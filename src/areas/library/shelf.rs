@@ -242,6 +242,9 @@ impl OpenMusic {
                 if matches!(self.page, Page::Library(_)) {
                     self.page = Page::Library(self.library.grid.shelf());
                 }
+                if self.library.grid.items.is_empty() {
+                    self.more_grid();
+                }
             }
             Err(message) => grid.error = Some(message),
         }

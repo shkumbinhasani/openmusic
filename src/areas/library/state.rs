@@ -122,7 +122,7 @@ fn same_item(item: &LibraryItem, uri: &str) -> bool {
 
 pub(super) fn merge(items: &mut Vec<LibraryItem>, page: &mut LibraryPage, offset: u32) -> u32 {
     let fresh = std::mem::take(&mut page.items);
-    let count = fresh.len() as u32;
+    let count = page.rows.max(fresh.len() as u32);
     if offset == 0 || page.fallback {
         *items = fresh;
         return count;
@@ -619,6 +619,9 @@ pub fn on_event(
                     app.library.error = None;
                     apply_pins(&mut app.library);
                     hide_removing(app);
+                    if app.library.items.is_empty() {
+                        app.more_library();
+                    }
                 }
                 Err(message) => app.library.error = Some(message),
             }
@@ -643,6 +646,9 @@ pub fn on_event(
                     folder.next_offset = merge(&mut folder.items, &mut page, offset);
                     folder.page = Some(page);
                     folder.error = None;
+                    if folder.items.is_empty() {
+                        app.more_folder();
+                    }
                 }
                 Err(message) => folder.error = Some(message),
             }
@@ -1364,6 +1370,24 @@ mod tests {
         fallback.fallback = true;
         assert_eq!(merge(&mut items, &mut fallback, 50), 2);
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn pages_advance_by_the_rows_spotify_sent() {
+        let mut items = Vec::new();
+        let mut first = page(vec![item("a", 0)], 160);
+        first.rows = 50;
+        assert_eq!(merge(&mut items, &mut first, 0), 50);
+        let mut skipped = page(Vec::new(), 160);
+        skipped.rows = 50;
+        assert_eq!(merge(&mut items, &mut skipped, 50), 100);
+        assert_eq!(skipped.total, 160);
+        let mut last = page(vec![item("b", 0), item("c", 0)], 160);
+        last.rows = 50;
+        assert_eq!(merge(&mut items, &mut last, 100), 150);
+        assert_eq!(items.len(), 3);
+        let mut cached = page(vec![item("z", 0)], 160);
+        assert_eq!(merge(&mut items, &mut cached, 0), 1);
     }
 
     #[test]

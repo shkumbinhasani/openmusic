@@ -155,6 +155,7 @@ pub struct LibraryPage {
     pub items: Vec<LibraryItem>,
     pub total: u32,
     pub offset: u32,
+    pub rows: u32,
     pub filters: Vec<Chip>,
     pub selected: Vec<Chip>,
     pub sorts: Vec<Chip>,
@@ -247,17 +248,21 @@ pub fn parse_page(data: &Value, now: i64) -> Result<LibraryPage> {
         Some("LibraryPage") | None if page.is_object() => {}
         _ => bail!("Spotify sent an unexpected library page."),
     }
-    let items: Vec<LibraryItem> = page["items"]
+    let entries = page["items"]
         .as_array()
-        .into_iter()
-        .flatten()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let items: Vec<LibraryItem> = entries
+        .iter()
         .filter_map(|entry| item(entry, now))
         .collect();
+    let rows = entries.len() as u32;
     Ok(LibraryPage {
         total: page["totalCount"]
             .as_u64()
-            .map_or(items.len() as u32, |total| total as u32),
+            .map_or(rows, |total| total as u32),
         offset: page["pagingInfo"]["offset"].as_u64().unwrap_or_default() as u32,
+        rows,
         filters: chips(&page["availableFilters"]),
         selected: chips(&page["selectedFilters"]),
         sorts: chips(&page["availableSortOrders"]),
@@ -672,6 +677,7 @@ pub fn fallback_page(rootlist: &Rootlist, query: &LibraryQuery) -> LibraryPage {
     LibraryPage {
         total: items.len() as u32,
         offset: 0,
+        rows: items.len() as u32,
         filters,
         selected,
         sorts,
@@ -756,6 +762,7 @@ mod tests {
     fn maps_every_kind_of_library_row() {
         let page = parse_page(&sample(), NOW).unwrap();
         assert_eq!((page.total, page.offset), (97, 50));
+        assert_eq!((page.rows, page.items.len()), (13, 10));
         assert_eq!(
             page.filters,
             vec![
