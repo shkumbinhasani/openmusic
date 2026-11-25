@@ -375,6 +375,7 @@ mod native {
             fn key_down(&self, event: &NSEvent) {
                 match event.keyCode() {
                     ESCAPE if self.isInFullScreenMode() => leave(self),
+                    SPACE if event.isARepeat() => {}
                     SPACE => dispatch(Action::Press("toggle-playback")),
                     _ => unsafe {
                         let _: () = msg_send![super(self), keyDown: event];

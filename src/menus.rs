@@ -568,6 +568,24 @@ pub struct Handle {
     window: AnyWindowHandle,
 }
 
+fn repeats(action: &dyn Action) -> bool {
+    let action = action.as_any();
+    action.is::<SeekForward>()
+        || action.is::<SeekBackward>()
+        || action.is::<VolumeUp>()
+        || action.is::<VolumeDown>()
+}
+
+#[cfg(target_os = "macos")]
+fn key_held() -> bool {
+    crate::appkit::key_held()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn key_held() -> bool {
+    false
+}
+
 pub fn route<A: Action>(
     cx: &mut App,
     handle: &Handle,
@@ -576,6 +594,9 @@ pub fn route<A: Action>(
     let handle = handle.clone();
     let run = Rc::new(run);
     cx.on_action(move |action: &A, cx| {
+        if key_held() && !repeats(action) {
+            return;
+        }
         let (handle, run, action) = (handle.clone(), run.clone(), action.boxed_clone());
         cx.defer(move |cx| {
             let Some(action) = action.as_any().downcast_ref::<A>() else {
@@ -726,6 +747,19 @@ mod tests {
             assert!(!found.is_empty(), "{keys}");
             assert!(!found[0].action().partial_eq(action.as_ref()), "{keys}");
         }
+    }
+
+    #[test]
+    fn only_seek_and_volume_follow_a_held_key() {
+        let repeating: Vec<&str> = SHORTCUTS
+            .iter()
+            .filter(|shortcut| repeats((shortcut.action)().as_ref()))
+            .map(|shortcut| shortcut.keys)
+            .collect();
+        assert_eq!(
+            repeating,
+            ["shift-cmd-right", "shift-cmd-left", "cmd-up", "cmd-down"]
+        );
     }
 
     #[test]

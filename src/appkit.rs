@@ -61,6 +61,15 @@ pub(crate) fn dispatch(action: Action) {
     }
 }
 
+pub(crate) fn key_held() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm)
+        .currentEvent()
+        .is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat())
+}
+
 pub(crate) fn string(text: &str) -> Retained<NSString> {
     NSString::from_str(text)
 }
