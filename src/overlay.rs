@@ -59,6 +59,7 @@ pub struct NowPlaying {
     pub cover: Option<(String, Arc<Image>)>,
     pub position_ms: u32,
     pub duration_ms: u32,
+    pub tooltip: Option<String>,
 }
 
 thread_local! {
@@ -287,6 +288,7 @@ mod native {
         duration_ms: u32,
         scrubbing: bool,
         placed: bool,
+        tooltip: Option<String>,
     }
 
     struct Volume {
@@ -609,6 +611,7 @@ mod native {
                     duration_ms: 0,
                     scrubbing: false,
                     placed: false,
+                    tooltip: None,
                 });
                 attach_bar(overlay, mtm);
             }
@@ -659,6 +662,13 @@ mod native {
                 NSColor::secondaryLabelColor()
             };
             dock.subtitle.setTextColor(Some(&color));
+            if dock.tooltip != state.tooltip {
+                let tip = state.tooltip.as_deref().map(string);
+                for view in [&*dock.art as &NSView, &dock.title, &dock.subtitle] {
+                    view.setToolTip(tip.as_deref());
+                }
+                dock.tooltip = state.tooltip.clone();
+            }
             dock.duration_ms = state.duration_ms;
             dock.remaining
                 .setStringValue(&string(&timestamp(state.duration_ms)));
