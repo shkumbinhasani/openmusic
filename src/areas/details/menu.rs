@@ -44,7 +44,7 @@ impl<'a> Facts<'a> {
         if context.starts_with("spotify:album:") {
             return Some(false);
         }
-        self.sets.editable.get(context).copied().flatten()
+        self.sets.editable.get(context).copied()
     }
 }
 
@@ -508,7 +508,7 @@ mod tests {
             "Exclude from your taste profile  x  <minus.circle>"
         );
         world.collection = None;
-        world.sets.editable.insert(RADIO.into(), Some(true));
+        world.sets.editable.answer(RADIO.into(), Ok(true));
         let lines = world.menu(&in_context(creep(), RADIO, None));
         assert_eq!(
             lines[0],
@@ -523,7 +523,7 @@ mod tests {
         }));
         let lines = world.menu(&in_context(creep(), RADIO, None));
         assert_eq!(lines[0], "Show in this playlist  <eye>");
-        world.sets.editable.insert(RADIO.into(), Some(false));
+        world.sets.editable.answer(RADIO.into(), Ok(false));
         world.sets.apply(Ok(Snapshot::default()));
         let lines = world.menu(&in_context(creep(), RADIO, None));
         assert_eq!(lines[0], "Hide in this playlist  <eye.slash>");

@@ -3,6 +3,7 @@ pub mod dialog;
 pub mod embed;
 pub mod feedback;
 pub mod go;
+pub mod lookup;
 pub mod menu;
 pub mod share;
 pub mod state;

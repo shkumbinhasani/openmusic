@@ -129,11 +129,9 @@ fn lookup_editable(app: &mut OpenMusic) {
         return;
     };
     let known = menu::Facts::of(app).editable(&context).is_some();
-    if known || app.details.sets.editable.contains_key(&context) {
-        return;
+    if !known && app.details.sets.editable.ask(&context) {
+        app.send(Command::Editable(context));
     }
-    app.details.sets.editable.insert(context.clone(), None);
-    app.send(Command::Editable(context));
 }
 
 pub fn on_event(
@@ -180,7 +178,7 @@ pub fn on_event(
             }
         }
         Event::Editable { uri, editable } => {
-            app.details.sets.editable.insert(uri, editable);
+            app.details.sets.editable.answer(uri, editable);
         }
         Event::TrackArtists { uri, artists } => {
             app.details.artists.insert(uri, artists);

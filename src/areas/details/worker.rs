@@ -74,7 +74,7 @@ pub enum Event {
     },
     Editable {
         uri: String,
-        editable: Option<bool>,
+        editable: Result<bool, String>,
     },
     TrackArtists {
         uri: String,
@@ -184,7 +184,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             }));
         }
         Command::Editable(uri) => ctx.tasks.spawn(async move {
-            let editable = details::playlist_editable(&api, &uri).await.ok();
+            let editable = details::playlist_editable(&api, &uri)
+                .await
+                .map_err(|error| error.to_string());
             Event::Editable { uri, editable }.into()
         }),
         Command::TrackArtists(uri) => ctx.tasks.spawn(async move {

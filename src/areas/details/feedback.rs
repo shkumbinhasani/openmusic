@@ -13,6 +13,7 @@ use spotify_client::{
 };
 
 use super::{
+    lookup::Lookups,
     menu::Facts,
     worker::{Command, Snapshot},
 };
@@ -71,7 +72,7 @@ pub struct Sets {
     pub excluded: HashSet<String>,
     pub banned: HashSet<String>,
     pub hidden: HashMap<String, HashSet<String>>,
-    pub editable: HashMap<String, Option<bool>>,
+    pub editable: Lookups<bool>,
     pub last_format: Option<WriteFormat>,
     pub pushes: usize,
     pub revision: u64,
