@@ -12,7 +12,17 @@ pub fn menu_item(uri: &str) -> Option<MenuItem> {
     if kind == Kind::User {
         return Some(copy);
     }
-    Some(MenuItem::submenu("Share", vec![copy]).symbol("square.and.arrow.up"))
+    let mut items = vec![copy];
+    if let Some(title) = kind.embed_title() {
+        let embed = uri.to_owned();
+        items.push(
+            MenuItem::action(title, move |app, window, cx| {
+                app.show_embed(embed.clone(), window, cx)
+            })
+            .symbol("chevron.left.forwardslash.chevron.right"),
+        );
+    }
+    Some(MenuItem::submenu("Share", items).symbol("square.and.arrow.up"))
 }
 
 fn copy_item(uri: &str, kind: Kind) -> MenuItem {

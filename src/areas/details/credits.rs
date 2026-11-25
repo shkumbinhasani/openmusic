@@ -373,6 +373,7 @@ impl OpenMusic {
             title,
             result: cached.map(Ok),
         });
+        self.details.close_dialogs(window, cx);
         self.details.credits_view = Some((uri, view.clone()));
         let close: dialog::Close = Rc::new(move |_, cx| {
             let _ = app.update(cx, |app, cx| {
@@ -380,7 +381,6 @@ impl OpenMusic {
                 cx.notify();
             });
         });
-        window.close_all_dialogs(cx);
         window.open_dialog(cx, move |dialog, window, cx| {
             let subtitle = view.read(cx).subtitle();
             dialog::frame(

@@ -164,6 +164,7 @@ mod tests {
                 "Share ▸  <square.and.arrow.up>",
                 "  Copy link to Song  c  <link>",
                 "  (⌥) Copy Spotify URI",
+                "  Embed track  <chevron.left.forwardslash.chevron.right>",
             ]
         );
         assert_eq!(
@@ -200,6 +201,7 @@ mod tests {
                 "Share ▸  <square.and.arrow.up>",
                 "  Copy link to Episode  c  <link>",
                 "  (⌥) Copy Spotify URI",
+                "  Embed episode  <chevron.left.forwardslash.chevron.right>",
             ]
         );
         let playing = song_target(EPISODE, Surface::NowPlaying);
@@ -229,6 +231,7 @@ mod tests {
             let lines = menu(&Target::for_uri(uri).unwrap(), &Page::Home);
             assert_eq!(lines[0], "Share ▸  <square.and.arrow.up>", "{uri}");
             assert_eq!(lines[1], format!("  {label}  c  <link>"), "{uri}");
+            assert!(lines[3].starts_with("  Embed "), "{uri}");
         }
         let user = Target::for_uri("spotify:user:someone").unwrap();
         assert_eq!(

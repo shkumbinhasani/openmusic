@@ -6,6 +6,7 @@ use spotify_client::share;
 
 use super::{
     credits::{self, CreditsView},
+    embed::EmbedView,
     menu,
     worker::Event,
 };
@@ -22,10 +23,17 @@ use crate::{
 pub struct State {
     pub credits: credits::Cache,
     pub credits_view: Option<(String, Entity<CreditsView>)>,
+    pub embed_view: Option<(String, Entity<EmbedView>)>,
 }
 
 impl State {
     pub fn covers(&self, _urls: &mut HashSet<String>) {}
+
+    pub fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<OpenMusic>) {
+        window.close_all_dialogs(cx);
+        self.credits_view = None;
+        self.embed_view = None;
+    }
 }
 
 pub fn load(_app: &mut OpenMusic, _page: &Page) {}
@@ -47,6 +55,16 @@ pub fn on_event(
             {
                 view.update(cx, |view, cx| {
                     view.result = Some(result);
+                    cx.notify();
+                });
+            }
+        }
+        Event::CoverColor { uri, color } => {
+            if let Some((open, view)) = &app.details.embed_view
+                && *open == uri
+            {
+                view.update(cx, |view, cx| {
+                    view.swatch = color;
                     cx.notify();
                 });
             }
@@ -88,6 +106,59 @@ pub fn debug(
             "share.txt",
             share::link(uri, &share::share_id()).unwrap_or_else(|| "none".into()),
         ),
+        ("share", ["embed", uri]) => write(
+            "share.txt",
+            share::embed_code(uri, &share::Embed::default()).unwrap_or_else(|| "none".into()),
+        ),
+        ("embed", ["dump"]) => write(
+            "embed.txt",
+            app.details
+                .embed_view
+                .as_ref()
+                .map(|(_, view)| view.read(cx).describe())
+                .unwrap_or_else(|| "closed".into()),
+        ),
+        ("embed" | "credits", ["close"]) => app.details.close_dialogs(window, cx),
+        ("embed", [setting, value @ ..])
+            if app.details.embed_view.is_some() && !value.is_empty() =>
+        {
+            let value = value.join(" ");
+            if let Some((_, view)) = app.details.embed_view.clone() {
+                view.update(cx, |view, cx| {
+                    match *setting {
+                        "theme" => {
+                            view.theme = if value == "dark" {
+                                share::Theme::Dark
+                            } else {
+                                share::Theme::Dynamic
+                            }
+                        }
+                        "size" => {
+                            view.size = if value == "compact" {
+                                share::Size::Compact
+                            } else {
+                                share::Size::Normal
+                            }
+                        }
+                        "width" => view.set_width(&value, window, cx),
+                        "start" if value == "off" => view.start_on = false,
+                        "start" => {
+                            view.start_on = true;
+                            view.set_start(&value, window, cx);
+                        }
+                        "code" => view.show_code = value == "on",
+                        _ => {}
+                    }
+                    cx.notify();
+                });
+            }
+        }
+        ("embed", ["copy"]) => {
+            if let Some((_, view)) = app.details.embed_view.clone() {
+                view.update(cx, |view, cx| view.copy(cx));
+            }
+        }
+        ("embed", [uri]) => app.show_embed((*uri).to_owned(), window, cx),
         ("credits", ["dump"]) => write(
             "credits.txt",
             app.details
@@ -96,10 +167,6 @@ pub fn debug(
                 .map(|(_, view)| view.read(cx).describe())
                 .unwrap_or_else(|| "closed".into()),
         ),
-        ("credits", ["close"]) => {
-            window.close_all_dialogs(cx);
-            app.details.credits_view = None;
-        }
         ("credits", [uri]) => {
             let title = app
                 .track()
@@ -114,11 +181,21 @@ pub fn debug(
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
-    app.details
+    let credits = app
+        .details
         .credits_view
         .as_ref()
-        .map(|(uri, _)| format!("credits={uri}"))
-        .unwrap_or_default()
+        .map(|(uri, _)| format!("credits={uri}"));
+    let embed = app
+        .details
+        .embed_view
+        .as_ref()
+        .map(|(uri, _)| format!("embed={uri}"));
+    [credits, embed]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
