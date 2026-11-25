@@ -14,8 +14,11 @@ use crate::{
     catalog::{LocalTrack, Track, image_url},
     connect::{Repeat, Shuffle},
     playback_settings::LoudnessLevel,
-    player::{FairPlay, Media, PlayerEvent, Snapshot, Source},
+    player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
 };
+use join::{Joins, Taken, choose_file};
+
+mod join;
 
 #[derive(Clone, Debug)]
 pub enum Control {
@@ -64,10 +67,20 @@ pub struct ReportItem {
     pub bitrate: u64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportPrepared {
+    pub generation: u64,
+    pub uri: String,
+    pub join: Join,
+    pub ready: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioReport {
     pub settings: AudioSettings,
     pub playing: Option<ReportItem>,
+    pub prepared: Option<ReportPrepared>,
+    pub joins: Vec<String>,
     pub player: Snapshot,
 }
 
@@ -97,6 +110,17 @@ impl fmt::Display for AudioReport {
             )?,
             None => writeln!(f, "playing none")?,
         }
+        match &self.prepared {
+            Some(prepared) => writeln!(
+                f,
+                "prepared generation={} uri={} join={} ready={}",
+                prepared.generation,
+                prepared.uri,
+                prepared.join.name(),
+                prepared.ready
+            )?,
+            None => writeln!(f, "prepared none")?,
+        }
         let player = &self.player;
         writeln!(
             f,
@@ -124,6 +148,9 @@ impl fmt::Display for AudioReport {
                 deck.rate
             )?;
         }
+        for join in &self.joins {
+            writeln!(f, "join {join}")?;
+        }
         Ok(())
     }
 }
@@ -132,6 +159,7 @@ impl fmt::Display for AudioReport {
 pub(super) struct State {
     settings: AudioSettings,
     updates: Vec<Update>,
+    joins: Joins,
 }
 
 impl State {
@@ -156,6 +184,29 @@ pub(super) struct Playing {
 }
 
 impl Playing {
+    fn new(machine: Value, index: usize, paused: bool, generation: u64, position_ms: u32) -> Self {
+        Self {
+            machine,
+            index,
+            paused,
+            generation,
+            format: Value::Null,
+            bitrate: 0,
+            duration_ms: 0,
+            position_ms,
+            previous_position_ms: 0,
+            started_reported: false,
+            threshold_reported: false,
+            last_progress: Instant::now(),
+        }
+    }
+
+    fn uri(&self) -> &str {
+        self.track()
+            .and_then(|track| track["metadata"]["uri"].as_str())
+            .unwrap_or_default()
+    }
+
     fn state(&self) -> Option<&Value> {
         self.machine["states"].get(self.index)
     }
@@ -261,7 +312,10 @@ impl Engine {
     pub(super) async fn audio(&mut self, control: Control) -> Result<()> {
         match control {
             Control::PlayLocal { .. } => bail!("Local files can’t play yet."),
-            Control::Settings(settings) => self.audio.settings = settings,
+            Control::Settings(settings) => {
+                self.audio.settings = settings;
+                self.check_prepared();
+            }
             Control::Report => {
                 let report = self.audio_report();
                 self.audio.updates.push(Update::Report(Box::new(report)));
@@ -275,11 +329,7 @@ impl Engine {
             settings: self.audio.settings,
             playing: self.playing.as_ref().map(|playing| ReportItem {
                 generation: playing.generation,
-                uri: playing
-                    .track()
-                    .and_then(|track| track["metadata"]["uri"].as_str())
-                    .unwrap_or_default()
-                    .to_owned(),
+                uri: playing.uri().to_owned(),
                 position_ms: playing.position_ms,
                 duration_ms: playing.duration_ms,
                 paused: playing.paused,
@@ -290,6 +340,13 @@ impl Engine {
                     .unwrap_or_else(|| playing.format.to_string()),
                 bitrate: playing.bitrate,
             }),
+            prepared: self
+                .audio
+                .joins
+                .prepared
+                .as_ref()
+                .map(|prepared| prepared.report()),
+            joins: self.audio.joins.log.clone(),
             player: self.player.snapshot(),
         }
     }
@@ -370,6 +427,7 @@ impl Engine {
                     playing.machine = machine;
                     playing.index = index;
                 }
+                self.check_prepared();
             } else {
                 let _ = Box::pin(self.start_state(machine, index, paused, None)).await;
             }
@@ -470,6 +528,7 @@ impl Engine {
             } else {
                 "resume"
             };
+            self.check_prepared();
             self.report(source).await;
             return;
         }
@@ -525,56 +584,37 @@ impl Engine {
         paused: bool,
         seek: Option<u32>,
     ) -> Result<()> {
+        self.discard_prepared();
+        self.audio.joins.tried = None;
         self.generation += 1;
         let state = machine["states"].get(index).cloned().unwrap_or(Value::Null);
         let initial = state["initial_playback_position"]
             .as_u64()
             .unwrap_or_default() as u32;
-        let mut playing = Playing {
+        let mut playing = Playing::new(
             machine,
             index,
             paused,
-            generation: self.generation,
-            format: Value::Null,
-            bitrate: 0,
-            duration_ms: 0,
-            position_ms: seek.unwrap_or(initial),
-            previous_position_ms: 0,
-            started_reported: false,
-            threshold_reported: false,
-            last_progress: Instant::now(),
-        };
+            self.generation,
+            seek.unwrap_or(initial),
+        );
         let track = playing
             .track()
             .cloned()
             .context("Spotify sent no track to play.")?;
-        let files = track["manifest"]["file_ids_mp4_cbcs"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let file = files
-            .iter()
-            .max_by_key(|file| file["bitrate"].as_u64().unwrap_or_default())
-            .cloned()
-            .context("Spotify offered no FairPlay audio for this track.")?;
-        let file_id = file["file_id"]
-            .as_str()
-            .context("Missing file id.")?
-            .to_owned();
-        playing.format = file["format"].clone();
-        playing.bitrate = file["bitrate"].as_u64().unwrap_or(128_000);
+        let file =
+            choose_file(&track).context("Spotify offered no FairPlay audio for this track.")?;
+        playing.format = file.format.clone();
+        playing.bitrate = file.bitrate;
         playing.duration_ms = track["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
-        let format_number = file["format"]
-            .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| file["format"].to_string());
         self.playing = Some(playing);
+        self.audio.joins.record(format!("cold {}", self.generation));
         self.report("before_track_load").await;
 
         let media = Media {
             start_ms: seek.unwrap_or(initial),
             play: !paused,
-            ..self.media(&file_id, &format_number).await?
+            ..self.media(&file.id, &file.format_number).await?
         };
         self.player.set_volume(f32::from(self.volume) / GAIA_VOLUME);
         self.player.load(self.generation, media);
@@ -678,9 +718,12 @@ impl Engine {
                     .playing
                     .as_mut()
                     .filter(|playing| playing.generation == generation)
-                    && duration_ms > 0
                 {
-                    playing.duration_ms = duration_ms;
+                    if duration_ms > 0 {
+                        playing.duration_ms = duration_ms;
+                    }
+                } else {
+                    self.prepared_ready(generation, duration_ms);
                 }
             }
             PlayerEvent::Position {
@@ -724,11 +767,10 @@ impl Engine {
                 if let Some(source) = source {
                     self.report(source).await;
                 }
+                self.prepare_next().await;
             }
-            PlayerEvent::Ended { generation }
-            | PlayerEvent::Advanced {
-                from: generation, ..
-            } => {
+            PlayerEvent::Advanced { from, to } => self.joined(from, to).await,
+            PlayerEvent::Ended { generation } => {
                 if self
                     .playing
                     .as_ref()
@@ -741,6 +783,9 @@ impl Engine {
                 generation,
                 message,
             } => {
+                if self.prepared_failed(generation) {
+                    return;
+                }
                 let current = self.playing.as_ref().map(|playing| playing.generation);
                 if generation == 0 || Some(generation) == current {
                     self.report("error").await;
@@ -751,6 +796,19 @@ impl Engine {
     }
 
     pub(super) async fn advance(&mut self, transition: &str) {
+        let how = if transition == "advance" {
+            "promote"
+        } else {
+            "skip"
+        };
+        match self.take_prepared(transition, how).await {
+            Taken::Joined(generation) => self.player.promote(generation),
+            Taken::Superseded => {}
+            Taken::Missing => self.advance_cold(transition).await,
+        }
+    }
+
+    async fn advance_cold(&mut self, transition: &str) {
         let Some(playing) = self.playing.as_ref() else {
             return;
         };
@@ -765,7 +823,16 @@ impl Engine {
             return;
         };
         let machine = playing.machine.clone();
+        let old = playing.generation;
+        if transition == "advance"
+            && let Some(playing) = self.playing.as_mut()
+        {
+            playing.position_ms = playing.duration_ms.max(playing.position_ms);
+        }
         self.report("track_data_finalized").await;
+        if self.playing.as_ref().map(|playing| playing.generation) != Some(old) {
+            return;
+        }
         if let Err(error) = self.start_state(machine, index, paused, None).await {
             let _ = error;
             self.report("error").await;
@@ -775,6 +842,7 @@ impl Engine {
     pub(super) fn stop_local(&mut self) {
         self.player.stop();
         self.playing = None;
+        self.audio.joins.reset();
     }
 
     pub(super) async fn pause_local(&mut self) {
