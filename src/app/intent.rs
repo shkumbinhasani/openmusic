@@ -1,10 +1,6 @@
 use gpui::{Context, Window};
-use spotify_client::connect::{self, PlayOptions};
 
-use crate::{
-    app::{OpenMusic, Page},
-    areas::playback::worker::Command,
-};
+use crate::app::{OpenMusic, Page};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Intent {
@@ -64,13 +60,11 @@ impl Intent {
 impl OpenMusic {
     pub fn perform(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
-            Intent::PlayPause | Intent::Play | Intent::Pause | Intent::Next | Intent::Previous
-                if self.guest_locked() => {}
             Intent::PlayPause => self.toggle(cx),
             Intent::Play => self.set_playing(true, cx),
             Intent::Pause => self.set_playing(false, cx),
-            Intent::Next => self.send(Command::Next),
-            Intent::Previous => self.send(Command::Previous),
+            Intent::Next => self.next_track(cx),
+            Intent::Previous => self.previous_track(cx),
             Intent::SeekTo(position) => {
                 if let Some(duration) = self.duration() {
                     self.seek_to(position.min(duration - 1), cx);
@@ -88,17 +82,7 @@ impl OpenMusic {
             Intent::ToggleShuffle => self.toggle_shuffle(cx),
             Intent::CycleRepeat => self.cycle_repeat(cx),
             Intent::ToggleLike => self.like_current(),
-            Intent::PlayContext(uri) => {
-                if !self.needs_premium_here(false, cx) {
-                    self.send(Command::PlayContext {
-                        uri,
-                        index: 0,
-                        track_uri: None,
-                        origin: connect::ORIGIN,
-                        options: PlayOptions::default(),
-                    });
-                }
-            }
+            Intent::PlayContext(uri) => self.play_context(&uri, &[], 0, cx),
             Intent::ShowMainWindow => self.show_main_window(window, cx),
             Intent::ToggleMiniPlayer => self.toggle_mini_player(window, cx),
             Intent::Navigate(page) => self.navigate(page),

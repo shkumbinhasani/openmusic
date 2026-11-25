@@ -465,7 +465,7 @@ impl OpenMusic {
                     },
                 )),
             );
-            if self.playing_in(&ban) {
+            if self.playing_in(&ban) && !self.jam_controls_locked() {
                 self.send(playback::worker::Command::Next);
             }
         }
@@ -487,7 +487,9 @@ impl OpenMusic {
             if self.is_saved(&uri) != Some(false) {
                 self.set_saved(vec![uri.clone()], false);
             }
-            if self.track().and_then(first_artist) == Some(uri.as_str()) {
+            if self.track().and_then(first_artist) == Some(uri.as_str())
+                && !self.jam_controls_locked()
+            {
                 self.send(playback::worker::Command::Next);
             }
         }

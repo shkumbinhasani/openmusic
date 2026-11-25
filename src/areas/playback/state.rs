@@ -405,12 +405,20 @@ impl OpenMusic {
         if !self.dj_jump_available() {
             return;
         }
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         self.playback.notice = None;
         self.send(Command::DjJump);
         cx.notify();
     }
 
     pub fn play_dj(&mut self, cx: &mut Context<Self>) {
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         if self.needs_premium_here(false, cx) {
             return;
         }
@@ -446,6 +454,10 @@ impl OpenMusic {
         }
         self.show_toast(GUEST_WARNING, None);
         true
+    }
+
+    fn transport_locked(&mut self) -> bool {
+        !self.local_playing() && self.guest_locked()
     }
 
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
@@ -563,6 +575,10 @@ impl OpenMusic {
     }
 
     pub fn shuffle_play(&mut self, uri: &str, cx: &mut Context<Self>) {
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         if self.needs_premium_here(false, cx) {
             return;
         }
@@ -575,6 +591,10 @@ impl OpenMusic {
         let Some(track) = tracks.get(index) else {
             return;
         };
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         if self.needs_premium_here(false, cx) {
             return;
         }
@@ -601,6 +621,10 @@ impl OpenMusic {
         if self.track().is_some() && self.playback.now.playing == playing {
             return;
         }
+        if self.transport_locked() {
+            cx.notify();
+            return;
+        }
         if playing && self.needs_premium_here(true, cx) {
             return;
         }
@@ -612,7 +636,27 @@ impl OpenMusic {
         cx.notify();
     }
 
+    pub fn next_track(&mut self, cx: &mut Context<Self>) {
+        if self.transport_locked() {
+            cx.notify();
+            return;
+        }
+        self.send(Command::Next);
+    }
+
+    pub fn previous_track(&mut self, cx: &mut Context<Self>) {
+        if self.transport_locked() {
+            cx.notify();
+            return;
+        }
+        self.send(Command::Previous);
+    }
+
     pub fn seek_to(&mut self, position: u32, cx: &mut Context<Self>) {
+        if self.transport_locked() {
+            cx.notify();
+            return;
+        }
         self.playback.now.position_ms = position;
         self.playback.now.observed = Instant::now();
         self.playback.seek_hold = Some((position, Instant::now()));
@@ -650,6 +694,10 @@ impl OpenMusic {
         let Some(index) = self.streamable_start(tracks, index, cx) else {
             return;
         };
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         if self.needs_premium_here(false, cx) {
             return;
         }
@@ -948,6 +996,10 @@ impl OpenMusic {
         }
         if row.0 == QUEUE_CURRENT {
             self.toggle(cx);
+            return;
+        }
+        if self.guest_locked() {
+            cx.notify();
             return;
         }
         if !self.playback_allowed().jump_in_queue {

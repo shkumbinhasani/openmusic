@@ -111,6 +111,10 @@ impl JamState {
     }
 }
 
+pub fn queue_only_guest(session: Option<&Session>) -> bool {
+    session.is_some_and(|session| !session.is_owner && session.queue_only)
+}
+
 pub fn people_label(count: usize) -> String {
     if count == 1 {
         "1 person".to_owned()
@@ -268,8 +272,7 @@ impl OpenMusic {
     }
 
     pub fn jam_controls_locked(&self) -> bool {
-        self.jam()
-            .is_some_and(|session| !session.is_owner && session.queue_only)
+        queue_only_guest(self.jam())
     }
 
     pub fn jam_busy(&self) -> bool {
@@ -1520,6 +1523,22 @@ mod tests {
             JamAction::QueueOnly(true).failure(),
             "Couldn’t change the Jam settings. Try again."
         );
+    }
+
+    #[test]
+    fn locks_only_a_guest_in_a_queue_only_jam() {
+        assert!(!queue_only_guest(None));
+        let host = Session {
+            queue_only: true,
+            ..session(true)
+        };
+        assert!(!queue_only_guest(Some(&host)));
+        assert!(!queue_only_guest(Some(&session(false))));
+        let guest = Session {
+            queue_only: true,
+            ..session(false)
+        };
+        assert!(queue_only_guest(Some(&guest)));
     }
 
     #[test]
