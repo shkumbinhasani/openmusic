@@ -6,7 +6,7 @@ use gpui_component::{
     slider::{SliderEvent, SliderState},
 };
 use spotify_client::{
-    engine::playback::{Quality, device_name},
+    engine::playback::{Quality, Stream, StreamKind, device_name},
     playback_settings::{LoudnessLevel, MAX_CROSSFADE_MS},
 };
 
@@ -41,6 +41,8 @@ pub const SYNC_FAILED_TITLE: &str = "Couldn’t load your playback settings from
 pub const SYNC_FAILED_TEXT: &str = "Changes here still apply on this Mac.";
 pub const QUALITY_TITLE: &str = "Streaming quality";
 pub const LOWERED_NOTE: &str = "Playback stalled, so songs play at 128 kbps for now. They go back to 256 kbps after 15 minutes without a stall.";
+pub const NEXT_SONG: &str = "A new choice starts with the next song.";
+pub const OTHER_SOURCE: &str = "Streaming quality doesn’t change this source.";
 pub const FORMATS_NOTE: &str =
     "Very high and lossless use Spotify’s own encryption, which OpenMusic can’t play.";
 pub const NORMALIZE_TITLE: &str = "Normalize volume";
@@ -202,7 +204,16 @@ pub fn playback_lines(
     lines
 }
 
-pub fn quality_lines(quality: Quality, lowered: bool, stream: Option<&str>) -> Vec<Line> {
+pub fn now_playing_note(stream: &Stream) -> String {
+    let follow = if stream.kind == StreamKind::FairPlay {
+        NEXT_SONG
+    } else {
+        OTHER_SOURCE
+    };
+    format!("Now playing: {}. {follow}", stream.describe())
+}
+
+pub fn quality_lines(quality: Quality, lowered: bool, stream: Option<&Stream>) -> Vec<Line> {
     let mut lines = vec![Line::Choice {
         key: QUALITY_KEY,
         title: QUALITY_TITLE,
@@ -214,7 +225,7 @@ pub fn quality_lines(quality: Quality, lowered: bool, stream: Option<&str>) -> V
         lines.push(Line::Note(LOWERED_NOTE.to_owned()));
     }
     if let Some(stream) = stream {
-        lines.push(Line::Note(format!("Now playing: {stream}")));
+        lines.push(Line::Note(now_playing_note(stream)));
     }
     lines.push(Line::Note(FORMATS_NOTE.to_owned()));
     lines
@@ -316,7 +327,7 @@ impl OpenMusic {
         quality_lines(
             self.settings.audio.quality,
             self.quality_lowered(),
-            self.stream_text().as_deref(),
+            self.audio.status.stream.as_ref(),
         )
     }
 
@@ -424,7 +435,10 @@ impl OpenMusic {
 
     pub fn type_device_name(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.show_name(text, window, cx);
-        self.commit_device_name(false, window, cx);
+        cx.defer_in(window, |app, window, cx| {
+            app.commit_device_name(false, window, cx);
+            cx.notify();
+        });
     }
 
     fn show_name(&self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -662,11 +676,28 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], Line::Note(FORMATS_NOTE.to_owned()));
 
-        let lines = quality_lines(Quality::Automatic, true, Some("AAC 128 kbps, FairPlay"));
+        let fairplay = Stream {
+            kind: StreamKind::FairPlay,
+            codec: Some("AAC".to_owned()),
+            kbps: Some(128),
+        };
+        let lines = quality_lines(Quality::Automatic, true, Some(&fairplay));
         assert_eq!(lines[1], Line::Note(LOWERED_NOTE.to_owned()));
         assert_eq!(
             lines[2],
-            Line::Note("Now playing: AAC 128 kbps, FairPlay".to_owned())
+            Line::Note(
+                "Now playing: AAC 128 kbps, FairPlay. A new choice starts with the next song."
+                    .to_owned()
+            )
+        );
+        let host = Stream {
+            kind: StreamKind::Host,
+            codec: Some("MP3".to_owned()),
+            kbps: None,
+        };
+        assert_eq!(
+            now_playing_note(&host),
+            "Now playing: MP3 from the podcast’s host. Streaming quality doesn’t change this source."
         );
 
         let lines = quality_lines(Quality::High, true, None);
