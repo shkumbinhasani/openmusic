@@ -356,6 +356,9 @@ impl OpenMusic {
             self.evict_covers(window, cx);
             self.cover_scan = Some((self.covers.len(), self.page.clone()));
         }
+        for image in ui::drawn::offscreen(COVER_CACHE_LIMIT) {
+            release(image, true, window, cx);
+        }
     }
 
     fn release_covers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
