@@ -102,7 +102,8 @@ pub enum Event {
         prefix: String,
         result: Result<Suggestions, String>,
     },
-    RecentSearches {
+    RecentSearches(Result<Vec<Hit>, String>),
+    SearchesWritten {
         result: Result<Vec<Hit>, String>,
         notice: Option<String>,
     },
@@ -130,7 +131,8 @@ impl Event {
                 result: Ok(suggestions),
                 ..
             } => return suggestions.images(),
-            Self::RecentSearches {
+            Self::RecentSearches(Ok(hits))
+            | Self::SearchesWritten {
                 result: Ok(hits), ..
             } => return hits.iter().filter_map(|hit| hit.image().cloned()).collect(),
             Self::DirectTrack {
@@ -326,16 +328,12 @@ async fn read_recent(api: &Api) -> Result<Vec<Hit>, String> {
 }
 
 async fn recent_searches(api: Api) -> crate::worker::Event {
-    Event::RecentSearches {
-        result: read_recent(&api).await,
-        notice: None,
-    }
-    .into()
+    Event::RecentSearches(read_recent(&api).await).into()
 }
 
 async fn remember_searches(api: Api, uris: Vec<String>) -> Result<crate::worker::Event, String> {
     let _ = search::remember(&api, &uris).await;
-    Ok(Event::RecentSearches {
+    Ok(Event::SearchesWritten {
         result: read_recent(&api).await,
         notice: None,
     }
@@ -350,7 +348,7 @@ async fn forget_searches(api: Api, uris: Vec<String>) -> Result<crate::worker::E
             "Couldn’t remove this from your recent searches. Try again.".to_owned()
         }
     });
-    Ok(Event::RecentSearches {
+    Ok(Event::SearchesWritten {
         result: read_recent(&api).await,
         notice,
     }

@@ -122,6 +122,55 @@ pub struct Recent {
     pub loaded_at: Option<Instant>,
     pub pending: bool,
     backup: Option<Vec<Hit>>,
+    writes: usize,
+    failed: bool,
+    read_stale: bool,
+}
+
+impl Recent {
+    fn start_read(&mut self) {
+        self.pending = true;
+        self.read_stale = self.writes > 0;
+    }
+
+    fn queue_write(&mut self) {
+        self.writes += 1;
+        if self.pending {
+            self.read_stale = true;
+        }
+    }
+
+    fn queue_removal(&mut self) {
+        self.backup.get_or_insert_with(|| self.items.clone());
+        self.queue_write();
+    }
+
+    fn read(&mut self, result: Result<Vec<Hit>, String>) {
+        self.pending = false;
+        let stale = std::mem::take(&mut self.read_stale);
+        if let (false, Ok(items)) = (stale, result) {
+            self.items = items;
+            self.loaded_at = Some(Instant::now());
+        }
+    }
+
+    fn written(&mut self, result: Result<Vec<Hit>, String>, failed: bool) {
+        self.writes = self.writes.saturating_sub(1);
+        self.failed |= failed;
+        if self.writes > 0 {
+            return;
+        }
+        let backup = self.backup.take();
+        let failed = std::mem::take(&mut self.failed);
+        match (result, backup) {
+            (Ok(items), _) => {
+                self.items = items;
+                self.loaded_at = Some(Instant::now());
+            }
+            (Err(_), Some(backup)) if failed => self.items = backup,
+            (Err(_), _) => {}
+        }
+    }
 }
 
 #[derive(Default)]
@@ -293,6 +342,12 @@ impl super::state::State {
 
     pub fn drop_rows(&self) -> Vec<DropRow> {
         drop_rows(&self.suggest, &self.recent.items)
+    }
+
+    fn keep_suggestion_in_range(&mut self) {
+        let count = self.drop_rows().len();
+        let suggest = &mut self.suggest;
+        suggest.index = suggest.index.filter(|index| *index < count);
     }
 
     pub fn suggestions_visible(&self) -> bool {
@@ -507,13 +562,15 @@ impl OpenMusic {
         if recent.pending || (fresh && !force) || !matches!(self.session, Session::Connected) {
             return;
         }
-        recent.pending = true;
+        recent.start_read();
         self.send(Command::RecentSearches);
     }
 
     pub fn remember_search(&mut self, hit: Hit) {
         let uri = hit.uri().to_owned();
-        remembered(&mut self.discovery.recent.items, hit);
+        let recent = &mut self.discovery.recent;
+        remembered(&mut recent.items, hit);
+        recent.queue_write();
         self.send(Command::RememberSearches(vec![uri]));
     }
 
@@ -526,11 +583,9 @@ impl OpenMusic {
         if !recent.items.iter().any(|hit| hit.uri() == uri) {
             return;
         }
-        recent.backup.get_or_insert_with(|| recent.items.clone());
+        recent.queue_removal();
         recent.items.retain(|hit| hit.uri() != uri);
-        let count = self.discovery.drop_rows().len();
-        let suggest = &mut self.discovery.suggest;
-        suggest.index = suggest.index.filter(|index| *index < count);
+        self.discovery.keep_suggestion_in_range();
         self.send(Command::ForgetSearches(vec![uri.to_owned()]));
     }
 
@@ -540,7 +595,7 @@ impl OpenMusic {
             return;
         }
         let recent = &mut self.discovery.recent;
-        recent.backup.get_or_insert_with(|| recent.items.clone());
+        recent.queue_removal();
         recent.items.clear();
         self.discovery.suggest.index = None;
         self.send(Command::ForgetSearches(uris));
@@ -879,26 +934,13 @@ impl OpenMusic {
                     }
                 }
             }
-            Event::RecentSearches { result, notice } => {
-                let recent = &mut self.discovery.recent;
-                recent.pending = false;
-                let backup = recent.backup.take();
-                match result {
-                    Ok(items) => {
-                        recent.items = items;
-                        recent.loaded_at = Some(Instant::now());
-                    }
-                    Err(_) => {
-                        if notice.is_some()
-                            && let Some(backup) = backup
-                        {
-                            recent.items = backup;
-                        }
-                    }
-                }
-                let count = self.discovery.drop_rows().len();
-                let suggest = &mut self.discovery.suggest;
-                suggest.index = suggest.index.filter(|index| *index < count);
+            Event::RecentSearches(result) => {
+                self.discovery.recent.read(result);
+                self.discovery.keep_suggestion_in_range();
+            }
+            Event::SearchesWritten { result, notice } => {
+                self.discovery.recent.written(result, notice.is_some());
+                self.discovery.keep_suggestion_in_range();
                 if let Some(notice) = notice {
                     self.show_toast(notice, None);
                 }
@@ -1162,6 +1204,73 @@ mod tests {
             state.recent_uris(),
             ["spotify:artist:a".to_owned(), "spotify:artist:b".to_owned()]
         );
+    }
+
+    fn titles(recent: &Recent) -> Vec<&str> {
+        recent
+            .items
+            .iter()
+            .map(|hit| hit.card.title.as_str())
+            .collect()
+    }
+
+    fn listed(ids: &[&str]) -> Result<Vec<Hit>, String> {
+        Ok(ids.iter().map(|id| hit(id, Kind::Artist)).collect())
+    }
+
+    fn removing_b_while_a_read_runs() -> Recent {
+        let mut recent = Recent {
+            items: listed(&["a", "b"]).unwrap(),
+            ..Recent::default()
+        };
+        recent.start_read();
+        recent.queue_removal();
+        recent.items.retain(|hit| hit.card.title != "b");
+        recent
+    }
+
+    #[test]
+    fn a_read_that_overlaps_a_remove_does_not_bring_the_entry_back() {
+        let mut recent = removing_b_while_a_read_runs();
+        recent.read(listed(&["a", "b"]));
+        assert_eq!(titles(&recent), ["a"]);
+        assert!(!recent.pending);
+        recent.written(listed(&["a"]), false);
+        assert_eq!(titles(&recent), ["a"]);
+
+        let mut late = removing_b_while_a_read_runs();
+        late.written(listed(&["a"]), false);
+        assert!(late.pending);
+        late.read(listed(&["a", "b"]));
+        assert_eq!(titles(&late), ["a"]);
+        assert!(!late.pending);
+    }
+
+    #[test]
+    fn a_failed_remove_restores_the_entry_even_after_a_failed_read() {
+        let mut recent = removing_b_while_a_read_runs();
+        recent.read(Err("offline".into()));
+        recent.written(Err("offline".into()), true);
+        assert_eq!(titles(&recent), ["a", "b"]);
+    }
+
+    #[test]
+    fn only_the_last_queued_write_settles_the_list() {
+        let mut recent = Recent {
+            items: listed(&["a", "b", "c"]).unwrap(),
+            ..Recent::default()
+        };
+        recent.queue_removal();
+        recent.items.retain(|hit| hit.card.title != "a");
+        recent.queue_removal();
+        recent.items.retain(|hit| hit.card.title != "b");
+        recent.written(listed(&["b", "c"]), false);
+        assert_eq!(titles(&recent), ["c"]);
+        recent.written(listed(&["c"]), false);
+        assert_eq!(titles(&recent), ["c"]);
+        recent.start_read();
+        recent.read(listed(&["c", "d"]));
+        assert_eq!(titles(&recent), ["c", "d"]);
     }
 
     #[test]
