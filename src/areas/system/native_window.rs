@@ -195,9 +195,12 @@ mod native {
     }
 
     pub fn close() {
-        if let Some(window) = window() {
-            window.performClose(None);
-        }
+        let block = RcBlock::new(|| {
+            if let Some(window) = window() {
+                window.performClose(None);
+            }
+        });
+        unsafe { NSOperationQueue::mainQueue().addOperationWithBlock(&block) };
     }
 
     pub fn show() {
