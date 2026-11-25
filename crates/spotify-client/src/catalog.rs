@@ -152,6 +152,26 @@ pub(crate) async fn extended(
 }
 
 const LINK_KINDS: [&str; 6] = ["track", "album", "playlist", "artist", "show", "episode"];
+const RELEASES: usize = 24;
+const RELEASE_SHARES: [usize; 3] = [12, 8, 4];
+
+fn share_releases(kinds: [(Vec<String>, &'static str); 3]) -> Vec<(String, &'static str)> {
+    let mut taken = RELEASE_SHARES;
+    for (count, (ids, _)) in taken.iter_mut().zip(&kinds) {
+        *count = (*count).min(ids.len());
+    }
+    let mut spare = RELEASES.saturating_sub(taken.iter().sum());
+    for (count, (ids, _)) in taken.iter_mut().zip(&kinds) {
+        let more = (ids.len() - *count).min(spare);
+        *count += more;
+        spare -= more;
+    }
+    kinds
+        .into_iter()
+        .zip(taken)
+        .flat_map(|((ids, kind), count)| ids.into_iter().take(count).map(move |id| (id, kind)))
+        .collect()
+}
 
 fn base62_id(id: &str) -> bool {
     id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -377,21 +397,17 @@ pub async fn artist(api: &Api, uri: &str) -> Result<Artist> {
         .map(strip_tags)
         .filter(|text| !text.is_empty());
 
-    let mut release_ids: Vec<(String, &'static str)> = Vec::new();
-    for (groups, kind) in [
-        (&artist.album_group, "Album"),
-        (&artist.single_group, "Single"),
-        (&artist.compilation_group, "Compilation"),
-    ] {
-        for group in groups.iter() {
-            if let Some(gid) = group.album.first().and_then(|album| album.gid.as_deref())
-                && let Some(uri) = uri_from_gid("album", gid)
-            {
-                release_ids.push((uri, kind));
-            }
-        }
-    }
-    release_ids.truncate(24);
+    let uris = |groups: &[metadata::AlbumGroup]| -> Vec<String> {
+        groups
+            .iter()
+            .filter_map(|group| uri_from_gid("album", group.album.first()?.gid.as_deref()?))
+            .collect()
+    };
+    let release_ids = share_releases([
+        (uris(&artist.album_group), "Album"),
+        (uris(&artist.single_group), "Single"),
+        (uris(&artist.compilation_group), "Compilation"),
+    ]);
     let entries: Vec<(String, ExtensionKind)> = release_ids
         .iter()
         .map(|(uri, _)| (uri.clone(), ExtensionKind::AlbumV4))
@@ -861,6 +877,37 @@ mod tests {
     use super::*;
 
     const TRACK_ID: &str = "4uLU6hMCjMI75M1A2tKUQC";
+
+    fn ids(prefix: &str, count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("{prefix}{index}")).collect()
+    }
+
+    fn shared(albums: usize, singles: usize, compilations: usize) -> [usize; 3] {
+        let picked = share_releases([
+            (ids("a", albums), "Album"),
+            (ids("s", singles), "Single"),
+            (ids("c", compilations), "Compilation"),
+        ]);
+        ["Album", "Single", "Compilation"]
+            .map(|kind| picked.iter().filter(|(_, found)| *found == kind).count())
+    }
+
+    #[test]
+    fn keeps_singles_and_compilations_for_artists_with_many_albums() {
+        assert_eq!(shared(30, 10, 5), [12, 8, 4]);
+        assert_eq!(shared(15, 20, 3), [13, 8, 3]);
+        assert_eq!(shared(2, 30, 0), [2, 22, 0]);
+        assert_eq!(shared(30, 0, 0), [24, 0, 0]);
+        assert_eq!(shared(3, 2, 1), [3, 2, 1]);
+        assert_eq!(shared(0, 0, 0), [0, 0, 0]);
+        let picked = share_releases([
+            (ids("a", 13), "Album"),
+            (ids("s", 1), "Single"),
+            (Vec::new(), "Compilation"),
+        ]);
+        assert_eq!(picked.first(), Some(&("a0".to_owned(), "Album")));
+        assert_eq!(picked.last(), Some(&("s0".to_owned(), "Single")));
+    }
 
     fn uri(input: &str) -> String {
         parse_link(input).unwrap().unwrap()
