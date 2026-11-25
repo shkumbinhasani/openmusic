@@ -6,7 +6,7 @@
 
 <p align="center">
   A native macOS player for Spotify, written in Rust.<br>
-  One 13 MB app. No web view, no Electron, no librespot.
+  One small app. No web view, no Electron, no librespot.
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@
   <img src="docs/images/openmusic.png" alt="OpenMusic showing the EnteTainment artist page while playing “JBB Finale vs. NEO”" width="880">
 </p>
 
-OpenMusic signs in to your Spotify Premium account and joins it as a Spotify Connect device. It plays audio itself, so you can control it from Spotify on your phone, and it shows whatever your account plays on other devices. The interface uses the native macOS glass controls.
+OpenMusic signs in to your Spotify account and joins it as a Spotify Connect device. It plays music and podcasts itself, so you can control it from Spotify on your phone, and it shows whatever your account plays on other devices. The interface uses the native macOS glass controls.
 
 ## Benchmarks
 
@@ -37,7 +37,7 @@ OpenMusic against the official Spotify app on the same Mac, measured with `scrip
 
 <sub>MacBook Pro with Apple M4 Pro and 24 GB of memory, macOS 27.0, 23 November 2026. Launch time is the median of five launches, from <code>open</code> until the first window is on screen. Memory is the physical footprint of every process the app runs, added together; this is the figure Activity Monitor shows. CPU is the share of one core over 30 seconds. Each app was measured alone, signed in, 20 seconds after launch and again 20 seconds after it started playing the same album.</sub>
 
-Run the benchmark yourself after building the app. It needs OpenMusic signed in, and Spotify installed if you want the comparison. It plays music in both apps for about a minute.
+These figures come from before this release added podcasts, video, Jam, local files and the other features below, so the current app may differ. Run the benchmark yourself after building the app. It needs OpenMusic signed in, and Spotify installed if you want the comparison. It plays music in both apps for about a minute.
 
 ```sh
 ./scripts/bundle-macos.sh
@@ -60,23 +60,34 @@ Download `OpenMusic-<version>-arm64.zip` for Apple silicon or `OpenMusic-<versio
 
 ### Gatekeeper
 
-Releases are not notarized yet. The Homebrew cask removes the quarantine flag after installing, so OpenMusic opens straight away; that also skips the check macOS runs on a downloaded app's first launch. If you download the zip yourself, macOS blocks the first launch: open OpenMusic once, then go to **System Settings → Privacy & Security** and choose **Open Anyway**. Once releases are notarized, the release workflow drops that step from the cask and macOS checks the app as usual. See `docs/research/homebrew-updates.md` for the details.
+The release workflow signs each release with a Developer ID certificate, and Apple notarizes it. On the first launch macOS checks the app, as it does any downloaded app, and asks you once to confirm that you want to open it. The Homebrew cask no longer removes the quarantine flag, so macOS runs the same check for Homebrew installs.
 
 ### First launch
 
-Choose **Sign in with Spotify** and approve the pairing in your browser with a Spotify Premium account. OpenMusic keeps the sign-in in your macOS Keychain. Choose **OpenMusic → Sign Out of Spotify** to remove it.
+Choose **Sign in with Spotify** and approve the pairing in your browser. Playing on this Mac needs Spotify Premium. OpenMusic keeps the sign-in in your macOS Keychain. Choose **OpenMusic → Sign Out of Spotify** to remove it.
 
 ## What it does
 
-- **Spotify Connect.** OpenMusic appears as a device named “OpenMusic”. Pick it from any Spotify app, or choose **Play on This Mac** to move playback from another device.
-- **Home.** Spotify’s Home feed: shortcuts, your mixes, recently played and recommendations, with Music and Podcasts filters. Every card has a play button on hover.
-- **Search.** Songs, artists, albums, playlists, podcasts and profiles, with suggestions as you type and your recent searches. Browse all opens Spotify’s genres and moods. Paste any Spotify link or URI to open it. Command-F focuses the search field. If Spotify’s search service fails, songs still come back.
-- **Playlists, albums and artists.** Your playlists sit in the sidebar. Artist pages show the portrait, popular songs, the discography by albums, singles and compilations, the biography and artists fans also like, with Follow and Play. Playing a song from a playlist or album queues the rest, as Spotify does.
+- **Spotify Connect.** OpenMusic appears as a device named “OpenMusic”. Pick it from any Spotify app, or choose **Play on This Mac** to move playback here. The device picker lists every device on your account, moves playback between them and sets their volume.
+- **Playback.** Shuffle, smart shuffle and repeat, and a queue you can reorder and clear. Gapless playback, crossfade, Automix, volume normalization (it can only turn the volume down), a sleep timer and podcast speed. Spotify’s DJ shows up when your account has it; OpenMusic skips the DJ’s voice.
+- **Home and search.** Spotify’s Home feed with Music and Podcasts filters, and Browse all with its genre pages. Search finds songs, artists, albums, playlists, podcasts, episodes, audiobooks and profiles, suggests as you type and keeps your recent searches. Paste any Spotify link or URI to open it.
+- **Your Library.** The sidebar lists your playlists, albums, artists, podcasts and audiobooks, with filters, sorting, pins and folders. Like songs, save albums, follow artists, playlists and people. Create, rename and delete playlists and folders; add, remove and reorder songs; change a playlist’s name, description and cover; invite collaborators.
+- **Artists, albums and songs.** Artist pages show popular songs, the discography, music videos, the biography and related artists. Each song has a page with its credits. Right-click any song, album, artist, playlist, show or episode for Spotify’s menu: add to the queue or a playlist, go to the album or artist, song radio, share, embed, hide a song in a playlist or album, stop an artist from playing, or exclude it from your taste profile.
+- **Podcasts.** Show and episode pages, Your Episodes, resume where you stopped, mark as finished, and transcripts. Video podcasts play on the Now Playing page, with full screen. Episodes that a podcast hosts outside Spotify stream from that host, so the host can see what you play, as with Spotify’s own apps.
+- **Video.** Canvas loops in the dock artwork and on the Now Playing page. Songs with a music video can switch to it.
 - **Lyrics.** Time-synced lyrics highlight and scroll with the song. Click a line to jump to it.
+- **Jam and Blend.** Start a Jam, invite people with its link, or join one from a link. Create a Blend and see who is in it.
+- **Local files.** Add folders in Settings to play music files from your Mac. Local songs inside your Spotify playlists play too.
+- **People.** Friend Activity shows what the people you follow are playing. Profile pages show their public playlists, followers and who they follow.
 - **Mac integration.** Media keys, AirPods and Control Center control playback, and the song shows in Now Playing. Spotify’s keyboard shortcuts work; press ? to list them. Closing the window keeps the music playing; the Dock icon brings it back, and its menu holds the song, playback controls and Recently Played. Option-Command-M opens a floating mini player. Settings can turn on song-change notifications, Open at Login, and a broadcast of what’s playing for scrobblers and other apps.
 - **Native controls.** On macOS 26 and later the playback buttons, now-playing bar and volume are AppKit glass controls placed over the GPUI content, so songs scroll underneath them. Older systems get plain controls, without seeking and volume.
 
-Podcasts and offline downloads are not supported.
+## What it does not do
+
+- **Offline downloads, 320 kbps and lossless.** Spotify protects these files with its own encryption rather than FairPlay, and OpenMusic does not break it. Songs stream at up to 256 kbps.
+- **Audiobooks.** You can browse and save them, but they do not play. OpenMusic offers to open them in Spotify.
+- **Private session.** Spotify offers no way for OpenMusic to start one.
+- **Free accounts.** You can sign in, browse and control Spotify on your other devices, but playing on this Mac needs Premium.
 
 ## Build from source
 
@@ -127,7 +138,8 @@ OpenMusic registers with Spotify the way Spotify’s Web Playback SDK does, then
 2. A websocket to Spotify’s dealer service delivers commands (`dealer.rs`).
 3. OpenMusic registers a track-playback device and follows the state machine Spotify sends, reporting playback state back (`engine/`).
 4. Audio is Spotify’s FairPlay-protected AAC. OpenMusic builds an HLS playlist from the file’s segment table and plays it with AVFoundation. macOS FairPlay decrypts it with a license from Spotify, so the content protection stays intact (`player.rs`).
-5. Metadata, search, stations, liked songs and lyrics come from Spotify’s internal API (`catalog.rs`). Other devices are mirrored through a Connect observer (`connect.rs`).
+5. Episodes hosted outside Spotify and local files play as plain files through the same player.
+6. Metadata, Home, search, your library and lyrics come from Spotify’s internal APIs (`catalog.rs`, `pathfinder.rs` and the modules beside them). Other devices are mirrored through a Connect observer (`connect.rs`).
 
 The protobuf schemas in `crates/spotify-proto/proto` were extracted from the Spotify macOS app; see `docs/research/proto-extraction.md`. The rest of the protocol research is in `docs/research/`.
 
