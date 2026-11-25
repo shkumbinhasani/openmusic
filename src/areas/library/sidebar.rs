@@ -677,6 +677,7 @@ impl OpenMusic {
         div()
             .flex_1()
             .min_h_0()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .gap_2()
