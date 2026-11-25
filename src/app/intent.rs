@@ -64,6 +64,8 @@ impl Intent {
 impl OpenMusic {
     pub fn perform(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         match intent {
+            Intent::PlayPause | Intent::Play | Intent::Pause | Intent::Next | Intent::Previous
+                if self.guest_locked() => {}
             Intent::PlayPause => self.toggle(cx),
             Intent::Play => self.set_playing(true, cx),
             Intent::Pause => self.set_playing(false, cx),

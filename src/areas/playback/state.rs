@@ -440,7 +440,7 @@ impl OpenMusic {
             .map_or(self.playback.now.repeat, |(mode, _)| mode)
     }
 
-    fn guest_locked(&mut self) -> bool {
+    pub fn guest_locked(&mut self) -> bool {
         if !self.jam_controls_locked() {
             return false;
         }
@@ -1639,18 +1639,12 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     });
 }
 
-const HOST_CONTROLS: [&str; 5] = ["previous", "next", "toggle-playback", "shuffle", "repeat"];
-
 pub fn on_press(
     app: &mut OpenMusic,
     key: &'static str,
     window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) -> bool {
-    if HOST_CONTROLS.contains(&key) && app.jam_controls_locked() {
-        app.show_toast(GUEST_WARNING, None);
-        return true;
-    }
     if jams::on_press(app, key, window, cx) {
         return true;
     }
