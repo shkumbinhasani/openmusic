@@ -5,7 +5,7 @@ use spotify_client::library::{LibraryItem, LibraryPage, LibraryQuery};
 
 use super::{
     sidebar::empty_text,
-    state::{apply_pins, merge},
+    state::{apply_pins, hide_removing, merge},
     worker::Command,
 };
 use crate::{
@@ -238,6 +238,7 @@ impl OpenMusic {
                 grid.page = Some(page);
                 grid.error = None;
                 apply_pins(&mut self.library);
+                hide_removing(self);
                 if matches!(self.page, Page::Library(_)) {
                     self.page = Page::Library(self.library.grid.shelf());
                 }

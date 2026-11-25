@@ -170,6 +170,23 @@ pub(super) fn apply_pins(library: &mut State) {
     }
 }
 
+pub(super) fn hide_removing(app: &mut OpenMusic) {
+    let removing: Vec<String> = app
+        .saved
+        .pending
+        .keys()
+        .filter(|uri| {
+            app.saved.known.get(*uri) == Some(&false)
+                && saves::saves(uri).is_some_and(|kind| kind != saves::Saves::Like)
+        })
+        .cloned()
+        .collect();
+    if !removing.is_empty() {
+        app.library
+            .forget_items(&removing.iter().collect::<Vec<_>>());
+    }
+}
+
 impl State {
     pub fn covers(&self, urls: &mut HashSet<String>) {
         self.liked.covers(urls);
@@ -599,6 +616,7 @@ pub fn on_event(
                     app.library.page = Some(page);
                     app.library.error = None;
                     apply_pins(&mut app.library);
+                    hide_removing(app);
                 }
                 Err(message) => app.library.error = Some(message),
             }
