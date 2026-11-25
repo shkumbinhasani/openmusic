@@ -788,17 +788,19 @@ pub fn on_event(
         Event::Located { uri, result } => app.located(uri, result),
         Event::Canvas { uri, result } => app.took_canvas(uri, result),
         Event::VideoOf { uri, result } => app.content.screen.took_video(uri, result),
-        Event::SongOf { uri, song } => app.content.screen.took_song(uri, song),
+        Event::SongOf { uri, result } => app.content.screen.took_song(uri, result),
         Event::ArtistVideos {
             uri,
             offset,
             result,
         } => app.content.screen.took_artist_videos(&uri, offset, result),
-        Event::NowEpisode { uri, episode } => {
-            if let Some(episode) = &episode {
+        Event::NowEpisode { uri, result } => {
+            if let Ok(episode) = &result {
                 app.content.note(std::slice::from_ref(episode));
             }
-            app.content.screen.episode = Some((uri, episode.map(|episode| *episode)));
+            app.content
+                .screen
+                .took_episode(uri, result.map(|episode| *episode));
         }
         Event::Artwork(_) => {}
         Event::YourEpisodes(result) => {

@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     sync::Arc,
+    time::Instant,
 };
 
 use gpui::{
@@ -16,6 +17,7 @@ use spotify_client::{
 };
 
 use super::{
+    ask::Asks,
     video::{self, Cap, Feed, fit},
     view::{heading, kind_label},
     worker::Command,
@@ -151,8 +153,10 @@ pub struct ArtistVideos {
 pub struct Screen {
     pub videos: HashMap<String, Option<String>>,
     pub songs: HashMap<String, Option<Song>>,
-    pub asked: HashSet<String>,
-    pub episode: Option<(String, Option<Episode>)>,
+    pub episode: Option<(String, Episode)>,
+    video_asks: Asks,
+    song_asks: Asks,
+    episode_asks: Asks,
     pub artist: Option<ArtistVideos>,
     pub large: Option<String>,
 }
@@ -160,7 +164,7 @@ pub struct Screen {
 impl Screen {
     pub fn covers(&self, urls: &mut HashSet<String>) {
         urls.extend(self.large.clone());
-        if let Some((_, Some(episode))) = &self.episode {
+        if let Some((_, episode)) = &self.episode {
             urls.extend(episode.large_cover.clone());
         }
         if let Some(ArtistVideos {
@@ -179,26 +183,38 @@ impl Screen {
         if self.songs.len() > KEEP {
             self.songs.clear();
         }
-        if self.asked.len() > KEEP {
-            self.asked.clear();
-        }
     }
 
     pub fn took_video(&mut self, uri: String, result: Result<Option<String>, String>) {
         match result {
             Ok(video) => {
+                self.video_asks.answered(&uri);
                 self.videos.insert(uri, video);
             }
-            Err(_) => {
-                self.asked.remove(&format!("video {uri}"));
-            }
+            Err(_) => self.video_asks.fail(uri, Instant::now()),
         }
         self.trim();
     }
 
-    pub fn took_song(&mut self, uri: String, song: Option<Song>) {
-        self.songs.insert(uri, song);
+    pub fn took_song(&mut self, uri: String, result: Result<Option<Song>, String>) {
+        match result {
+            Ok(song) => {
+                self.song_asks.answered(&uri);
+                self.songs.insert(uri, song);
+            }
+            Err(_) => self.song_asks.fail(uri, Instant::now()),
+        }
         self.trim();
+    }
+
+    pub fn took_episode(&mut self, uri: String, result: Result<Episode, String>) {
+        match result {
+            Ok(episode) => {
+                self.episode_asks.answered(&uri);
+                self.episode = Some((uri, episode));
+            }
+            Err(_) => self.episode_asks.fail(uri, Instant::now()),
+        }
     }
 
     pub fn took_artist_videos(
@@ -352,14 +368,8 @@ impl OpenMusic {
                 .episode
                 .as_ref()
                 .filter(|(loaded, _)| loaded == uri)
-                .and_then(|(_, episode)| episode.as_ref())
+                .map(|(_, episode)| episode)
         })
-    }
-
-    fn ask_once(&mut self, key: String, command: Command) {
-        if self.content.screen.asked.insert(key) {
-            self.send(command);
-        }
     }
 
     fn request_screen(&mut self) {
@@ -375,28 +385,25 @@ impl OpenMusic {
             }
         }
         let status = self.video_status();
-        if track.uri.starts_with("spotify:episode:") {
-            if self.screen_episode(&track.uri).is_none() {
-                self.ask_once(
-                    format!("episode {}", track.uri),
-                    Command::NowEpisode(track.uri.clone()),
-                );
+        let now = Instant::now();
+        let song = track.is_track();
+        let uri = track.uri;
+        if uri.starts_with("spotify:episode:") {
+            if self.screen_episode(&uri).is_none()
+                && self.content.screen.episode_asks.ask(&uri, now)
+            {
+                self.send(Command::NowEpisode(uri));
             }
         } else if status.is_some_and(|status| status.kind == VideoKind::Music) {
-            if !self.content.screen.songs.contains_key(&track.uri) {
-                self.ask_once(
-                    format!("song {}", track.uri),
-                    Command::SongOf(track.uri.clone()),
-                );
+            let screen = &mut self.content.screen;
+            if !screen.songs.contains_key(&uri) && screen.song_asks.ask(&uri, now) {
+                self.send(Command::SongOf(uri));
             }
-        } else if track.is_track()
-            && self.playback.now.local
-            && !self.content.screen.videos.contains_key(&track.uri)
-        {
-            self.ask_once(
-                format!("video {}", track.uri),
-                Command::VideoOf(track.uri.clone()),
-            );
+        } else if song && self.playback.now.local {
+            let screen = &mut self.content.screen;
+            if !screen.videos.contains_key(&uri) && screen.video_asks.ask(&uri, now) {
+                self.send(Command::VideoOf(uri));
+            }
         }
     }
 
@@ -1177,16 +1184,59 @@ mod tests {
     }
 
     #[test]
-    fn remembers_lookups_and_retries_failures() {
+    fn remembers_lookups_and_retries_failures_later() {
         let mut screen = Screen::default();
-        screen.asked.insert(format!("video {SONG}"));
+        let now = Instant::now();
+        assert!(screen.video_asks.ask(SONG, now));
         screen.took_video(SONG.into(), Ok(Some(VIDEO.into())));
         assert_eq!(screen.videos.get(SONG), Some(&Some(VIDEO.into())));
-        screen.asked.insert(format!("video {VIDEO}"));
+        assert!(!screen.video_asks.asking(SONG, now));
+
+        assert!(screen.video_asks.ask(VIDEO, now));
         screen.took_video(VIDEO.into(), Err("offline".into()));
-        assert!(!screen.asked.contains(&format!("video {VIDEO}")));
         assert!(!screen.videos.contains_key(VIDEO));
-        screen.took_song(VIDEO.into(), None);
+        assert!(!screen.video_asks.ask(VIDEO, Instant::now()));
+        assert!(
+            screen
+                .video_asks
+                .ask(VIDEO, Instant::now() + super::super::ask::RETRY_AFTER)
+        );
+
+        assert!(screen.song_asks.ask(VIDEO, now));
+        screen.took_song(VIDEO.into(), Err("offline".into()));
+        assert!(!screen.songs.contains_key(VIDEO));
+        screen.took_song(VIDEO.into(), Ok(None));
         assert_eq!(screen.songs.get(VIDEO), Some(&None));
+
+        assert!(screen.episode_asks.ask(EPISODE, now));
+        screen.took_episode(EPISODE.into(), Err("offline".into()));
+        assert!(screen.episode.is_none());
+        assert!(!screen.episode_asks.ask(EPISODE, Instant::now()));
+        screen.took_episode(EPISODE.into(), Ok(Episode::default()));
+        assert!(
+            screen
+                .episode
+                .as_ref()
+                .is_some_and(|(uri, _)| uri == EPISODE)
+        );
+    }
+
+    #[test]
+    fn asks_again_for_a_lookup_a_newer_track_cancelled() {
+        let mut screen = Screen::default();
+        let now = Instant::now();
+        assert!(screen.video_asks.ask(SONG, now));
+        assert!(screen.video_asks.ask(VIDEO, now));
+        screen.took_video(VIDEO.into(), Ok(None));
+        assert!(!screen.videos.contains_key(SONG));
+        assert!(screen.video_asks.ask(SONG, now));
+
+        assert!(screen.episode_asks.ask(EPISODE, now));
+        assert!(
+            screen
+                .episode_asks
+                .ask("spotify:episode:0000000000000000000e2", now)
+        );
+        assert!(screen.episode_asks.ask(EPISODE, now));
     }
 }

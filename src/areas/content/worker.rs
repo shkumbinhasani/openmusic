@@ -110,7 +110,7 @@ pub enum Event {
     },
     SongOf {
         uri: String,
-        song: Option<Song>,
+        result: Result<Option<Song>, String>,
     },
     ArtistVideos {
         uri: String,
@@ -119,7 +119,7 @@ pub enum Event {
     },
     NowEpisode {
         uri: String,
-        episode: Option<Box<Episode>>,
+        result: Result<Box<Episode>, String>,
     },
     Artwork(String),
 }
@@ -168,7 +168,7 @@ impl Event {
                 .filter_map(|video| video.still.clone())
                 .collect(),
             Self::NowEpisode {
-                episode: Some(episode),
+                result: Ok(episode),
                 ..
             } => episode.large_cover.iter().cloned().collect(),
             Self::Artwork(url) => vec![url.clone()],
@@ -337,8 +337,10 @@ async fn video_of(api: Api, uri: String) -> crate::worker::Event {
 }
 
 async fn song_of(api: Api, uri: String) -> crate::worker::Event {
-    let song = music_video::song_for(&api, &uri).await.ok().flatten();
-    Event::SongOf { uri, song }.into()
+    let result = music_video::song_for(&api, &uri)
+        .await
+        .map_err(|error| error.to_string());
+    Event::SongOf { uri, result }.into()
 }
 
 async fn artist_videos(api: Api, uri: String, offset: u32) -> crate::worker::Event {
@@ -354,8 +356,11 @@ async fn artist_videos(api: Api, uri: String, offset: u32) -> crate::worker::Eve
 }
 
 async fn now_episode(api: Api, uri: String) -> crate::worker::Event {
-    let episode = podcast::episode(&api, &uri).await.ok().map(Box::new);
-    Event::NowEpisode { uri, episode }.into()
+    let result = podcast::episode(&api, &uri)
+        .await
+        .map(Box::new)
+        .map_err(|error| error.to_string());
+    Event::NowEpisode { uri, result }.into()
 }
 
 async fn locate(api: Api, uri: String) -> crate::worker::Event {
