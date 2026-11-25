@@ -1,13 +1,18 @@
 use std::{
-    path::Path,
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, ensure};
 use spotify_client::Api;
 
-const PACE_FILE: &str = "/tmp/openmusic-research/.last-call";
 const MIN_GAP: Duration = Duration::from_millis(400);
+
+fn pace_file() -> PathBuf {
+    std::env::var_os("PACE_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("openmusic-examples.last-call"))
+}
 
 pub fn token() -> Result<String> {
     let path = std::env::var("TOKEN_FILE").context("Set TOKEN_FILE to the access token file.")?;
@@ -20,8 +25,8 @@ pub fn token() -> Result<String> {
 }
 
 pub async fn throttle() {
-    let path = Path::new(PACE_FILE);
-    let elapsed = std::fs::metadata(path)
+    let path = pace_file();
+    let elapsed = std::fs::metadata(&path)
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|modified| SystemTime::now().duration_since(modified).ok());
@@ -32,7 +37,13 @@ pub async fn throttle() {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs_f64();
-    let _ = std::fs::write(path, now.to_string());
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, now.to_string()));
+    if written.is_err() {
+        tokio::time::sleep(MIN_GAP).await;
+    }
 }
 
 pub async fn api() -> Result<Api> {

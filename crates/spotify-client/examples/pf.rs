@@ -12,8 +12,8 @@ use spotify_client::{
 const USAGE: &str = "usage: pf <operation> <hash|-> ['<variables json>'] [--cards]";
 
 fn listed(name: &str) -> Result<Vec<(String, String)>> {
-    let file =
-        std::env::var("OPERATIONS_FILE").unwrap_or_else(|_| "/tmp/spotify-operations.txt".into());
+    let file = std::env::var("OPERATIONS_FILE")
+        .context("Set OPERATIONS_FILE to the list of operations and hashes.")?;
     let text = std::fs::read_to_string(&file).with_context(|| format!("Could not read {file}."))?;
     Ok(text
         .lines()
