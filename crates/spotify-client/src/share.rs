@@ -233,7 +233,7 @@ pub fn parse_time(text: &str) -> Option<u32> {
     let mut seconds: i64 = 0;
     for (part, unit) in parts.iter().rev().zip([1, 60, 3600]) {
         let value = leading_integer(part).filter(|value| *value >= 0)?;
-        seconds += value * unit;
+        seconds = seconds.checked_add(value.checked_mul(unit)?)?;
     }
     u32::try_from(seconds).ok()
 }
@@ -440,6 +440,12 @@ mod tests {
         assert_eq!(parse_time("1:2:3:4"), None);
         assert_eq!(parse_time("a:10"), None);
         assert_eq!(parse_time("-1:10"), None);
+        assert_eq!(parse_time("99999999999999999:00:00"), None);
+        assert_eq!(parse_time("999999999999999999:00"), None);
+        assert_eq!(parse_time("5124095576030432:00:00"), None);
+        assert_eq!(parse_time("1:9223372036854775807"), None);
+        assert_eq!(parse_time("1193046:28:15"), Some(u32::MAX));
+        assert_eq!(parse_time("1193046:28:16"), None);
         assert_eq!(parse_time(""), None);
         assert_eq!(format_time(0), "0:00");
         assert_eq!(format_time(5), "0:05");
