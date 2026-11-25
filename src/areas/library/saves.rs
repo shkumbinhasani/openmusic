@@ -146,7 +146,9 @@ impl OpenMusic {
     }
 
     fn apply_save(&mut self, uri: &str, saved: bool) {
-        self.write_saved(vec![uri.to_owned()], saved);
+        if self.write_saved(vec![uri.to_owned()], saved) == 0 {
+            return;
+        }
         if let Some(text) = saved_toast(uri, saved) {
             self.show_toast(text, None);
         }

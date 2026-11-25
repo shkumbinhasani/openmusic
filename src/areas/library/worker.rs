@@ -1,6 +1,6 @@
 use spotify_client::{
-    Api,
-    catalog::Playlist,
+    Api, Track,
+    catalog::{self, Playlist},
     dealer::Message,
     library::{
         self, LibraryError, LibraryPage, LibraryPush, LibraryQuery, LikedPage, PinResult,
@@ -10,6 +10,8 @@ use spotify_client::{
 
 use super::{cache, state::LibraryPrefs};
 use crate::worker::{self, Ctx, Mutation, User};
+
+const LIKED_FALLBACK: usize = 1000;
 
 pub enum Command {
     Playlists,
@@ -171,17 +173,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                     .into())
                 }))
         }
-        Command::Liked { offset, request } => ctx.tasks.spawn_keyed("library-liked", async move {
-            let result = library::liked(&api, offset, library::LIKED_PAGE_SIZE)
-                .await
-                .map_err(|error| error.to_string());
-            Event::Liked {
-                request,
-                offset,
-                result,
-            }
-            .into()
-        }),
+        Command::Liked { offset, request } => ctx
+            .tasks
+            .spawn_keyed("library-liked", liked(api, offset, request)),
         Command::Grid {
             query,
             offset,
@@ -214,6 +208,35 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 Event::PlayedContext { uri, entry }.into()
             })
         }
+    }
+}
+
+async fn liked(api: Api, offset: u32, request: u64) -> worker::Event {
+    let result = match library::liked(&api, offset, library::LIKED_PAGE_SIZE).await {
+        Err(error) if offset == 0 && library::wants_fallback(&error) => {
+            catalog::liked(&api, LIKED_FALLBACK)
+                .await
+                .map(liked_fallback)
+                .map_err(|_| error)
+        }
+        result => result,
+    };
+    Event::Liked {
+        request,
+        offset,
+        result: result.map_err(|error| error.to_string()),
+    }
+    .into()
+}
+
+pub(super) fn liked_fallback(tracks: Vec<Track>) -> LikedPage {
+    let count = tracks.len() as u32;
+    LikedPage {
+        tracks,
+        unplayable: Vec::new(),
+        total: count,
+        offset: 0,
+        rows: count,
     }
 }
 
@@ -365,4 +388,23 @@ async fn folder(
         result: result.map_err(|error| error.to_string()),
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn liked_fallback_is_one_whole_page() {
+        let track = |uri: &str| Track {
+            uri: uri.into(),
+            ..Track::default()
+        };
+        let page = liked_fallback(vec![
+            track("spotify:track:0000000000000000000001"),
+            track("spotify:track:0000000000000000000002"),
+        ]);
+        assert_eq!((page.total, page.rows, page.offset), (2, 2, 0));
+        assert!(page.unplayable.is_empty());
+    }
 }
