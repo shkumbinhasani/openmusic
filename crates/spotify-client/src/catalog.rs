@@ -13,7 +13,17 @@ use spotify_proto::{
     metadata::{self, ImageGroup},
 };
 
-use crate::api::{Api, Body};
+use crate::{
+    api::{Api, Body},
+    entity,
+    pathfinder::{self, Operation},
+};
+
+pub const ARTIST_RELATED: Operation = Operation::query(
+    "queryArtistRelated",
+    "3d031d6cb22a2aa7c8d203d49b49df731f58b1e2799cc38d9876d58771aa66f3",
+);
+pub const RELATED_ARTISTS: usize = 20;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Link {
@@ -461,7 +471,12 @@ pub async fn artist(api: &Api, uri: &str) -> Result<Artist> {
                 uri,
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let related = if related.is_empty() {
+        related_artists(api, uri).await.unwrap_or_default()
+    } else {
+        related
+    };
 
     let top_tracks = context_tracks(api, uri, 10).await.unwrap_or_default();
     Ok(Artist {
@@ -473,6 +488,30 @@ pub async fn artist(api: &Api, uri: &str) -> Result<Artist> {
         releases,
         related,
     })
+}
+
+pub async fn related_artists(api: &Api, uri: &str) -> Result<Vec<ArtistRef>> {
+    let data = pathfinder::query(api, ARTIST_RELATED, serde_json::json!({ "uri": uri })).await?;
+    Ok(parse_related(&data))
+}
+
+pub fn parse_related(data: &Value) -> Vec<ArtistRef> {
+    data["artistUnion"]["relatedContent"]["relatedArtists"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(ArtistRef {
+                uri: item["uri"]
+                    .as_str()
+                    .filter(|uri| uri.starts_with("spotify:artist:"))?
+                    .to_owned(),
+                name: item["profile"]["name"].as_str()?.to_owned(),
+                image: entity::pick_image(&item["visuals"]["avatarImage"]["sources"], 300),
+            })
+        })
+        .take(RELATED_ARTISTS)
+        .collect()
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -1192,5 +1231,37 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((playlist.format, playlist.owner), (None, None));
+    }
+
+    #[test]
+    fn reads_related_artists_from_the_graphql_reply() {
+        let artist = |id: &str, name: &str| {
+            json!({
+                "id": id, "uri": format!("spotify:artist:{id}"), "profile": {"name": name},
+                "visuals": {"avatarImage": {"sources": [
+                    {"url": format!("https://i.scdn.co/image/{id}-64"), "width": 64, "height": 64},
+                    {"url": format!("https://i.scdn.co/image/{id}-320"), "width": 320, "height": 320}
+                ]}}
+            })
+        };
+        let mut items: Vec<Value> = (0..RELATED_ARTISTS + 3)
+            .map(|index| artist(&format!("a{index}"), "Band"))
+            .collect();
+        items.insert(
+            1,
+            json!({"uri": "spotify:user:x", "profile": {"name": "Someone"}}),
+        );
+        items.insert(2, json!({"uri": "spotify:artist:noname"}));
+        let data = json!({"artistUnion": {"relatedContent": {"relatedArtists": {"items": items}}}});
+        let related = parse_related(&data);
+        assert_eq!(related.len(), RELATED_ARTISTS);
+        assert_eq!(related[0].uri, "spotify:artist:a0");
+        assert_eq!(related[0].name, "Band");
+        assert_eq!(
+            related[0].image.as_deref(),
+            Some("https://i.scdn.co/image/a0-320")
+        );
+        assert_eq!(related[1].uri, "spotify:artist:a1");
+        assert!(parse_related(&json!({"artistUnion": null})).is_empty());
     }
 }
