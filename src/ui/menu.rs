@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -443,6 +444,64 @@ pub fn dump(entries: &[Entry], depth: usize, lines: &mut Vec<String>) {
     }
 }
 
+fn shape(entry: &Entry) -> Entry {
+    match entry {
+        Entry::Item {
+            title,
+            enabled,
+            checked,
+            symbol,
+            key,
+            alternate,
+            subtitle,
+            ..
+        } => Entry::Item {
+            title: title.clone(),
+            id: 0,
+            enabled: *enabled,
+            checked: *checked,
+            symbol: *symbol,
+            key: *key,
+            alternate: alternate.as_ref().map(|(title, _)| (title.clone(), 0)),
+            subtitle: subtitle.clone(),
+        },
+        Entry::Submenu {
+            title,
+            symbol,
+            entries,
+            search,
+            id,
+        } => Entry::Submenu {
+            title: title.clone(),
+            symbol: *symbol,
+            entries: entries.iter().map(shape).collect(),
+            search: *search,
+            id: *id,
+        },
+        other => other.clone(),
+    }
+}
+
+pub fn changed(old: &[Entry], new: &[Entry]) -> Option<(Range<usize>, Vec<Entry>)> {
+    let same = |(a, b): &(&Entry, &Entry)| shape(a) == shape(b);
+    let prefix = old.iter().zip(new).take_while(same).count();
+    if prefix == old.len() && prefix == new.len() {
+        return None;
+    }
+    let room = old.len().min(new.len()) - prefix;
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(same)
+        .count();
+    Some((
+        prefix..old.len() - suffix,
+        new[prefix..new.len() - suffix].to_vec(),
+    ))
+}
+
 pub fn describe_items(items: Vec<MenuItem>) -> Vec<String> {
     let entries = lower(items, &mut Vec::new(), &mut HashMap::new());
     let mut lines = Vec::new();
@@ -456,11 +515,17 @@ pub enum Place {
     Above(&'static str),
 }
 
+struct Shown {
+    target: Option<Target>,
+    entries: Vec<Entry>,
+}
+
 #[derive(Default)]
 pub struct Menus {
     pub row: Option<Row>,
     runs: Vec<Run>,
     submenus: HashMap<&'static str, u32>,
+    shown: Option<Shown>,
     bar: Vec<Entry>,
     bar_target: Option<Target>,
     bar_runs: BarRuns,
@@ -505,12 +570,23 @@ impl OpenMusic {
     }
 
     pub fn show_menu(&mut self, items: Vec<MenuItem>, place: Place, row: Option<Row>) -> bool {
+        self.present(items, place, row, None)
+    }
+
+    fn present(
+        &mut self,
+        items: Vec<MenuItem>,
+        place: Place,
+        row: Option<Row>,
+        target: Option<Target>,
+    ) -> bool {
         if items.is_empty() {
             return false;
         }
         self.menus.runs.clear();
         self.menus.submenus.clear();
         let entries = lower(items, &mut self.menus.runs, &mut self.menus.submenus);
+        let shown = entries.clone();
         let opened = match place {
             Place::Point(at) => overlay::context_menu(entries, at),
             Place::Under(anchor) => overlay::menu_at(anchor, entries),
@@ -518,18 +594,22 @@ impl OpenMusic {
         };
         if opened {
             self.menus.row = row;
+            self.menus.shown = Some(Shown {
+                target,
+                entries: shown,
+            });
         }
         opened
     }
 
     pub fn open_menu(&mut self, target: Target, at: Point<Pixels>, row: Option<Row>) -> bool {
         let items = self.menu_items(&target);
-        self.show_menu(items, Place::Point(at), row)
+        self.present(items, Place::Point(at), row, Some(target))
     }
 
     pub fn open_menu_under(&mut self, target: Target, anchor: &'static str) -> bool {
         let items = self.menu_items(&target);
-        self.show_menu(items, Place::Under(anchor), None)
+        self.present(items, Place::Under(anchor), None, Some(target))
     }
 
     pub fn update_submenu(&mut self, id: &'static str, items: Vec<MenuItem>) {
@@ -537,7 +617,31 @@ impl OpenMusic {
             return;
         };
         let entries = lower(items, &mut self.menus.runs, &mut HashMap::new());
+        if let Some(shown) = &mut self.menus.shown {
+            overlay::replace_submenu(&mut shown.entries, number, &entries);
+        }
         overlay::update_menu(number, entries);
+    }
+
+    pub fn refresh_menu(&mut self, wanted: impl Fn(&Target) -> bool) {
+        let Some(target) = self
+            .menus
+            .shown
+            .as_ref()
+            .and_then(|shown| shown.target.clone())
+            .filter(|target| wanted(target))
+        else {
+            return;
+        };
+        let items = self.menu_items(&target);
+        let fresh = lower(items, &mut self.menus.runs, &mut self.menus.submenus);
+        let Some(shown) = self.menus.shown.as_mut() else {
+            return;
+        };
+        if let Some((range, added)) = changed(&shown.entries, &fresh) {
+            overlay::splice_menu(&shown.entries, range, added);
+        }
+        shown.entries = fresh;
     }
 
     pub fn on_menu(
@@ -567,6 +671,7 @@ impl OpenMusic {
             Action::BarMenu { generation, id } => self.menus.bar_runs.get(generation, id),
             Action::MenuClosed => {
                 self.menus.row = None;
+                self.menus.shown = None;
                 None
             }
             Action::Press(_) | Action::Seek(_) | Action::Volume(_) => None,
@@ -867,6 +972,75 @@ mod tests {
                 "  Mix ✓",
             ]
         );
+    }
+
+    fn item(title: &str, id: u32, enabled: bool) -> Entry {
+        Entry::Item {
+            title: title.into(),
+            id,
+            enabled,
+            checked: false,
+            symbol: None,
+            key: None,
+            alternate: None,
+            subtitle: None,
+        }
+    }
+
+    #[test]
+    fn patches_only_the_items_that_changed() {
+        let old = vec![
+            item("Edit details", 0, true),
+            Entry::Separator,
+            item("Make private", 1, false),
+            item("Invite collaborators", 2, true),
+            Entry::Submenu {
+                title: "Add to other playlist".into(),
+                symbol: None,
+                entries: vec![item("Road", 3, true)],
+                search: None,
+                id: None,
+            },
+        ];
+        let renumbered = vec![
+            item("Edit details", 10, true),
+            Entry::Separator,
+            item("Make private", 11, false),
+            item("Invite collaborators", 12, true),
+            Entry::Submenu {
+                title: "Add to other playlist".into(),
+                symbol: None,
+                entries: vec![item("Road", 13, true)],
+                search: None,
+                id: None,
+            },
+        ];
+        assert_eq!(changed(&old, &renumbered), None);
+        let mut known = renumbered.clone();
+        known[2] = item("Make private", 21, true);
+        known.insert(4, item("Collaborators", 22, true));
+        assert_eq!(
+            changed(&old, &known),
+            Some((
+                2..4,
+                vec![
+                    item("Make private", 21, true),
+                    item("Invite collaborators", 12, true),
+                    item("Collaborators", 22, true),
+                ]
+            ))
+        );
+        let mut added = renumbered.clone();
+        added.insert(4, item("Collaborators", 22, true));
+        assert_eq!(
+            changed(&old, &added),
+            Some((4..4, vec![item("Collaborators", 22, true)]))
+        );
+        let mut nested = renumbered;
+        if let Entry::Submenu { entries, .. } = &mut nested[4] {
+            entries.push(item("Mix", 14, true));
+        }
+        assert_eq!(changed(&old, &nested).map(|(range, _)| range), Some(4..5));
     }
 
     #[test]

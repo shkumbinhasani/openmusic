@@ -1293,6 +1293,11 @@ fn playlist_items(app: &OpenMusic, uri: &str) -> Vec<(Group, MenuItem)> {
     let Some(info) = app.playlist_info(uri) else {
         return Vec::new();
     };
+    if app.playlists.wants_permissions(&info) {
+        app.playlists
+            .wanted_permissions
+            .replace(Some(info.uri.clone()));
+    }
     let mut items = playlist_menu(&info);
     if info.saved == Some(true) {
         items.extend(

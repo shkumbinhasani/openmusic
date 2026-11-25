@@ -71,8 +71,23 @@ thread_local! {
 pub use native::dock_artwork;
 pub use native::{
     available, bar_built, bar_menu, bar_menu_tree, close_menu, drag, filter_menu, menu_bar_tree,
-    menu_tree, nudge_window, pick, progress, right_click, set_handler, update_menu,
+    menu_tree, nudge_window, pick, progress, right_click, set_handler, splice_menu, update_menu,
 };
+
+pub fn replace_submenu(entries: &mut [Entry], id: u32, fresh: &[Entry]) -> bool {
+    entries.iter_mut().any(|entry| match entry {
+        Entry::Submenu {
+            id: Some(found),
+            entries,
+            ..
+        } if *found == id => {
+            *entries = fresh.to_vec();
+            true
+        }
+        Entry::Submenu { entries, .. } => replace_submenu(entries, id, fresh),
+        _ => false,
+    })
+}
 
 pub fn button(key: &'static str, spec: ButtonSpec) -> impl IntoElement {
     canvas(
@@ -205,7 +220,7 @@ pub fn handler(sender: UnboundedSender<Action>) -> impl Fn(Action) + 'static {
 
 #[cfg(target_os = "macos")]
 mod native {
-    use std::{cell::RefCell, collections::HashMap};
+    use std::{cell::RefCell, collections::HashMap, ops::Range};
 
     use gpui::{Bounds, Pixels, Point, Window};
     use objc2::{
@@ -940,7 +955,7 @@ mod native {
         };
         let found = OVERLAY.with_borrow_mut(|overlay| {
             if let Some((pending, ..)) = overlay.pending.as_mut()
-                && replace(pending, id, &entries)
+                && super::replace_submenu(pending, id, &entries)
             {
                 return None;
             }
@@ -976,19 +991,67 @@ mod native {
         });
     }
 
-    fn replace(entries: &mut [Entry], id: u32, fresh: &[Entry]) -> bool {
-        entries.iter_mut().any(|entry| match entry {
-            Entry::Submenu {
-                id: Some(found),
-                entries,
-                ..
-            } if *found == id => {
-                *entries = fresh.to_vec();
-                true
+    pub fn splice_menu(old: &[Entry], range: Range<usize>, added: Vec<Entry>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        if range.end > old.len() {
+            return;
+        }
+        let found = OVERLAY.with_borrow_mut(|overlay| {
+            if let Some((pending, ..)) = overlay.pending.as_mut() {
+                if range.end <= pending.len() {
+                    pending.splice(range.clone(), added.iter().cloned());
+                }
+                return None;
             }
-            Entry::Submenu { entries, .. } => replace(entries, id, fresh),
-            _ => false,
-        })
+            let menu = overlay.context.clone()?;
+            Some((menu, delegate(overlay, mtm)))
+        });
+        let Some((menu, delegate)) = found else {
+            return;
+        };
+        let width = |entries: &[Entry]| -> isize {
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Item {
+                        alternate: Some(_), ..
+                    } => 2,
+                    _ => 1,
+                })
+                .sum()
+        };
+        let start = width(&old[..range.start]);
+        for _ in 0..width(&old[range]) {
+            if start >= menu.numberOfItems() {
+                break;
+            }
+            menu.removeItemAtIndex(start);
+        }
+        let staging = NSMenu::new(mtm);
+        let mut built = Built::default();
+        populate(
+            &staging,
+            &added,
+            None,
+            &delegate,
+            sel!(menuItem:),
+            &mut built,
+            mtm,
+        );
+        let at = start.min(menu.numberOfItems());
+        for offset in 0..staging.numberOfItems() {
+            let Some(item) = staging.itemAtIndex(0) else {
+                break;
+            };
+            staging.removeItemAtIndex(0);
+            menu.insertItem_atIndex(&item, at + offset);
+        }
+        OVERLAY.with_borrow_mut(|overlay| {
+            overlay.built.submenus.extend(built.submenus);
+            overlay.built.searches.extend(built.searches);
+        });
     }
 
     pub fn bar_menu(generation: u32, entries: Vec<Entry>) {
@@ -1582,6 +1645,8 @@ mod native {
     }
 
     pub fn update_menu(_: u32, _: Vec<Entry>) {}
+
+    pub fn splice_menu(_: &[Entry], _: std::ops::Range<usize>, _: Vec<Entry>) {}
 
     pub fn bar_menu(_: u32, _: Vec<Entry>) {}
 

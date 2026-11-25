@@ -46,6 +46,7 @@ const EDITABLE_KEEP: usize = 16;
 const PUSH_DELAY: Duration = Duration::from_millis(500);
 const FOCUS_REFRESH: Duration = Duration::from_secs(60);
 const ROOTLIST_RETRY_LIMIT: Duration = Duration::from_secs(60);
+const PERMISSIONS_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlendWork {
@@ -134,6 +135,8 @@ pub struct State {
     pub refreshed: Option<Instant>,
     pub rootlist_failures: u32,
     pub rootlist_retry: Option<Instant>,
+    pub wanted_permissions: RefCell<Option<String>>,
+    pub permissions_asked: HashMap<String, Instant>,
 }
 
 impl State {
@@ -251,6 +254,18 @@ impl State {
 
     fn stale_editable(&mut self) {
         self.editable.values_mut().for_each(Editable::stale);
+    }
+
+    pub fn wants_permissions(&self, info: &PlaylistInfo) -> bool {
+        let member =
+            info.owned || info.capabilities.administrate || info.capabilities.cancel_membership;
+        member && !self.permissions.contains_key(&info.uri)
+    }
+
+    fn should_ask_permissions(&mut self, uri: &str) -> bool {
+        self.permissions_asked
+            .retain(|_, at| at.elapsed() < PERMISSIONS_WAIT);
+        !self.permissions.contains_key(uri) && !self.permissions_asked.contains_key(uri)
     }
 
     fn curated_in(&self, sources: &[String], target: &str) -> Option<bool> {
@@ -513,6 +528,13 @@ impl OpenMusic {
         })
     }
 
+    fn refresh_playlist_menu(&mut self, uri: &str) {
+        self.refresh_menu(|target| match target {
+            Target::Playlist { uri: shown } => playlist::canonical(shown).as_deref() == Some(uri),
+            _ => false,
+        });
+    }
+
     pub fn refresh_rootlist(&mut self) {
         self.send(Command::Rootlist);
         self.refresh_library();
@@ -530,7 +552,14 @@ impl OpenMusic {
                 upto: collection.tracks.len(),
             });
         }
-        self.send(Command::Permissions(canonical));
+        self.fetch_permissions(canonical);
+    }
+
+    fn fetch_permissions(&mut self, uri: String) {
+        self.playlists
+            .permissions_asked
+            .insert(uri.clone(), Instant::now());
+        self.send(Command::Permissions(uri));
     }
 
     fn write(&self, write: Write, done: Option<String>) {
@@ -844,7 +873,7 @@ impl OpenMusic {
         let Some(info) = self.playlist_info(uri) else {
             return;
         };
-        self.send(Command::Permissions(info.uri.clone()));
+        self.fetch_permissions(info.uri.clone());
         let app = cx.weak_entity();
         let view = cx.new(|_| Collaborators::new(app, info.uri.clone()));
         let title: SharedString = if info.name.is_empty() {
@@ -1573,7 +1602,7 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
         if let Some(canonical) = playlist::canonical(uri)
             && !playlist::is_virtual(&canonical)
         {
-            app.send(Command::Permissions(canonical));
+            app.fetch_permissions(canonical);
         }
     }
 }
@@ -1638,12 +1667,16 @@ pub fn on_event(
                 if let Some(base) = permissions.base {
                     app.playlists.bases.insert(canonical.clone(), base);
                 }
-                app.playlists.permissions.insert(canonical, permissions);
+                app.playlists
+                    .permissions
+                    .insert(canonical.clone(), permissions);
+                app.refresh_playlist_menu(&canonical);
             }
         }
         Event::Base { uri, level } => {
             if let (Some(canonical), Some(level)) = (playlist::canonical(&uri), level) {
-                app.playlists.bases.insert(canonical, level);
+                app.playlists.bases.insert(canonical.clone(), level);
+                app.refresh_playlist_menu(&canonical);
             }
         }
         Event::Created {
@@ -2410,6 +2443,11 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     if app.playlists.rootlist_due() {
         app.send(Command::Rootlist);
     }
+    if let Some(uri) = app.playlists.wanted_permissions.take()
+        && app.playlists.should_ask_permissions(&uri)
+    {
+        app.fetch_permissions(uri);
+    }
     if let Some(source) = app.playlists.wanted.take() {
         app.request_editable(&source.uris);
         app.playlists.menu_source = Some(source);
@@ -2561,6 +2599,44 @@ mod tests {
         assert_eq!(state.curated_in(&album, LIST), None);
         state.stale_editable();
         assert_eq!(state.curated_in(&song, LIST), None);
+    }
+
+    #[test]
+    fn asks_for_menu_permissions_once_a_minute() {
+        let mut state = State::default();
+        let owned = PlaylistInfo {
+            uri: LIST.into(),
+            owned: true,
+            ..PlaylistInfo::default()
+        };
+        let followed = PlaylistInfo {
+            uri: "spotify:playlist:followed".into(),
+            ..PlaylistInfo::default()
+        };
+        let member = PlaylistInfo {
+            uri: "spotify:playlist:shared".into(),
+            capabilities: Capabilities {
+                cancel_membership: true,
+                ..Capabilities::default()
+            },
+            ..PlaylistInfo::default()
+        };
+        assert!(state.wants_permissions(&owned));
+        assert!(state.wants_permissions(&member));
+        assert!(!state.wants_permissions(&followed));
+        assert!(state.should_ask_permissions(LIST));
+        state.permissions_asked.insert(LIST.into(), Instant::now());
+        assert!(!state.should_ask_permissions(LIST));
+        state
+            .permissions_asked
+            .insert(LIST.into(), Instant::now() - PERMISSIONS_WAIT);
+        assert!(state.should_ask_permissions(LIST));
+        assert!(state.permissions_asked.is_empty());
+        state
+            .permissions
+            .insert(LIST.into(), Permissions::default());
+        assert!(!state.wants_permissions(&owned));
+        assert!(!state.should_ask_permissions(LIST));
     }
 
     #[test]
