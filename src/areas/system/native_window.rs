@@ -1,4 +1,4 @@
-pub use native::{close, hide, install, show, state};
+pub use native::{close, hide, install, show, state, width};
 
 pub const REOPEN: &str = "system-reopen";
 pub const MINIATURIZED: &str = "system-miniaturized";
@@ -204,6 +204,10 @@ mod native {
         window.makeKeyAndOrderFront(None);
     }
 
+    pub fn width() -> f32 {
+        window().map_or(0., |window| window.frame().size.width as f32)
+    }
+
     pub fn state() -> WindowState {
         let app_active = MainThreadMarker::new()
             .is_some_and(|mtm| NSApplication::sharedApplication(mtm).isActive());
@@ -240,6 +244,10 @@ mod native {
 
     pub fn state() -> WindowState {
         WindowState::default()
+    }
+
+    pub fn width() -> f32 {
+        0.
     }
 }
 

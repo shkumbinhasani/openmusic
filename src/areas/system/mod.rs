@@ -1,5 +1,6 @@
 pub mod dock_menu;
 pub mod menu_bar;
+pub mod mini_player;
 pub mod native_window;
 pub mod now_playing;
 pub mod shortcuts;

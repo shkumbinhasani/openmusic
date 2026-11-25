@@ -1,8 +1,10 @@
-use gpui::{AnyElement, Context};
+use gpui::{AnyElement, Context, Styled, px};
 use spotify_client::Track;
 
+use super::{mini_player, native_window};
 use crate::{
     app::OpenMusic,
+    overlay::Label,
     ui::{
         Palette,
         dock::DockItem,
@@ -11,6 +13,10 @@ use crate::{
         tracks::RowOptions,
     },
 };
+
+pub const MINI_BUTTON: &str = "mini-player";
+pub const MINI_BUTTON_WEIGHT: u32 = 950;
+pub const MINI_BUTTON_WINDOW: f32 = 1280.;
 
 impl OpenMusic {
     pub fn startup_section(
@@ -39,12 +45,26 @@ pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
 }
 
 pub fn dock_items(
-    _app: &OpenMusic,
-    _roomy: bool,
-    _palette: Palette,
-    _cx: &mut Context<OpenMusic>,
+    app: &OpenMusic,
+    roomy: bool,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
 ) -> Vec<DockItem> {
-    Vec::new()
+    if !roomy || native_window::width() < MINI_BUTTON_WINDOW || !app.mini_allowed() {
+        return Vec::new();
+    }
+    let symbol = if mini_player::is_visible() {
+        "pip.exit"
+    } else {
+        "pip.enter"
+    };
+    vec![DockItem::new(
+        MINI_BUTTON,
+        MINI_BUTTON_WEIGHT,
+        48.,
+        app.dock_control(MINI_BUTTON, Label::Symbol(symbol), false, palette, cx)
+            .size(px(48.)),
+    )]
 }
 
 pub fn row_accessories(

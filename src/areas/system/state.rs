@@ -7,11 +7,13 @@ use std::{
 use gpui::{App, Context, Keystroke, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use spotify_client::library;
 use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
     dock_menu::{self, DockState, RECENT_LIMIT, recent_name},
     menu_bar::{self, MenuState},
+    mini_player::{self, MiniState},
     native_window,
     now_playing::{self, Snapshot},
     shortcuts,
@@ -22,8 +24,8 @@ use crate::{
     menus::{
         About, BringAllToFront, CloseWindow, GoBack, GoForward, GoHome, Handle, HideApp,
         HideOthers, Minimize, Next, PlayPause, PlayRecent, Previous, SeekBackward, SeekForward,
-        ShowAll, ShowMainWindow, ShowShortcuts, ToggleFullScreen, TogglePlayback, VolumeDown,
-        VolumeUp, Zoom, route,
+        ShowAll, ShowMainWindow, ShowShortcuts, ToggleFullScreen, ToggleMiniOnMinimize,
+        ToggleMiniPlayer, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
     },
     ui::tracks::{RowDrag, RowDrop},
 };
@@ -72,6 +74,8 @@ pub struct State {
     pub shortcuts: bool,
     pub dock: Option<DockState>,
     pub dock_builds: u64,
+    pub mini: Option<MiniState>,
+    pub mini_auto: bool,
 }
 
 impl State {
@@ -116,7 +120,94 @@ impl OpenMusic {
         }
     }
 
-    pub fn toggle_mini_player(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+    pub fn toggle_mini_player(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        if mini_player::is_visible() {
+            self.close_mini_player();
+        } else if !self.open_mini_player() {
+            self.show_toast("Play something to open the mini player.", None);
+        }
+    }
+
+    pub fn mini_allowed(&self) -> bool {
+        matches!(self.session, Session::Connected)
+            && (self.track().is_some() || self.playback.now.device.is_some())
+    }
+
+    pub fn mini_state(&self) -> Option<MiniState> {
+        if !matches!(self.session, Session::Connected) {
+            return None;
+        }
+        let now = &self.playback.now;
+        let track = self.track();
+        Some(MiniState {
+            title: track
+                .map(|track| track.title.clone())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "Not playing".to_owned()),
+            artist: track.map(|track| track.artist.clone()).unwrap_or_default(),
+            device: now.device.clone().filter(|_| !now.local && track.is_some()),
+            playing: track.is_some() && now.playing,
+            saved: track.and_then(|track| self.is_saved(&track.uri)),
+            likable: track.is_some_and(|track| library::savable(&track.uri)),
+            cover: track
+                .and_then(|track| track.cover.clone())
+                .filter(|url| self.covers.contains_key(url)),
+            duration_ms: self.duration().unwrap_or(0),
+        })
+    }
+
+    pub fn open_mini_player(&mut self) -> bool {
+        if !self.mini_allowed() {
+            return false;
+        }
+        let Some(state) = self.mini_state() else {
+            return false;
+        };
+        let cover = state.cover.as_ref().and_then(|url| self.covers.get(url));
+        if !mini_player::show(&state, cover, self.playback.now.position()) {
+            return false;
+        }
+        self.system.mini = Some(state);
+        true
+    }
+
+    pub fn close_mini_player(&mut self) {
+        mini_player::hide();
+        self.system.mini = None;
+        self.system.mini_auto = false;
+    }
+
+    fn sync_mini_player(&mut self) {
+        if !mini_player::is_visible() {
+            self.system.mini = None;
+            return;
+        }
+        let Some(state) = self.mini_state() else {
+            self.close_mini_player();
+            return;
+        };
+        if self.system.mini.as_ref() != Some(&state) {
+            let cover = state.cover.as_ref().and_then(|url| self.covers.get(url));
+            mini_player::update(&state, cover);
+            self.system.mini = Some(state);
+        }
+        mini_player::progress(self.playback.now.position());
+    }
+
+    fn window_miniaturized(&mut self) {
+        if self.settings.system.mini_player_when_minimized
+            && !mini_player::is_visible()
+            && self.open_mini_player()
+        {
+            self.system.mini_auto = true;
+        }
+    }
+
+    fn window_restored(&mut self) {
+        if self.system.mini_auto {
+            self.close_mini_player();
+        }
+    }
 
     pub fn act(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         self.perform(intent, window, cx);
@@ -175,6 +266,7 @@ impl OpenMusic {
                     .is_some_and(|track| track.uri.starts_with("spotify:episode:")),
             notify: self.settings.system.notify_on_track_change,
             mini_on_minimize: self.settings.system.mini_player_when_minimized,
+            mini_open: mini_player::is_visible(),
         }
     }
 
@@ -185,6 +277,7 @@ impl OpenMusic {
 
     pub fn sync_native(&mut self) {
         self.sync_now_playing();
+        self.sync_mini_player();
         let menu = self.menu_state();
         if self.system.menu.as_ref() != Some(&menu) {
             menu_bar::sync(&menu);
@@ -214,7 +307,7 @@ impl OpenMusic {
             artist: track.map(|track| track.artist.clone()),
             playing: track.is_some() && self.playback.now.playing,
             recents,
-            mini_open: false,
+            mini_open: mini_player::is_visible(),
         }
     }
 
@@ -297,6 +390,7 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
+    app.close_mini_player();
     app.sync_native();
 }
 
@@ -372,6 +466,48 @@ pub fn debug(
             });
             write(directory, "dock.txt", lines.join("\n"));
         }
+        "mini" => {
+            let (command, argument) = rest.split_once(' ').unwrap_or((rest, ""));
+            match command {
+                "open" => {
+                    if !mini_player::is_visible() {
+                        app.open_mini_player();
+                    }
+                }
+                "close" => app.close_mini_player(),
+                "toggle" => app.act(Intent::ToggleMiniPlayer, window, cx),
+                "hover" => mini_player::set_hover(argument.trim() == "on"),
+                "size" => {
+                    let mut parts = argument
+                        .split_whitespace()
+                        .filter_map(|part| part.parse::<f64>().ok());
+                    if let (Some(width), Some(height)) = (parts.next(), parts.next()) {
+                        mini_player::resize(width, height);
+                    }
+                }
+                "press" => {
+                    if let Some(key) = mini_player::KEYS
+                        .iter()
+                        .find(|key| **key == argument.trim())
+                    {
+                        on_press(app, key, window, cx);
+                    }
+                }
+                "state" | "" => {}
+                _ => return false,
+            }
+            app.sync_system(cx);
+            write(
+                directory,
+                "mini.txt",
+                format!(
+                    "{}\nauto={} allowed={}",
+                    mini_player::describe(),
+                    app.system.mini_auto,
+                    app.mini_allowed()
+                ),
+            );
+        }
         "window" => {
             match rest {
                 "hide" => app.close_main_window(window, cx),
@@ -420,12 +556,13 @@ fn window_label(state: native_window::WindowState) -> &'static str {
 
 pub fn state_fragment(app: &OpenMusic) -> String {
     format!(
-        "published={} liked={} shortcuts={} window={} dock={}",
+        "published={} liked={} shortcuts={} window={} dock={} mini={}",
         app.system.publishes,
         app.liked_label(),
         app.system.shortcuts,
         window_label(native_window::state()),
         app.system.dock_builds,
+        mini_player::is_visible(),
     )
 }
 
@@ -482,6 +619,15 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     route(cx, handle, |action: &PlayRecent, app, window, cx| {
         app.act(Intent::PlayContext(action.uri.clone()), window, cx)
     });
+    route(cx, handle, |_: &ToggleMiniPlayer, app, window, cx| {
+        app.act(Intent::ToggleMiniPlayer, window, cx)
+    });
+    route(cx, handle, |_: &ToggleMiniOnMinimize, app, _, cx| {
+        app.update_settings(|settings| {
+            settings.system.mini_player_when_minimized = !settings.system.mini_player_when_minimized
+        });
+        app.sync_system(cx);
+    });
     cx.on_action(|_: &About, _| menu_bar::about());
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -496,9 +642,18 @@ pub fn on_press(
     cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
-        native_window::REOPEN => app.act(Intent::ShowMainWindow, window, cx),
+        native_window::REOPEN | mini_player::EXPAND => app.act(Intent::ShowMainWindow, window, cx),
+        native_window::MINIATURIZED => app.window_miniaturized(),
+        native_window::RESTORED => app.window_restored(),
+        mini_player::PREVIOUS => app.act(Intent::Previous, window, cx),
+        mini_player::TOGGLE => app.act(Intent::PlayPause, window, cx),
+        mini_player::NEXT => app.act(Intent::Next, window, cx),
+        mini_player::LIKE => app.act(Intent::ToggleLike, window, cx),
+        mini_player::CLOSE => app.close_mini_player(),
+        super::view::MINI_BUTTON => app.act(Intent::ToggleMiniPlayer, window, cx),
         _ => return false,
     }
+    app.sync_system(cx);
     true
 }
 

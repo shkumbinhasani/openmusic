@@ -15,6 +15,8 @@ pub const REMOVE_EPISODE: &str = "Remove from Your Episodes";
 pub const LIKE_TITLES: [&str; 4] = [SAVE, REMOVE, SAVE_EPISODE, REMOVE_EPISODE];
 pub const NOTIFY: &str = "Notify on Song Change";
 pub const MINI_ON_MINIMIZE: &str = "Show Mini Player When Minimized";
+pub const WINDOW: &str = "Window";
+pub const MINI_PLAYER: &str = "Mini Player";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Check {
@@ -42,6 +44,7 @@ pub struct MenuState {
     pub episode: bool,
     pub notify: bool,
     pub mini_on_minimize: bool,
+    pub mini_open: bool,
 }
 
 impl MenuState {
@@ -146,8 +149,8 @@ mod native {
     use objc2_foundation::NSString;
 
     use super::{
-        Check, LIKE_TITLES, MINI_ON_MINIMIZE, MenuState, NOTIFY, NativeItem, PLAYBACK, REPEAT,
-        SHUFFLE, native_key, toggle,
+        Check, LIKE_TITLES, MINI_ON_MINIMIZE, MINI_PLAYER, MenuState, NOTIFY, NativeItem, PLAYBACK,
+        REPEAT, SHUFFLE, WINDOW, native_key, toggle,
     };
 
     fn main_menu() -> Option<Retained<NSMenu>> {
@@ -185,6 +188,9 @@ mod native {
         if let Some(app) = main.itemAtIndex(0).and_then(|item| item.submenu()) {
             mark(&app, NOTIFY, toggle(state.notify));
             mark(&app, MINI_ON_MINIMIZE, toggle(state.mini_on_minimize));
+        }
+        if let Some(window) = find(&main, &[WINDOW]).and_then(|item| item.submenu()) {
+            mark(&window, MINI_PLAYER, toggle(state.mini_open));
         }
         let Some(playback) = find(&main, &[PLAYBACK]).and_then(|item| item.submenu()) else {
             return;
@@ -282,6 +288,7 @@ mod tests {
             episode: false,
             notify: false,
             mini_on_minimize: false,
+            mini_open: false,
         }
     }
 
