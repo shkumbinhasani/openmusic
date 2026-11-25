@@ -499,6 +499,15 @@ pub fn owner_label(owner: &str, name: Option<&str>) -> String {
 }
 
 impl OpenMusic {
+    pub fn listed_name(&self, uri: &str) -> Option<String> {
+        self.playlists
+            .rootlist
+            .as_ref()?
+            .playlist(uri)
+            .map(|playlist| playlist.name.clone())
+            .filter(|name| !name.trim().is_empty())
+    }
+
     pub fn open_playlist(&self, uri: &str) -> Option<&Collection> {
         let uri = playlist::canonical(uri)?;
         match &self.playlists.collection {

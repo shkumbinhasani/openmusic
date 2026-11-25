@@ -490,6 +490,11 @@ impl OpenMusic {
         let menu_uri = item.uri.clone();
         let subtitle = item.subtitle(show_kind);
         let draggable = reorder && matches!(item.kind, ItemKind::Playlist | ItemKind::Folder);
+        let listed = (item.kind == ItemKind::Playlist)
+            .then(|| self.listed_name(&item.uri))
+            .flatten();
+        let available = item.available || listed.is_some();
+        let title = listed.unwrap_or_else(|| item.title());
         div()
             .id(row)
             .h(px(ROW_HEIGHT))
@@ -505,7 +510,7 @@ impl OpenMusic {
                 line.bg(rgba(palette.press))
             })
             .hover(move |line| line.bg(rgba(palette.press)))
-            .when(!item.available, |line| line.opacity(0.5))
+            .when(!available, |line| line.opacity(0.5))
             .on_mouse_down(
                 MouseButton::Right,
                 self.on_menu(Some(row), move |_| Target::for_uri(&menu_uri), cx),
@@ -541,7 +546,7 @@ impl OpenMusic {
                                         FontWeight::MEDIUM
                                     })
                                     .when(playing, |title| title.text_color(rgb(palette.accent)))
-                                    .child(item.title()),
+                                    .child(title),
                             )
                             .children(
                                 ROW_BADGES
