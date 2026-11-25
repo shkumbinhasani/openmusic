@@ -1,3 +1,4 @@
+pub mod broadcast;
 pub mod dock_menu;
 pub mod login_item;
 pub mod menu_bar;

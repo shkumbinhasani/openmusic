@@ -30,6 +30,8 @@ const ROW_INSET: f32 = 14.;
 pub const NOTIFY_TITLE: &str = "Notification on song change";
 pub const NOTIFY_TEXT: &str = "Show a desktop notification when the track changes.";
 pub const NOTIFY_DENIED_TEXT: &str = "Enable notifications in your system settings to receive desktop notifications when the track changes.";
+pub const BROADCAST_TITLE: &str = "Share what’s playing with other apps";
+pub const BROADCAST_TEXT: &str = "Announces each song and every play, pause or seek to other apps on this Mac, such as scrobblers and menu bar players. Any app on this Mac can read it.";
 pub const LOGIN_TITLE: &str = "Open OpenMusic automatically after you log in";
 pub const MINI_TITLE: &str = "Show Mini Player when minimized";
 pub const MINI_TEXT: &str =
@@ -164,9 +166,26 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !notify::available() {
-            return None;
+        let mut rows = Vec::new();
+        if notify::available() {
+            rows.push(self.notify_row(palette, cx));
         }
+        let broadcast = Switch::new("system-broadcast-playback")
+            .checked(self.settings.system.broadcast_playback)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                this.set_broadcast(*checked);
+                cx.notify();
+            }));
+        rows.push(setting_row(
+            BROADCAST_TITLE,
+            Some(BROADCAST_TEXT.into()),
+            broadcast,
+            palette,
+        ));
+        Some(settings_section("Notifications", rows, palette))
+    }
+
+    fn notify_row(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let denied = notify::status() == Authorization::Denied;
         let switch = Switch::new("system-notify-on-track-change")
             .checked(self.settings.system.notify_on_track_change)
@@ -195,13 +214,7 @@ impl OpenMusic {
         } else {
             NOTIFY_TEXT
         };
-        let rows = vec![setting_row(
-            NOTIFY_TITLE,
-            Some(text.into()),
-            control,
-            palette,
-        )];
-        Some(settings_section("Notifications", rows, palette))
+        setting_row(NOTIFY_TITLE, Some(text.into()), control, palette)
     }
 }
 

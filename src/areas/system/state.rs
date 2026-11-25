@@ -11,6 +11,7 @@ use spotify_client::library;
 use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
+    broadcast::{self, Broadcaster},
     dock_menu::{self, DockState, RECENT_LIMIT, recent_name},
     login_item::{self, STARTUPS, Startup},
     menu_bar::{self, MenuState},
@@ -41,6 +42,7 @@ pub struct SystemPrefs {
     pub notify_on_track_change: bool,
     pub mini_player_when_minimized: bool,
     pub start_minimized: bool,
+    pub broadcast_playback: bool,
 }
 
 pub const TRACK_SEEK_MS: i32 = 5_000;
@@ -89,6 +91,7 @@ pub struct State {
     pub was_active: bool,
     pub login: login_item::Status,
     pub login_error: Option<String>,
+    pub broadcaster: Broadcaster,
 }
 
 impl State {
@@ -353,6 +356,10 @@ impl OpenMusic {
                 prefs.notify_on_track_change,
                 status == Authorization::Denied
             ),
+            format!(
+                "broadcast on={} posts={}",
+                prefs.broadcast_playback, self.system.broadcaster.posts
+            ),
         ]
         .join("\n")
     }
@@ -453,6 +460,7 @@ impl OpenMusic {
         self.sync_now_playing();
         self.sync_mini_player();
         self.sync_notifications();
+        self.sync_broadcast();
         let menu = self.menu_state();
         if self.system.menu.as_ref() != Some(&menu) {
             menu_bar::sync(&menu);
@@ -495,6 +503,23 @@ impl OpenMusic {
         dock_menu::strip_keys();
         self.system.dock = Some(state);
         self.system.dock_builds += 1;
+    }
+
+    fn sync_broadcast(&mut self) {
+        let enabled = self.settings.system.broadcast_playback;
+        let next = enabled.then(|| self.now_playing_snapshot()).flatten();
+        if let Some(next) = self
+            .system
+            .broadcaster
+            .observe(next, enabled, Instant::now())
+        {
+            broadcast::post(&broadcast::payload(next.as_ref()));
+        }
+    }
+
+    pub fn set_broadcast(&mut self, on: bool) {
+        self.update_settings(|settings| settings.system.broadcast_playback = on);
+        self.sync_native();
     }
 
     fn sync_now_playing(&mut self) {
@@ -721,6 +746,7 @@ pub fn debug(
             match (name, on) {
                 ("", _) => {}
                 ("mini", Some(on)) => app.set_mini_on_minimize(on, cx),
+                ("broadcast", Some(on)) => app.set_broadcast(on),
                 ("login", _) => match Startup::parse(value.trim()) {
                     Some(choice) => app.set_startup(choice),
                     None => return false,
@@ -735,6 +761,34 @@ pub fn debug(
             app.refresh_settings_status();
             cx.notify();
             write(directory, "system-settings.txt", app.settings_summary());
+        }
+        "broadcast" => {
+            match rest {
+                "listen" => broadcast::listen(),
+                "state" | "" => {}
+                _ => return false,
+            }
+            app.sync_system(cx);
+            let last = app
+                .system
+                .broadcaster
+                .last()
+                .map(|snapshot| broadcast::describe(&broadcast::payload(snapshot)));
+            let received = broadcast::received();
+            let text = json!({
+                "enabled": app.settings.system.broadcast_playback,
+                "name": broadcast::NAME,
+                "posts": app.system.broadcaster.posts,
+                "last": last,
+                "listening": received.is_some(),
+                "received": received.as_ref().map(|(count, _)| *count),
+                "received_last": received.and_then(|(_, last)| last),
+            });
+            write(
+                directory,
+                "broadcast.json",
+                serde_json::to_string_pretty(&text).unwrap_or_default(),
+            );
         }
         "window" => {
             match rest {
