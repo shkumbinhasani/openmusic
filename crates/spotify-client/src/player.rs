@@ -167,6 +167,14 @@ pub fn deck_volume(master: f32, gain: f32, fade: f32) -> f32 {
     (master * gain * fade).clamp(0., 1.)
 }
 
+pub fn main_player(_: MainThreadMarker) -> Option<Retained<AVQueuePlayer>> {
+    MAIN.with(|cell| {
+        let state = cell.try_borrow().ok()?;
+        let state = state.as_ref()?;
+        Some(state.decks[state.active].player.clone())
+    })
+}
+
 #[derive(Clone)]
 pub struct Player {
     _shared: Arc<Shared>,
