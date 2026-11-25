@@ -212,6 +212,7 @@ pub enum Event {
     Collection {
         uri: String,
         result: Result<Box<Collection>, String>,
+        reload: bool,
     },
     More {
         uri: String,
@@ -350,10 +351,11 @@ impl Event {
 pub fn handle(command: Command, ctx: &mut Ctx) {
     let api = ctx.api.clone();
     match command {
-        Command::Collection(uri) => ctx.tasks.spawn(collection(api, uri, playlist::PAGE)),
-        Command::Reload { uri, upto } => ctx
-            .tasks
-            .spawn_keyed(format!("playlist-reload {uri}"), collection(api, uri, upto)),
+        Command::Collection(uri) => ctx.tasks.spawn(collection(api, uri, playlist::PAGE, false)),
+        Command::Reload { uri, upto } => ctx.tasks.spawn_keyed(
+            format!("playlist-reload {uri}"),
+            collection(api, uri, upto, true),
+        ),
         Command::More { uri, from } => ctx.tasks.spawn_keyed("playlist-more", more(api, uri, from)),
         Command::Rootlist => ctx
             .tasks
@@ -416,7 +418,7 @@ async fn invitation(api: Api, id: String) -> crate::worker::Event {
     Event::Invitation { id, result }.into()
 }
 
-async fn collection(api: Api, uri: String, upto: usize) -> crate::worker::Event {
+async fn collection(api: Api, uri: String, upto: usize, reload: bool) -> crate::worker::Event {
     let result = if playlist::playlist_id(&uri).is_some() {
         playlist::collection(&api, &uri, upto).await
     } else {
@@ -427,6 +429,7 @@ async fn collection(api: Api, uri: String, upto: usize) -> crate::worker::Event 
         result: result
             .map(Box::new)
             .map_err(|_| "Couldn’t load this. Try again.".to_owned()),
+        reload,
     }
     .into()
 }

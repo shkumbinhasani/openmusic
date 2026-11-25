@@ -91,6 +91,13 @@ pub struct Snapshot {
     total: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Received {
+    Shown,
+    Kept,
+    Ignored,
+}
+
 #[derive(Default)]
 pub struct State {
     pub collection: Option<(String, Result<Collection, String>)>,
@@ -155,6 +162,32 @@ impl State {
                     .filter_map(|target| target.cover.clone()),
             );
         }
+    }
+
+    fn receive(
+        &mut self,
+        uri: String,
+        result: Result<Collection, String>,
+        reload: bool,
+    ) -> Received {
+        if reload {
+            let editing = playlist::canonical(&uri)
+                .is_some_and(|canonical| self.snapshots.contains_key(&canonical));
+            if editing {
+                return Received::Ignored;
+            }
+            if result.is_err() {
+                let showing = matches!(&self.collection, Some((loaded, Ok(_))) if *loaded == uri);
+                return if showing {
+                    Received::Kept
+                } else {
+                    Received::Ignored
+                };
+            }
+        }
+        self.loading_more = false;
+        self.collection = Some((uri, result));
+        Received::Shown
     }
 
     pub fn editable_for(&self, uris: &[String]) -> Option<&Result<Vec<EditTarget>, String>> {
@@ -1426,7 +1459,7 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
             .playlists
             .collection
             .as_ref()
-            .is_none_or(|(loaded, _)| loaded != uri)
+            .is_none_or(|(loaded, result)| loaded != uri || result.is_err())
         {
             app.playlists.collection = None;
             app.playlists.loading_more = false;
@@ -1447,18 +1480,30 @@ pub fn on_event(
     cx: &mut Context<OpenMusic>,
 ) {
     match event {
-        Event::Collection { uri, result } => {
+        Event::Collection {
+            uri,
+            result,
+            reload,
+        } => {
             if app.page != Page::Collection(uri.clone()) {
                 return;
             }
-            app.playlists.loading_more = false;
-            let edit = result.is_ok()
-                && app.playlists.edit_after_load.is_some()
-                && app.playlists.edit_after_load == playlist::canonical(&uri);
-            app.playlists.collection = Some((uri.clone(), result.map(|collection| *collection)));
-            if edit {
-                app.playlists.edit_after_load = None;
-                app.edit_details(&uri, window, cx);
+            let loaded = result.is_ok();
+            match app
+                .playlists
+                .receive(uri.clone(), result.map(|collection| *collection), reload)
+            {
+                Received::Shown => {
+                    let edit = loaded
+                        && app.playlists.edit_after_load.is_some()
+                        && app.playlists.edit_after_load == playlist::canonical(&uri);
+                    if edit {
+                        app.playlists.edit_after_load = None;
+                        app.edit_details(&uri, window, cx);
+                    }
+                }
+                Received::Kept => app.show_toast_if_idle("Couldn’t refresh this playlist."),
+                Received::Ignored => {}
             }
         }
         Event::More { uri, from, result } => {
@@ -2295,6 +2340,91 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LIST: &str = "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M";
+
+    fn collection(name: &str, rows: usize) -> Collection {
+        Collection {
+            uri: LIST.into(),
+            kind: "PLAYLIST".into(),
+            name: name.into(),
+            subtitle: String::new(),
+            cover: None,
+            artist_uri: None,
+            tracks: (0..rows)
+                .map(|row| Track::placeholder(&format!("spotify:track:{row}")))
+                .collect(),
+            owner: None,
+            description: String::new(),
+            revision: None,
+            format: None,
+            capabilities: Capabilities::default(),
+            metadata: HashMap::new(),
+            total: rows,
+            next: None,
+            picture: None,
+            attributions: HashMap::new(),
+        }
+    }
+
+    fn shown(state: &State) -> Option<Result<(String, usize), String>> {
+        let (_, result) = state.collection.as_ref()?;
+        Some(
+            result
+                .as_ref()
+                .map(|collection| (collection.name.clone(), collection.tracks.len()))
+                .map_err(Clone::clone),
+        )
+    }
+
+    #[test]
+    fn keeps_the_loaded_playlist_when_a_reload_fails() {
+        let mut state = State::default();
+        let failed = || Err("Couldn’t load this. Try again.".to_owned());
+        assert_eq!(
+            state.receive(LIST.into(), failed(), true),
+            Received::Ignored
+        );
+        assert_eq!(shown(&state), None);
+        assert_eq!(state.receive(LIST.into(), failed(), false), Received::Shown);
+        assert!(matches!(shown(&state), Some(Err(_))));
+        assert_eq!(
+            state.receive(LIST.into(), Ok(collection("Road", 250)), false),
+            Received::Shown
+        );
+        assert_eq!(state.receive(LIST.into(), failed(), true), Received::Kept);
+        assert_eq!(shown(&state), Some(Ok(("Road".into(), 250))));
+        assert_eq!(
+            state.receive(LIST.into(), Ok(collection("Road trip", 251)), true),
+            Received::Shown
+        );
+        assert_eq!(shown(&state), Some(Ok(("Road trip".into(), 251))));
+    }
+
+    #[test]
+    fn ignores_reloads_while_rows_are_being_edited() {
+        let mut state = State::default();
+        state.receive(LIST.into(), Ok(collection("Road", 3)), false);
+        state.snapshots.insert(
+            LIST.into(),
+            Snapshot {
+                pending: 1,
+                tracks: Vec::new(),
+                total: 3,
+            },
+        );
+        assert_eq!(
+            state.receive(LIST.into(), Ok(collection("Road", 4)), true),
+            Received::Ignored
+        );
+        assert_eq!(shown(&state), Some(Ok(("Road".into(), 3))));
+        state.snapshots.clear();
+        assert_eq!(
+            state.receive(LIST.into(), Ok(collection("Road", 4)), true),
+            Received::Shown
+        );
+        assert_eq!(shown(&state), Some(Ok(("Road".into(), 4))));
+    }
 
     #[test]
     fn labels_owners_by_name() {

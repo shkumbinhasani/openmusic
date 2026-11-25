@@ -32,6 +32,16 @@ impl OpenMusic {
         });
     }
 
+    pub fn show_toast_if_idle(&mut self, text: impl Into<String>) {
+        let idle = self
+            .toast
+            .as_ref()
+            .is_none_or(|toast| toast.until <= Instant::now());
+        if idle {
+            self.show_toast(text, None);
+        }
+    }
+
     pub fn undo_toast(&mut self, cx: &mut Context<Self>) {
         if let Some(undo) = self.toast.take().and_then(|toast| toast.undo) {
             undo(self, cx);
