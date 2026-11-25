@@ -148,7 +148,7 @@ impl State {
 
     fn note(&mut self, episodes: &[Episode]) {
         self.note_kinds(episodes);
-        for episode in episodes {
+        for episode in episodes.iter().filter(|episode| !episode.uri.is_empty()) {
             if episode.playable() {
                 self.unavailable.remove(&episode.uri);
             } else {
@@ -581,7 +581,7 @@ impl OpenMusic {
     fn lookup_episodes(&mut self, episodes: &[Episode]) {
         let uris: Vec<String> = episodes
             .iter()
-            .filter(|episode| !episode.chapter && !episode.restricted())
+            .filter(|episode| !episode.chapter && episode.listed())
             .map(|episode| episode.uri.clone())
             .collect();
         self.lookup_saved(uris);

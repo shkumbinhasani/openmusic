@@ -109,6 +109,7 @@ pub enum Availability {
     Restricted,
     PaymentRequired,
     Other,
+    Missing,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +147,13 @@ impl Episode {
 
     pub fn restricted(&self) -> bool {
         self.availability == Availability::Restricted
+    }
+
+    pub fn listed(&self) -> bool {
+        !matches!(
+            self.availability,
+            Availability::Restricted | Availability::Missing
+        )
     }
 
     pub fn as_track(&self) -> Track {
@@ -566,6 +574,17 @@ pub fn parse_item(item: &Value) -> Option<Episode> {
     episode_from(typename, data, uri, owned(&item["uid"]))
 }
 
+fn missing_item(item: &Value) -> Episode {
+    Episode {
+        uri: owned(&item["entity"]["_uri"])
+            .or_else(|| owned(&item["entity"]["data"]["uri"]))
+            .unwrap_or_default(),
+        uid: owned(&item["uid"]),
+        availability: Availability::Missing,
+        ..Episode::default()
+    }
+}
+
 pub fn parse_episode(data: &Value) -> Result<Episode> {
     let union = &data["episodeUnionV2"];
     match union["__typename"].as_str() {
@@ -596,7 +615,7 @@ pub fn parse_page(data: &Value) -> Result<EpisodePage> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(parse_item)
+        .map(|item| parse_item(item).unwrap_or_else(|| missing_item(item)))
         .collect();
     let total = number(&page["totalCount"]);
     let next_offset = page["pagingInfo"]["nextOffset"]
@@ -1128,6 +1147,34 @@ mod tests {
                 .downcast_ref::<Unavailable>(),
             Some(&Unavailable::Restricted)
         );
+    }
+
+    #[test]
+    fn keeps_the_place_of_items_it_cannot_read() {
+        let mut reply = episodes_reply();
+        reply["podcastUnionV2"]["episodesV2"]["items"][2] = json!({
+            "uid": "uid-gone",
+            "entity": {"_uri": "spotify:episode:00000000000000000000g1", "data": {"__typename": "NotFound"}}
+        });
+        reply["podcastUnionV2"]["episodesV2"]["items"][3] = json!({"uid": "uid-empty"});
+        let page = parse_page(&reply).unwrap();
+        assert_eq!(page.episodes.len(), 4);
+        assert_eq!(page.next_offset, Some(4));
+        let gone = &page.episodes[2];
+        assert_eq!(gone.uri, "spotify:episode:00000000000000000000g1");
+        assert_eq!(gone.availability, Availability::Missing);
+        assert!(!gone.listed() && !gone.restricted() && !gone.playable());
+        assert_eq!(page.episodes[3].uid.as_deref(), Some("uid-empty"));
+        assert!(!page.episodes[0].listed());
+        assert!(page.episodes[1].listed());
+
+        let mut show = Show {
+            uri: SHOW.into(),
+            ..Show::default()
+        };
+        assert!(show.append(0, page));
+        assert_eq!(show.next_offset, Some(4));
+        assert_eq!(show.restricted(), 1);
     }
 
     #[test]

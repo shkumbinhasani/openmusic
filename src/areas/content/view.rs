@@ -252,6 +252,7 @@ fn unplayable_note(episode: &Episode) -> Option<&'static str> {
         }
         Availability::PaymentRequired => Some("This episode is for subscribers only."),
         Availability::Other => Some("This episode can’t play right now."),
+        Availability::Missing => Some("Spotify couldn’t find this episode."),
     }
 }
 
@@ -822,7 +823,7 @@ impl OpenMusic {
             .episodes
             .iter()
             .enumerate()
-            .filter(|(_, episode)| !episode.restricted())
+            .filter(|(_, episode)| episode.listed())
             .collect();
         let restricted = show.restricted();
         let loading = self.content.show_loading;
@@ -1128,7 +1129,7 @@ impl OpenMusic {
                                 palette,
                                 cx,
                             ))
-                            .when(!episode.restricted(), |line| {
+                            .when(episode.listed(), |line| {
                                 line.child(self.episode_save_button(
                                     (ids.save, index),
                                     &episode.uri,
