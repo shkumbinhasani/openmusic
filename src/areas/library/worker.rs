@@ -204,7 +204,8 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             Event::Played { request, result }.into()
         }),
         Command::PlayedContext { uri, at } => {
-            ctx.tasks.spawn_keyed("library-played-context", async move {
+            let key = format!("library-played-context {uri}");
+            ctx.tasks.spawn_keyed(key, async move {
                 let context = PlayedContext {
                     uri: library::context_uri(&uri),
                     played_at: at,
