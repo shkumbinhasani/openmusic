@@ -1116,6 +1116,21 @@ impl Engine {
                     self.advance("advance").await;
                 }
             }
+            PlayerEvent::Missing { generation } => {
+                if !self.prepared_failed(generation)
+                    && self
+                        .playing
+                        .as_ref()
+                        .is_some_and(|playing| playing.generation == generation)
+                    && !self.reload_here().await
+                {
+                    self.unload();
+                    self.report("error").await;
+                    self.audio.updates.push(Update::Notice(
+                        "Playback stopped. The next track was not loaded.".into(),
+                    ));
+                }
+            }
             PlayerEvent::Failed {
                 generation,
                 message,
@@ -1138,7 +1153,13 @@ impl Engine {
     }
 
     pub(super) async fn advance(&mut self, transition: &str) {
-        if self.ending(transition) != Ending::Continue {
+        let stale = self
+            .audio
+            .joins
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| !prepared.outlives(transition));
+        if stale || self.ending(transition) != Ending::Continue {
             self.discard_prepared();
         }
         let how = if transition == "advance" {

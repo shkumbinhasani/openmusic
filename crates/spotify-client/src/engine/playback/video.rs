@@ -258,7 +258,7 @@ impl Engine {
         self.reload_here().await
     }
 
-    async fn reload_here(&mut self) -> bool {
+    pub(super) async fn reload_here(&mut self) -> bool {
         let Some(playing) = self.playing.as_ref() else {
             return false;
         };

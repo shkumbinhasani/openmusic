@@ -186,6 +186,10 @@ impl Prepared {
         self.target.index
     }
 
+    pub(super) fn outlives(&self, transition: &str) -> bool {
+        transition != "advance" || self.join != Join::Gapless
+    }
+
     pub(super) fn report(&self) -> ReportPrepared {
         ReportPrepared {
             generation: self.generation,
@@ -737,6 +741,17 @@ mod tests {
         assert!(!preparable(&machine, &at(3, "spotify:track:d")));
         assert!(!preparable(&machine, &at(4, "spotify:ad:e")));
         assert!(!preparable(&machine, &at(9, "spotify:track:z")));
+    }
+
+    #[test]
+    fn drops_a_gapless_item_the_player_never_reached() {
+        let machine = machine();
+        let mut item = prepared(target(&machine, 0, "advance").unwrap());
+        assert!(!item.outlives("advance"));
+        assert!(item.outlives("skip_next"));
+        item.join = Join::Crossfade;
+        assert!(item.outlives("advance"));
+        assert!(item.outlives("skip_next"));
     }
 
     #[test]

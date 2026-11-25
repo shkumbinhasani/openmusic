@@ -168,6 +168,9 @@ pub enum PlayerEvent {
         generation: u64,
         message: String,
     },
+    Missing {
+        generation: u64,
+    },
     Stalled {
         generation: u64,
     },
@@ -1116,10 +1119,7 @@ impl MainState {
                     .first()
                     .is_some_and(|head| is_current(&self.decks[active].player, head));
                 if !current_is_head {
-                    emit(PlayerEvent::Failed {
-                        generation,
-                        message: "Nothing is playing to join the next track to.".into(),
-                    });
+                    emit(PlayerEvent::Missing { generation });
                     return;
                 }
                 self.drop_queued(active);
@@ -1133,10 +1133,7 @@ impl MainState {
             }
         };
         let Some(item) = self.make_item(mtm, generation, &media) else {
-            emit(PlayerEvent::Failed {
-                generation,
-                message: "OpenMusic could not open the next track.".into(),
-            });
+            emit(PlayerEvent::Missing { generation });
             return;
         };
         let player = self.decks[deck].player.clone();
@@ -1144,10 +1141,7 @@ impl MainState {
         let fits = unsafe { player.canInsertItem_afterItem(&item.item, after.as_deref()) };
         if !fits {
             self.release(item);
-            emit(PlayerEvent::Failed {
-                generation,
-                message: "The next track could not be queued.".into(),
-            });
+            emit(PlayerEvent::Missing { generation });
             return;
         }
         unsafe { player.insertItem_afterItem(&item.item, after.as_deref()) };
@@ -1194,10 +1188,7 @@ impl MainState {
     fn promote(&mut self, generation: u64, rewind: bool, play: bool) {
         self.finish_ramp();
         let Some((deck, index)) = self.find(generation) else {
-            emit(PlayerEvent::Failed {
-                generation,
-                message: "The next track was not loaded.".into(),
-            });
+            emit(PlayerEvent::Missing { generation });
             return;
         };
         for _ in 0..index {
