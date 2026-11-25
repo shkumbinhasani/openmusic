@@ -78,7 +78,6 @@ impl Recents {
         if offset == 0 || page.fallback {
             self.entries = page.entries;
             self.loaded = true;
-            self.stale = false;
             self.fetched = Some(Instant::now());
         } else {
             self.entries.extend(page.entries);
@@ -161,6 +160,7 @@ impl OpenMusic {
         let recent = &mut self.library.recent;
         recent.request += 1;
         recent.loading = true;
+        recent.stale = false;
         let request = recent.request;
         self.send(Command::Recents { offset: 0, request });
     }

@@ -191,7 +191,6 @@ impl Liked {
             self.unplayable = page.unplayable.into_iter().collect();
             self.next_offset = page.rows;
             self.loaded = true;
-            self.stale = false;
             self.fetched = Some(Instant::now());
         } else {
             let known: HashSet<String> =
@@ -230,6 +229,7 @@ impl OpenMusic {
         let liked = &mut self.library.liked;
         liked.request += 1;
         liked.loading = true;
+        liked.stale = false;
         let request = liked.request;
         self.send(Command::Liked { offset: 0, request });
     }
