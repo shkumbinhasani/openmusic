@@ -98,7 +98,13 @@ pub fn card_plays(card: &Card) -> bool {
     card.playable
         && matches!(
             card.kind,
-            Kind::Track | Kind::Album | Kind::Playlist | Kind::Artist | Kind::LikedSongs
+            Kind::Track
+                | Kind::Album
+                | Kind::Playlist
+                | Kind::Artist
+                | Kind::LikedSongs
+                | Kind::Show
+                | Kind::Episode
         )
 }
 
@@ -253,7 +259,7 @@ impl OpenMusic {
 
     pub fn card_is_current(&self, card: &Card) -> bool {
         self.context_is_current(&card.uri)
-            || (card.kind == Kind::Track
+            || (matches!(card.kind, Kind::Track | Kind::Episode)
                 && self
                     .playback
                     .now
@@ -268,9 +274,14 @@ impl OpenMusic {
             self.set_playing(playing, cx);
             return;
         }
+        self.start_card(card, origin, cx);
+    }
+
+    pub fn start_card(&mut self, card: &Card, origin: &'static str, cx: &mut Context<Self>) {
         if !card_plays(card) {
             return;
         }
+        let options = PlayOptions::titled(&card.title);
         match card.kind {
             Kind::Track => {
                 let track = card_track(card);
@@ -278,14 +289,14 @@ impl OpenMusic {
                     self.play(&[track], 0, cx);
                 }
             }
-            Kind::LikedSongs => {
-                let options = PlayOptions::titled(&card.title);
-                self.play_context_from(LIKED_SONGS, &[], 0, origin, options, cx)
+            Kind::Episode => {
+                let episode = card_track(card);
+                if !self.refuses_track(Some(&episode), None, cx) {
+                    self.play_context_from(&card.uri, &[episode], 0, origin, options, cx);
+                }
             }
-            _ => {
-                let options = PlayOptions::titled(&card.title);
-                self.play_context_from(&card.uri, &[], 0, origin, options, cx)
-            }
+            Kind::LikedSongs => self.play_context_from(LIKED_SONGS, &[], 0, origin, options, cx),
+            _ => self.play_context_from(&card.uri, &[], 0, origin, options, cx),
         }
     }
 
@@ -647,15 +658,18 @@ mod tests {
     }
 
     #[test]
-    fn plays_music_cards_only() {
+    fn plays_music_and_podcast_cards_only() {
         let card = |kind, uri: &str| crate::ui::cards::card(uri, kind, "x", "", None);
         assert!(card_plays(&card(Kind::Album, "spotify:album:a")));
         assert!(card_plays(&card(
             Kind::LikedSongs,
             "spotify:user:u:collection"
         )));
-        assert!(!card_plays(&card(Kind::Show, "spotify:show:a")));
+        assert!(card_plays(&card(Kind::Show, "spotify:show:a")));
+        assert!(card_plays(&card(Kind::Episode, "spotify:episode:a")));
+        assert!(!card_plays(&card(Kind::Audiobook, "spotify:show:b")));
         assert!(!card_plays(&card(Kind::Genre, "spotify:page:a")));
+        assert!(!card_plays(&card(Kind::User, "spotify:user:a")));
         let mut blocked = card(Kind::Playlist, "spotify:playlist:a");
         blocked.playable = false;
         assert!(!card_plays(&blocked));

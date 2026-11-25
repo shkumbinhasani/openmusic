@@ -609,10 +609,9 @@ impl OpenMusic {
         if !top_result_plays(&hit.card) {
             return;
         }
-        let uri = hit.uri().to_owned();
-        let options = spotify_client::connect::PlayOptions::titled(&hit.card.title);
+        let card = hit.card.clone();
         self.remember_search(hit);
-        self.play_context_from(&uri, &[], 0, SEARCH_ORIGIN, options, cx);
+        self.start_card(&card, SEARCH_ORIGIN, cx);
     }
 
     pub fn move_suggestion(&mut self, down: bool) {
@@ -1013,7 +1012,7 @@ pub fn top_result_plays(card: &Card) -> bool {
     card.playable
         && matches!(
             card.kind,
-            Kind::Track | Kind::Album | Kind::Playlist | Kind::Artist
+            Kind::Track | Kind::Album | Kind::Playlist | Kind::Artist | Kind::Show | Kind::Episode
         )
 }
 
@@ -1194,12 +1193,18 @@ mod tests {
     }
 
     #[test]
-    fn top_results_play_music_only() {
+    fn top_results_play_music_and_podcasts_only() {
         let mut card = crate::ui::cards::card("spotify:album:x", Kind::Album, "x", "", None);
         assert!(top_result_plays(&card));
         card.playable = false;
         assert!(!top_result_plays(&card));
         let show = crate::ui::cards::card("spotify:show:x", Kind::Show, "x", "", None);
-        assert!(!top_result_plays(&show));
+        assert!(top_result_plays(&show));
+        let episode = crate::ui::cards::card("spotify:episode:x", Kind::Episode, "x", "", None);
+        assert!(top_result_plays(&episode));
+        let book = crate::ui::cards::card("spotify:show:y", Kind::Audiobook, "x", "", None);
+        assert!(!top_result_plays(&book));
+        let user = crate::ui::cards::card("spotify:user:x", Kind::User, "x", "", None);
+        assert!(!top_result_plays(&user));
     }
 }
