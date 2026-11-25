@@ -6,12 +6,37 @@ use spotify_proto::connectstate::ProvidedTrack;
 use tokio::sync::watch;
 
 use super::Engine;
-use crate::connect::{
-    self, Allowed, CommandError, ConnectDevice, PlayOptions, Playback, QueueKey, Repeat, Restore,
-    Shuffle,
+use crate::{
+    connect::{
+        self, Allowed, CommandError, ConnectDevice, PlayOptions, Playback, QueueKey, Repeat,
+        Restore, Shuffle,
+    },
+    dj, jam,
 };
 
 const QUEUE_EDIT_WINDOW: Duration = Duration::from_secs(3);
+pub const JAM_ENDED: &str = "The Jam has ended.";
+const JAM_TRANSFER: &str = "Leave the Jam to play on another device.";
+const JAM_VOLUME: &str = "Only the host can change the speaker volume.";
+
+#[derive(Debug)]
+pub struct JamGone;
+
+impl std::fmt::Display for JamGone {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(JAM_ENDED)
+    }
+}
+
+impl std::error::Error for JamGone {}
+
+fn keep_jam(error: anyhow::Error, fallback: impl Into<String>) -> anyhow::Error {
+    if error.downcast_ref::<JamGone>().is_some() {
+        error
+    } else {
+        anyhow!(fallback.into())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Control {
@@ -38,6 +63,11 @@ pub enum Control {
         device: String,
         volume: u16,
     },
+    Jam(Option<String>),
+    PlayDj {
+        context_url: String,
+    },
+    DjJump,
 }
 
 #[derive(Debug)]
@@ -50,13 +80,10 @@ struct VolumeSender {
 pub(super) struct State {
     queue_edit: Option<(String, Instant)>,
     volume: Option<VolumeSender>,
+    jam: Option<String>,
 }
 
 impl State {
-    pub(super) fn redirect(&self, target: &str) -> String {
-        target.to_owned()
-    }
-
     fn queue_busy(&self, revision: &str) -> bool {
         self.queue_edit
             .as_ref()
@@ -130,6 +157,40 @@ fn blocked_notice(name: &str, reason: &str) -> String {
 }
 
 impl Engine {
+    pub(super) async fn routed_command(
+        &mut self,
+        target: &str,
+        command: Value,
+    ) -> Result<Option<String>> {
+        if let Some(session) = self.remote.jam.clone() {
+            if jam::redirect(&self.api, &session, &self.device_id, command).await? {
+                return Ok(None);
+            }
+            self.remote.jam = None;
+            bail!(JamGone);
+        }
+        let (to, alias) = connect::device_target(target);
+        connect::command(&self.api, &self.device_id, to, command, alias).await
+    }
+
+    pub(super) fn control_target(&self, control: &super::Control) -> Option<String> {
+        if let Some(target) = self.remote_target() {
+            return Some(target);
+        }
+        let player = matches!(
+            control,
+            super::Control::SetPlaying(_)
+                | super::Control::Next
+                | super::Control::Previous
+                | super::Control::Seek(_)
+        );
+        (self.redirected() && player).then(|| self.command_target())
+    }
+
+    fn redirected(&self) -> bool {
+        self.remote.jam.is_some()
+    }
+
     fn command_target(&self) -> String {
         self.playback
             .as_ref()
@@ -182,12 +243,12 @@ impl Engine {
                 if uris.is_empty() {
                     return Ok(());
                 }
-                if !self.playing_model()?.allowed.play_next {
+                if !self.redirected() && !self.playing_model()?.allowed.play_next {
                     bail!("You can’t add songs to the queue right now.");
                 }
                 self.player_command(connect::play_next_command(&uris))
                     .await
-                    .map_err(|_| anyhow!("Couldn’t add that to the queue."))
+                    .map_err(|error| keep_jam(error, "Couldn’t add that to the queue."))
             }
             Control::RemoveFromQueue(keys) => self.edit_queue(Edit::Remove(keys)).await,
             Control::MoveInQueue {
@@ -213,7 +274,7 @@ impl Engine {
                 self.send_command(&own, connect::shuffle_play_command(&uri, origin, &options))
                     .await
                     .map(|_| ())
-                    .map_err(|_| anyhow!("Spotify didn’t start playback."))
+                    .map_err(|error| keep_jam(error, "Spotify didn’t start playback."))
             }
             Control::RefreshCluster => self
                 .refresh_cluster()
@@ -221,7 +282,30 @@ impl Engine {
                 .map_err(|_| anyhow!("Couldn’t reach Spotify Connect.")),
             Control::Transfer(id) => self.transfer_to(id).await,
             Control::DeviceVolume { device, volume } => self.device_volume(device, volume).await,
+            Control::Jam(session) => {
+                self.remote.jam = session;
+                Ok(())
+            }
+            Control::PlayDj { context_url } => {
+                let target = self.command_target();
+                self.send_command(&target, dj::play_command(&context_url))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| keep_jam(error, "Spotify didn’t start the DJ."))
+            }
+            Control::DjJump => self.dj_jump().await,
         }
+    }
+
+    async fn dj_jump(&mut self) -> Result<()> {
+        let command = match self.playing_model().ok().and_then(dj::jump) {
+            Some(dj::Jump::Signal) => dj::signal_command(dj::JUMP),
+            Some(dj::Jump::SkipTo(track)) => connect::skip_to_command(&track),
+            None => bail!("The DJ can’t switch right now."),
+        };
+        self.player_command(command)
+            .await
+            .map_err(|error| keep_jam(error, "The DJ can’t switch right now."))
     }
 
     fn device(&self, id: &str) -> Option<ConnectDevice> {
@@ -234,6 +318,9 @@ impl Engine {
     }
 
     async fn transfer_to(&mut self, id: String) -> Result<()> {
+        if self.redirected() {
+            bail!(JAM_TRANSFER);
+        }
         let own = self.device_id.clone();
         let (to, alias) = connect::device_target(&id);
         let here = to == own;
@@ -391,6 +478,14 @@ impl Engine {
         if uris.is_empty() {
             return Ok(());
         }
+        if self.redirected() {
+            for uri in &uris {
+                self.player_command(connect::add_to_queue_command(uri))
+                    .await
+                    .map_err(|error| keep_jam(error, "Couldn’t add that to the Jam’s queue."))?;
+            }
+            return Ok(());
+        }
         if !self.playing_model()?.allowed.add_to_queue {
             bail!("You can’t add songs to the queue right now.");
         }
@@ -398,7 +493,7 @@ impl Engine {
             return self
                 .player_command(connect::add_to_queue_command(uri))
                 .await
-                .map_err(|_| anyhow!("Couldn’t add that to the queue."));
+                .map_err(|error| keep_jam(error, "Couldn’t add that to the queue."));
         }
         self.edit_queue(Edit::Add(uris)).await
     }
@@ -453,7 +548,7 @@ impl Engine {
         };
         self.player_command(connect::skip_to_command(&item))
             .await
-            .map_err(|_| anyhow!("Couldn’t skip to that song."))
+            .map_err(|error| keep_jam(error, "Couldn’t skip to that song."))
     }
 
     pub(super) async fn remote(&mut self, _target: String, control: super::Control) -> Result<()> {
@@ -477,7 +572,14 @@ impl Engine {
                     .as_ref()
                     .filter(|playback| playback.track.is_some())
                 else {
-                    return Ok(());
+                    if !self.redirected() {
+                        return Ok(());
+                    }
+                    return self
+                        .send_command(&target, json!({"endpoint": "skip_prev"}))
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| keep_jam(error, "Couldn’t go back in the Jam."));
                 };
                 match connect::previous_command(self.remote_position(), &playback.allowed) {
                     Some(command) => command,
@@ -486,6 +588,9 @@ impl Engine {
             }
             super::Control::Seek(position) => json!({"endpoint": "seek_to", "value": position}),
             super::Control::Volume(volume) => {
+                if active.is_none() && self.redirected() {
+                    bail!(JAM_VOLUME);
+                }
                 if active.is_some_and(|device| device.volume.is_none()) {
                     bail!("You can’t change the volume on {name}.");
                 }
@@ -497,6 +602,11 @@ impl Engine {
         self.send_command(&target, command)
             .await
             .map(|_| ())
-            .map_err(|_| anyhow!("Spotify didn’t accept that command for {name}."))
+            .map_err(|error| {
+                keep_jam(
+                    error,
+                    format!("Spotify didn’t accept that command for {name}."),
+                )
+            })
     }
 }
