@@ -315,7 +315,13 @@ pub fn update(message: &Message) -> Option<SessionUpdate> {
     parse_update(&payload)
 }
 
-pub fn accepts(current: Option<&Session>, update: &SessionUpdate) -> bool {
+pub fn accepts(current: Option<&Session>, update: &SessionUpdate, departed: Option<i64>) -> bool {
+    if let Some(left_at) = departed {
+        let rejoined = JOINING.contains(&update.reason.as_str()) && update.timestamp > left_at;
+        if !rejoined {
+            return false;
+        }
+    }
     match current {
         Some(current) if current.id == update.session_id => {
             update.timestamp <= 0 || update.timestamp >= current.timestamp
@@ -867,34 +873,60 @@ mod tests {
         };
         assert!(accepts(
             Some(&current),
-            &update_for("a", 101, "USER_JOINED", true)
+            &update_for("a", 101, "USER_JOINED", true),
+            None
         ));
         assert!(accepts(
             Some(&current),
-            &update_for("a", 100, "USER_JOINED", true)
+            &update_for("a", 100, "USER_JOINED", true),
+            None
         ));
         assert!(!accepts(
             Some(&current),
-            &update_for("a", 99, "USER_LEFT", true)
+            &update_for("a", 99, "USER_LEFT", true),
+            None
         ));
         assert!(accepts(
             Some(&current),
-            &update_for("a", 0, "SESSION_DELETED", false)
+            &update_for("a", 0, "SESSION_DELETED", false),
+            None
         ));
         assert!(!accepts(
             Some(&current),
-            &update_for("b", 200, "USER_JOINED", true)
+            &update_for("b", 200, "USER_JOINED", true),
+            None
         ));
         assert!(!accepts(
             Some(&current),
-            &update_for("b", 200, "SESSION_DELETED", false)
+            &update_for("b", 200, "SESSION_DELETED", false),
+            None
         ));
         assert!(accepts(
             Some(&current),
-            &update_for("b", 200, "YOU_JOINED", true)
+            &update_for("b", 200, "YOU_JOINED", true),
+            None
         ));
-        assert!(accepts(None, &update_for("b", 1, "NEW_SESSION", true)));
-        assert!(!accepts(None, &update_for("b", 1, "YOU_LEFT", false)));
+        assert!(accepts(
+            None,
+            &update_for("b", 1, "NEW_SESSION", true),
+            None
+        ));
+        assert!(!accepts(None, &update_for("b", 1, "YOU_LEFT", false), None));
+        assert!(!accepts(
+            None,
+            &update_for("a", 150, "USER_LEFT", true),
+            Some(120)
+        ));
+        assert!(!accepts(
+            None,
+            &update_for("a", 110, "YOU_JOINED", true),
+            Some(120)
+        ));
+        assert!(accepts(
+            None,
+            &update_for("a", 130, "YOU_JOINED", true),
+            Some(120)
+        ));
     }
 
     fn person(id: &str, name: &str) -> Member {

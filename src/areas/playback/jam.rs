@@ -77,6 +77,7 @@ pub struct JamState {
     polled: Option<Instant>,
     play_after: Option<PlayAfter>,
     requested: HashSet<String>,
+    departed: HashMap<String, i64>,
     noticed: bool,
 }
 
@@ -468,6 +469,18 @@ impl OpenMusic {
             .or(old.as_ref())
             .is_some_and(|session| session.is_owner);
         let changes = jam::changes(old.as_ref(), session.as_ref(), reason);
+        if let Some(left) = old
+            .as_ref()
+            .filter(|old| session.as_ref().is_none_or(|session| session.id != old.id))
+        {
+            self.playback
+                .jam
+                .departed
+                .insert(left.id.clone(), left.timestamp.max(1));
+        }
+        if let Some(joined) = &session {
+            self.playback.jam.departed.remove(&joined.id);
+        }
         self.playback.jam.session = session;
         if self.playback.jam.session.is_some() {
             self.playback.jam.polled = Some(Instant::now());
@@ -546,7 +559,8 @@ impl OpenMusic {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if jam::accepts(self.jam(), &update) {
+        let departed = self.playback.jam.departed.get(&update.session_id).copied();
+        if jam::accepts(self.jam(), &update, departed) {
             self.set_jam(update.session, &update.reason, window, cx);
         }
     }
