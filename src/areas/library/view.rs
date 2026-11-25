@@ -4,6 +4,7 @@ use spotify_client::{
     library::{ItemKind, LibraryItem},
 };
 
+use super::saves;
 use crate::{
     app::{OpenMusic, Page, page_for},
     icons,
@@ -360,23 +361,25 @@ pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
 }
 
 pub fn dock_items(
-    _app: &OpenMusic,
+    app: &OpenMusic,
     _roomy: bool,
-    _palette: Palette,
-    _cx: &mut Context<OpenMusic>,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
 ) -> Vec<DockItem> {
-    Vec::new()
+    saves::dock_heart(app, palette, cx).into_iter().collect()
 }
 
 pub fn row_accessories(
-    _app: &OpenMusic,
-    _track: &Track,
+    app: &OpenMusic,
+    track: &Track,
     _row: Row,
     _options: &RowOptions,
-    _palette: Palette,
-    _cx: &mut Context<OpenMusic>,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
-    Vec::new()
+    saves::row_heart(app, track, palette, cx)
+        .into_iter()
+        .collect()
 }
 
 pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {

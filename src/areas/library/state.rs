@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::Path,
     time::{Duration, Instant},
@@ -18,6 +19,7 @@ use spotify_client::{
 
 use super::{
     cache,
+    saves::{self, FOLLOW_KEY, LIKE_CURRENT_KEY, SAVE_KEY, header_uri},
     view::LIBRARY_ROW,
     worker::{Command, Event},
 };
@@ -62,6 +64,10 @@ pub struct State {
     pub folder_requests: u64,
     pub pins: HashMap<String, (bool, bool)>,
     pub recents: Vec<Recent>,
+    pub wanted: RefCell<HashSet<String>>,
+    pub asked: HashMap<String, Instant>,
+    pub toggle_when_known: Option<(String, Instant)>,
+    pub resync: bool,
 }
 
 #[derive(Default)]
@@ -139,7 +145,7 @@ impl State {
             .find(|item| same_item(item, uri))
     }
 
-    fn items_mut(&mut self, uri: &str) -> impl Iterator<Item = &mut LibraryItem> {
+    pub(super) fn items_mut(&mut self, uri: &str) -> impl Iterator<Item = &mut LibraryItem> {
         let folder = self.folder.iter_mut().flat_map(|folder| &mut folder.items);
         self.items
             .iter_mut()
@@ -761,6 +767,12 @@ pub fn debug(
             }
         }
         "rootlist" => dump_rootlist(app, directory),
+        "togglesaved" => {
+            for uri in rest.split_whitespace() {
+                app.toggle_saved(uri);
+            }
+        }
+        "likecurrent" => app.like_current(),
         _ => return false,
     }
     true
@@ -769,7 +781,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let library = &app.library;
     format!(
-        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={}",
+        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={}",
         library.items.len(),
         library.page.as_ref().map_or(0, |page| page.total),
         library.query.filters.join("/"),
@@ -787,7 +799,9 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             .map_or(0, |list| list.playlists().len()),
         library.query.expanded.len(),
         library.pins.len(),
-        app.recent_contexts().len()
+        app.recent_contexts().len(),
+        library.asked.len(),
+        library.resync
     )
 }
 
@@ -799,6 +813,10 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     )]);
     menus::route(cx, handle, |_: &FilterLibrary, app, window, cx| {
         app.open_library_filter(window, cx);
+        cx.notify();
+    });
+    menus::route(cx, handle, |_: &menus::ToggleLike, app, _, cx| {
+        app.like_current();
         cx.notify();
     });
 }
@@ -814,6 +832,12 @@ pub fn on_press(
             if let Page::Folder(uri) = &app.page {
                 let target = Target::Folder { uri: uri.clone() };
                 app.open_menu_under(target, key);
+            }
+        }
+        LIKE_CURRENT_KEY => app.like_current(),
+        SAVE_KEY | FOLLOW_KEY => {
+            if let Some(uri) = header_uri(&app.page).map(str::to_owned) {
+                app.toggle_saved(&uri);
             }
         }
         _ => return false,
@@ -845,25 +869,22 @@ pub fn row_dropped(
         .filter(|uri| uri.starts_with("spotify:track:"))
         .cloned()
         .collect();
-    let fresh: Vec<String> = songs
-        .iter()
-        .filter(|uri| app.is_saved(uri) != Some(true))
-        .cloned()
-        .collect();
-    let message = match (songs.len(), fresh.len()) {
-        (0, _) => return true,
-        (_, 0) => "Already in Liked Songs".to_owned(),
-        (_, 1) => "Added to Liked Songs".to_owned(),
-        (_, count) => format!("Added {count} songs to Liked Songs"),
-    };
-    if !fresh.is_empty() {
-        app.set_saved(fresh, true);
+    if songs.is_empty() {
+        return true;
     }
+    let message = match app.write_saved(songs, true) {
+        0 => "Already in Liked Songs.".to_owned(),
+        1 => "Added to Liked Songs.".to_owned(),
+        count => format!("Added {count} songs to Liked Songs."),
+    };
     app.show_toast(message, None);
     true
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if saves::tick(app) {
+        cx.notify();
+    }
     if app.library.sentinel.take() {
         app.more_library();
     }
