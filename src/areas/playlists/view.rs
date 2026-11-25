@@ -14,7 +14,7 @@ use spotify_client::{
     catalog::Collection,
     entity,
     library::{ItemKind, LibraryItem},
-    playlist::{self, ItemPosition, Level, RootNode, RootPlace, Rootlist},
+    playlist::{self, ItemPosition, Level, RootEntry, RootNode, RootPlace, Rootlist},
 };
 
 use super::state::{BlendWork, PlaylistInfo, owner_label, source_name};
@@ -1085,8 +1085,10 @@ fn add_targets(
     nodes
         .into_iter()
         .filter_map(|node| match node {
-            RootNode::Playlist { uri, .. } => {
-                let found = list.playlist(&uri)?;
+            RootNode::Playlist { uri, index } => {
+                let Some(RootEntry::Playlist(found)) = list.entries.get(index) else {
+                    return None;
+                };
                 if !found.capabilities.edit_items || source.exclude.as_deref() == Some(uri.as_str())
                 {
                     return None;
@@ -1385,10 +1387,7 @@ pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOpt
 
 #[cfg(test)]
 mod tests {
-    use spotify_client::{
-        catalog::Capabilities,
-        playlist::{RootEntry, RootPlaylist},
-    };
+    use spotify_client::{catalog::Capabilities, playlist::RootPlaylist};
 
     use super::*;
     use crate::ui::menu::grouped;
