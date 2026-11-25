@@ -128,6 +128,9 @@ impl OpenMusic {
 
     pub fn device_menu(&self) -> Vec<MenuItem> {
         let mut rows = self.picker_rows();
+        if !self.volume_allowed() {
+            rows.retain(|row| !matches!(row, PickerRow::Volume(_)));
+        }
         rows.extend(jam_rows(self.jam()));
         rows.into_iter()
             .map(|row| match row {

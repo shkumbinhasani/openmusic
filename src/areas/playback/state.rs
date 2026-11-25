@@ -437,7 +437,19 @@ impl OpenMusic {
             .map_or(self.playback.now.repeat, |(mode, _)| mode)
     }
 
+    fn guest_locked(&mut self) -> bool {
+        if !self.jam_controls_locked() {
+            return false;
+        }
+        self.show_toast(GUEST_WARNING, None);
+        true
+    }
+
     pub fn toggle_shuffle(&mut self, cx: &mut Context<Self>) {
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         let allowed = self.playback_allowed();
         if !allowed.shuffle {
             return;
@@ -447,6 +459,10 @@ impl OpenMusic {
     }
 
     pub fn cycle_repeat(&mut self, cx: &mut Context<Self>) {
+        if self.guest_locked() {
+            cx.notify();
+            return;
+        }
         let next = next_repeat(self.repeat_mode(), &self.playback_allowed());
         if next != self.repeat_mode() {
             self.set_repeat(next, cx);

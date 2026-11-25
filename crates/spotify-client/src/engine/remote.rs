@@ -479,10 +479,23 @@ impl Engine {
             return Ok(());
         }
         if self.redirected() {
-            for uri in &uris {
-                self.player_command(connect::add_to_queue_command(uri))
-                    .await
-                    .map_err(|error| keep_jam(error, "Couldn’t add that to the Jam’s queue."))?;
+            let (first, rest) = uris.split_first().expect("uris is not empty");
+            self.player_command(connect::add_to_queue_command(first))
+                .await
+                .map_err(|error| keep_jam(error, "Couldn’t add that to the Jam’s queue."))?;
+            if let (Some(session), false) = (self.remote.jam.clone(), rest.is_empty()) {
+                let (api, from, rest) = (self.api.clone(), self.device_id.clone(), rest.to_vec());
+                tokio::spawn(async move {
+                    for uri in rest {
+                        let command = connect::add_to_queue_command(&uri);
+                        if !matches!(
+                            jam::redirect(&api, &session, &from, command).await,
+                            Ok(true)
+                        ) {
+                            break;
+                        }
+                    }
+                });
             }
             return Ok(());
         }
