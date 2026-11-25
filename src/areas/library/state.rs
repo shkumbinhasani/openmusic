@@ -86,6 +86,7 @@ pub struct State {
     pub wanted: RefCell<HashSet<String>>,
     pub asked: HashMap<String, Instant>,
     pub when_known: Option<(String, bool, Instant)>,
+    pub dropped: Option<(Vec<String>, Instant)>,
     pub resync: bool,
     pub liked_writes: HashMap<String, bool>,
     pub liked: Liked,
@@ -1277,15 +1278,9 @@ pub fn row_dropped(
         .filter(|uri| uri.starts_with("spotify:track:"))
         .cloned()
         .collect();
-    if songs.is_empty() {
-        return true;
+    if !songs.is_empty() {
+        app.like_dropped(songs);
     }
-    let message = match app.write_saved(songs, true) {
-        0 => "Already in Liked Songs.".to_owned(),
-        1 => "Added to Liked Songs.".to_owned(),
-        count => format!("Added {count} songs to Liked Songs."),
-    };
-    app.show_toast(message, None);
     true
 }
 

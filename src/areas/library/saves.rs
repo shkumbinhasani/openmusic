@@ -127,6 +127,14 @@ fn toggled(known: Option<bool>) -> bool {
     known != Some(true)
 }
 
+fn drop_toast(added: usize) -> String {
+    match added {
+        0 => "Already in Liked Songs.".to_owned(),
+        1 => "Added to Liked Songs.".to_owned(),
+        count => format!("Added {count} songs to Liked Songs."),
+    }
+}
+
 fn settle_likes(
     writes: &mut HashMap<String, bool>,
     pending: &HashMap<String, Option<bool>>,
@@ -207,6 +215,30 @@ impl OpenMusic {
         let written = changes.len();
         self.set_saved(changes, saved);
         written
+    }
+
+    pub fn like_dropped(&mut self, songs: Vec<String>) {
+        let unknown: Vec<String> = songs
+            .iter()
+            .filter(|uri| self.is_saved(uri).is_none())
+            .cloned()
+            .collect();
+        if unknown.is_empty() {
+            let added = self.write_saved(songs, true);
+            self.show_toast(drop_toast(added), None);
+            return;
+        }
+        self.lookup_saved(unknown);
+        match &mut self.library.dropped {
+            Some((waiting, _)) => {
+                for song in songs {
+                    if !waiting.contains(&song) {
+                        waiting.push(song);
+                    }
+                }
+            }
+            None => self.library.dropped = Some((songs, Instant::now())),
+        }
     }
 
     fn bump_liked_count(&mut self, delta: i64) {
@@ -383,6 +415,17 @@ pub fn tick(app: &mut OpenMusic) -> bool {
             changed = true;
         }
     }
+    if let Some((songs, at)) = app.library.dropped.clone() {
+        if songs.iter().all(|uri| app.is_saved(uri).is_some()) {
+            app.library.dropped = None;
+            app.like_dropped(songs);
+            changed = true;
+        } else if at.elapsed() >= TOGGLE_WAIT {
+            app.library.dropped = None;
+            app.show_toast("Couldn’t add this to your library. Try again.", None);
+            changed = true;
+        }
+    }
     if settle_likes(
         &mut app.library.liked_writes,
         &app.saved.pending,
@@ -489,6 +532,9 @@ mod tests {
         assert_eq!(header_uri(&Page::Liked), None);
         assert_eq!(liked_count("64 songs"), Some(64));
         assert_eq!(liked_count(""), None);
+        assert_eq!(drop_toast(0), "Already in Liked Songs.");
+        assert_eq!(drop_toast(1), "Added to Liked Songs.");
+        assert_eq!(drop_toast(3), "Added 3 songs to Liked Songs.");
     }
 
     #[test]
