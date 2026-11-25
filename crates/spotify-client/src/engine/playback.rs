@@ -13,11 +13,10 @@ use crate::{
     api::Body,
     catalog::{LocalTrack, Track, image_url},
     connect::{Repeat, Shuffle, SleepState},
-    loudness,
     playback_settings::LoudnessLevel,
     player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
 };
-use gain::{Gains, linear, state_options};
+use gain::{Gains, fetch_loudness, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
 use sleep::Sleep;
@@ -749,7 +748,7 @@ impl Engine {
         let api = self.api.clone();
         let unknown_show = self.unknown_show(show.as_ref());
         let (found, opened, show_speed) = tokio::join!(
-            loudness::fetch(&api, &missing),
+            fetch_loudness(&api, &missing),
             self.open(&pick, &uri),
             read_show_speed(&api, unknown_show)
         );

@@ -3,7 +3,12 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use super::{Playing, gain::state_options, join::track_at, source::is_spoken};
+use super::{
+    Playing,
+    gain::{SIDE_LOOKUP, state_options},
+    join::track_at,
+    source::is_spoken,
+};
 use crate::{
     api::Api,
     engine::Engine,
@@ -72,9 +77,8 @@ pub(super) async fn read_show_speed(
     show: Option<String>,
 ) -> Option<(String, Option<f32>)> {
     let show = show?;
-    let remote = playback_settings::read(api, None, std::slice::from_ref(&show))
-        .await
-        .ok()?;
+    let read = playback_settings::read(api, None, std::slice::from_ref(&show));
+    let remote = tokio::time::timeout(SIDE_LOOKUP, read).await.ok()?.ok()?;
     let speed = remote.speeds.get(&show).copied();
     Some((show, speed))
 }

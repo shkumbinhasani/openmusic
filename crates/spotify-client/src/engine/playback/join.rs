@@ -4,13 +4,12 @@ use serde_json::Value;
 
 use super::{
     AudioSettings, Playing, ReportPrepared,
-    gain::linear,
+    gain::{fetch_loudness, linear},
     source::Pick,
     speed::{show_of, starting_speed, state_speed},
 };
 use crate::{
     engine::Engine,
-    loudness,
     player::{Join, Media},
 };
 
@@ -265,7 +264,7 @@ impl Engine {
         let generation = self.generation;
         let api = self.api.clone();
         let (found, opened) = tokio::join!(
-            loudness::fetch(&api, &missing),
+            fetch_loudness(&api, &missing),
             self.open(&pick, &target.uri)
         );
         self.store_loudness(found);

@@ -1,15 +1,29 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 
 use super::{AudioSettings, join::track_at};
 use crate::{
+    api::Api,
     engine::Engine,
     loudness::{self, Loudness, TrackLoudness},
 };
 
 const CACHE: usize = 512;
+pub(super) const SIDE_LOOKUP: Duration = Duration::from_secs(3);
+
+pub(super) async fn fetch_loudness(
+    api: &Api,
+    uris: &[String],
+) -> Result<HashMap<String, TrackLoudness>> {
+    if uris.is_empty() {
+        return Ok(HashMap::new());
+    }
+    tokio::time::timeout(SIDE_LOOKUP, loudness::fetch(api, uris))
+        .await
+        .map_err(|_| anyhow!("Loudness lookup took too long."))?
+}
 
 pub(super) fn state_options(machine: &Value, index: usize) -> &Value {
     machine["states"]
