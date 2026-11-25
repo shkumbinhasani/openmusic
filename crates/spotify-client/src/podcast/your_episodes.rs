@@ -137,18 +137,16 @@ pub fn merge(saved: &[Item], resolved: &[ContextItem]) -> Vec<Entry> {
     entries
 }
 
+pub fn combine(saved: Result<Vec<Item>>, resolved: Result<Vec<ContextItem>>) -> Result<Vec<Entry>> {
+    Ok(merge(&saved?, &resolved?))
+}
+
 pub async fn entries(api: &Api, user: &str) -> Result<Vec<Entry>> {
     let (saved, resolved) = tokio::join!(
         collection::all(api, user, collection::LISTEN_LATER),
         catalog::resolve(api, CONTEXT, RESOLVE_LIMIT),
     );
-    match (saved, resolved) {
-        (Err(error), Err(_)) => Err(error),
-        (saved, resolved) => Ok(merge(
-            &saved.unwrap_or_default(),
-            &resolved.map(|resolved| resolved.items).unwrap_or_default(),
-        )),
-    }
+    combine(saved, resolved.map(|resolved| resolved.items))
 }
 
 pub fn settle(found: Vec<Result<Episode>>) -> Result<Vec<Option<Episode>>> {
@@ -224,6 +222,23 @@ mod tests {
             video,
             ..Episode::default()
         }
+    }
+
+    #[test]
+    fn fails_when_either_store_fails() {
+        let saved = || Ok(vec![item("spotify:episode:00000000000000000000a1", 1)]);
+        let resolved = || {
+            Ok(vec![resolved(
+                "spotify:episode:00000000000000000000b1",
+                None,
+            )])
+        };
+        assert_eq!(combine(saved(), resolved()).unwrap().len(), 2);
+        assert_eq!(combine(Ok(Vec::new()), Ok(Vec::new())).unwrap(), Vec::new());
+        let down = || anyhow::anyhow!("502");
+        assert!(combine(Err(down()), resolved()).is_err());
+        assert!(combine(saved(), Err(down())).is_err());
+        assert!(combine(Ok(Vec::new()), Err(down())).is_err());
     }
 
     #[test]
