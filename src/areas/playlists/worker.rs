@@ -233,6 +233,7 @@ pub enum Event {
         name: String,
         open: bool,
         edit: bool,
+        warning: Option<String>,
     },
     Editable {
         uris: Vec<String>,
@@ -557,6 +558,19 @@ async fn run(api: Api, user: User, write: Write, done: Option<String>) -> crate:
     }
 }
 
+fn created(uri: String, name: String, open: bool, edit: bool, added: anyhow::Result<()>) -> Event {
+    let warning = added
+        .err()
+        .map(|_| format!("Created {name}, but couldn’t add the songs."));
+    Event::Created {
+        uri,
+        name,
+        open,
+        edit,
+        warning,
+    }
+}
+
 fn hash_of(uri: &str) -> anyhow::Result<&str> {
     playlist::folder_hash(uri)
         .ok_or_else(|| anyhow::anyhow!("This folder is no longer in Your Library."))
@@ -577,6 +591,7 @@ async fn perform(
             edit,
         } => {
             let me = user.name(api).await?;
+            let tracks = playlist::expand(api, &tracks).await?;
             let name = match name {
                 Some(name) => name,
                 None => playlist::rootlist(api, &me)
@@ -589,16 +604,12 @@ async fn perform(
                 .and_then(playlist::folder_hash)
                 .map_or(Position::Start, Position::in_folder);
             let uri = playlist::create(api, &me, &name, &position).await?;
-            if !tracks.is_empty() {
-                let tracks = playlist::expand(api, &tracks).await?;
-                playlist::add_items(api, &uri, &tracks, &ItemPosition::Top).await?;
-            }
-            Ok(Some(Event::Created {
-                uri,
-                name,
-                open,
-                edit,
-            }))
+            let added = if tracks.is_empty() {
+                Ok(())
+            } else {
+                playlist::add_items(api, &uri, &tracks, &ItemPosition::Top).await
+            };
+            Ok(Some(created(uri, name, open, edit, added)))
         }
         Write::Details {
             uri,
@@ -754,6 +765,29 @@ mod tests {
         assert_eq!(readable(&graphql, "fallback"), "fallback");
         let stale = anyhow::Error::new(PathfinderError::StaleHash("addToPlaylist"));
         assert!(readable(&stale, "fallback").contains("addToPlaylist"));
+    }
+
+    #[test]
+    fn reports_a_created_playlist_even_when_its_songs_fail() {
+        let warning = |added| match created(
+            "spotify:playlist:x".into(),
+            "Road".into(),
+            false,
+            false,
+            added,
+        ) {
+            Event::Created { uri, warning, .. } => {
+                assert_eq!(uri, "spotify:playlist:x");
+                warning
+            }
+            _ => panic!("expected a created playlist"),
+        };
+        assert_eq!(warning(Ok(())), None);
+        let failed = anyhow::Error::new(HttpStatus(reqwest::StatusCode::BAD_GATEWAY));
+        assert_eq!(
+            warning(Err(failed)).as_deref(),
+            Some("Created Road, but couldn’t add the songs.")
+        );
     }
 
     #[test]

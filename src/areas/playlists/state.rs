@@ -1612,10 +1612,15 @@ pub fn on_event(
             name,
             open,
             edit,
+            warning,
         } => {
             app.refresh_rootlist();
+            match warning {
+                Some(warning) => app.show_toast(warning, None),
+                None if !open => app.show_toast(format!("Added to {name}"), None),
+                None => {}
+            }
             if !open {
-                app.show_toast(format!("Added to {name}"), None);
                 return;
             }
             if edit {
