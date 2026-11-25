@@ -617,6 +617,7 @@ fn repeat_button(app: &OpenMusic) -> ButtonSpec {
     let tooltip = match next_repeat(mode, &app.playback_allowed()) {
         Repeat::Context => "Enable repeat",
         Repeat::Track => "Enable repeat one",
+        Repeat::Off if mode == Repeat::Off => "Enable repeat",
         Repeat::Off => "Disable repeat",
     };
     ButtonSpec {
