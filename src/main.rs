@@ -144,7 +144,9 @@ fn main() {
                 },
             )
             .expect("open the OpenMusic window");
-            cx.activate(true);
+            if debug::directory().is_none() {
+                cx.activate(true);
+            }
         });
 
     runtime.shutdown_timeout(Duration::from_secs(1));
