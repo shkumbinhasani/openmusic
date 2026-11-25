@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use spotify_client::catalog::{Collection, Link};
+use spotify_client::{
+    catalog::{Collection, Link},
+    details::hide_context,
+};
 
 use crate::{
     app::{OpenMusic, Page},
@@ -33,7 +36,7 @@ impl<'a> Facts<'a> {
     pub fn editable(&self, context: &str) -> Option<bool> {
         if let Some(collection) = self
             .collection
-            .filter(|collection| collection.uri == context)
+            .filter(|collection| hide_context(&collection.uri).as_deref() == Some(context))
         {
             return Some(collection.capabilities.edit_items);
         }
@@ -437,6 +440,16 @@ mod tests {
     fn leaves_hide_out_of_playlists_you_can_edit() {
         let mut world = World::new();
         world.collection = Some(collection(RADIO, None, true));
+        let lines = world.menu(&in_context(creep(), RADIO, None));
+        assert_eq!(
+            lines[0],
+            "Exclude from your taste profile  x  <minus.circle>"
+        );
+        world.collection = Some(collection(
+            "spotify:user:someone:playlist:37i9dQZF1E8Redacted001",
+            None,
+            true,
+        ));
         let lines = world.menu(&in_context(creep(), RADIO, None));
         assert_eq!(
             lines[0],
