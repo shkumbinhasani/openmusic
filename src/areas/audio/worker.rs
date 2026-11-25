@@ -114,6 +114,7 @@ pub fn on_push(message: &Message, ctx: &mut Ctx) {
 pub fn on_update(update: Update, ctx: &mut Ctx) {
     match update {
         Update::Report(report) => ctx.publish(Event::Report(report)),
+        Update::Notice(message) => ctx.publish(crate::worker::Event::Notice(message)),
     }
 }
 

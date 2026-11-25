@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{AudioSettings, Playing, ReportPrepared, gain::linear};
+use super::{AudioSettings, Playing, ReportPrepared, gain::linear, source::Pick};
 use crate::{
     engine::Engine,
     loudness,
@@ -113,7 +113,8 @@ pub(super) struct Prepared {
     pub(super) generation: u64,
     target: Target,
     pub(super) join: Join,
-    file: File,
+    pick: Pick,
+    bitrate: u64,
     duration_ms: u32,
     pub(super) ready: bool,
     pub(super) gain_db: Option<f32>,
@@ -238,28 +239,30 @@ impl Engine {
         let Some((target, join)) = self.wanted_join() else {
             return;
         };
-        let Some(file) = track_at(&playing.machine, target.index).and_then(choose_file) else {
+        let Some(track) = track_at(&playing.machine, target.index).cloned() else {
             self.audio.joins.tried = Some(source);
             return;
         };
-        let duration_ms = track_at(&playing.machine, target.index)
-            .and_then(|track| track["metadata"]["duration"].as_u64())
-            .unwrap_or_default() as u32;
+        let duration_ms = track["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
         let missing = self.audio.gains.missing(&playing.machine);
+        let Ok(pick) = self.resolve(&track).await else {
+            self.audio.joins.tried = Some(source);
+            return;
+        };
+        if self.playing.as_ref().map(|playing| playing.generation) != Some(source) {
+            return;
+        }
         self.generation += 1;
         let generation = self.generation;
         let api = self.api.clone();
-        let (found, media) = tokio::join!(
+        let (found, opened) = tokio::join!(
             loudness::fetch(&api, &missing),
-            self.media(&file.id, &file.format_number)
+            self.open(&pick, &target.uri)
         );
         self.store_loudness(found);
-        let media = match media {
-            Ok(media) => media,
-            Err(_) => {
-                self.audio.joins.tried = Some(source);
-                return;
-            }
+        let Ok((media, bitrate)) = opened else {
+            self.audio.joins.tried = Some(source);
+            return;
         };
         let Some(playing) = self
             .playing
@@ -281,7 +284,8 @@ impl Engine {
             generation,
             target,
             join,
-            file,
+            bitrate: bitrate.max(pick.bitrate()),
+            pick,
             duration_ms,
             ready: false,
             gain_db,
@@ -367,8 +371,9 @@ impl Engine {
             prepared.generation,
             0,
         );
-        next.format = prepared.file.format.clone();
-        next.bitrate = prepared.file.bitrate;
+        next.format = prepared.pick.format();
+        next.bitrate = prepared.bitrate;
+        next.source = prepared.pick.name();
         next.duration_ms = prepared.duration_ms;
         next.gain_db = prepared.gain_db;
         self.playing = Some(next);
@@ -470,12 +475,13 @@ mod tests {
             generation: 7,
             target,
             join: Join::Gapless,
-            file: File {
+            pick: Pick::FairPlay(File {
                 id: "ba".into(),
                 format: json!(14),
                 format_number: "14".into(),
                 bitrate: 128_000,
-            },
+            }),
+            bitrate: 128_000,
             duration_ms: 180_000,
             ready: false,
             gain_db: None,

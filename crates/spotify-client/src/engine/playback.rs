@@ -18,10 +18,12 @@ use crate::{
     player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
 };
 use gain::{Gains, linear, state_options};
-use join::{Joins, Taken, choose_file};
+use join::{Joins, Taken};
+pub use source::MANIFEST_FORMATS;
 
 mod gain;
 mod join;
+mod source;
 
 #[derive(Clone, Debug)]
 pub enum Control {
@@ -36,6 +38,7 @@ pub enum Control {
 #[derive(Clone, Debug)]
 pub enum Update {
     Report(Box<AudioReport>),
+    Notice(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +72,7 @@ pub struct ReportItem {
     pub format: String,
     pub bitrate: u64,
     pub gain_db: Option<f32>,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,9 +112,10 @@ impl fmt::Display for AudioReport {
         match &self.playing {
             Some(item) => writeln!(
                 f,
-                "playing generation={} uri={} position={} duration={} paused={} format={} bitrate={} gain={}",
+                "playing generation={} uri={} source={} position={} duration={} paused={} format={} bitrate={} gain={}",
                 item.generation,
                 item.uri,
+                item.source,
                 item.position_ms,
                 item.duration_ms,
                 item.paused,
@@ -194,6 +199,7 @@ pub(super) struct Playing {
     threshold_reported: bool,
     last_progress: Instant,
     gain_db: Option<f32>,
+    source: &'static str,
 }
 
 impl Playing {
@@ -212,6 +218,7 @@ impl Playing {
             threshold_reported: false,
             last_progress: Instant::now(),
             gain_db: None,
+            source: "",
         }
     }
 
@@ -351,6 +358,7 @@ impl Engine {
                     .unwrap_or_else(|| playing.format.to_string()),
                 bitrate: playing.bitrate,
                 gain_db: playing.gain_db,
+                source: playing.source.to_owned(),
             }),
             prepared: self
                 .audio
@@ -440,8 +448,10 @@ impl Engine {
                     playing.index = index;
                 }
                 self.check_prepared();
-            } else {
-                let _ = Box::pin(self.start_state(machine, index, paused, None)).await;
+            } else if let Err(error) =
+                Box::pin(self.start_state(machine, index, paused, None)).await
+            {
+                self.audio.updates.push(Update::Notice(error.to_string()));
             }
         }
     }
@@ -547,7 +557,7 @@ impl Engine {
         if let Err(error) = self.start_state(machine, index, paused, seek).await {
             self.stop_local();
             self.report("error").await;
-            let _ = error;
+            self.audio.updates.push(Update::Notice(error.to_string()));
         }
     }
 
@@ -614,37 +624,44 @@ impl Engine {
             .track()
             .cloned()
             .context("Spotify sent no track to play.")?;
-        let file =
-            choose_file(&track).context("Spotify offered no FairPlay audio for this track.")?;
-        playing.format = file.format.clone();
-        playing.bitrate = file.bitrate;
+        let uri = playing.uri().to_owned();
+        let pick = self.resolve(&track).await?;
+        playing.format = pick.format();
+        playing.bitrate = pick.bitrate();
+        playing.source = pick.name();
         playing.duration_ms = track["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
         let missing = self.audio.gains.missing(&playing.machine);
+        let generation = playing.generation;
         self.playing = Some(playing);
-        self.audio.joins.record(format!("cold {}", self.generation));
+        self.audio.joins.record(format!("cold {generation}"));
         self.report("before_track_load").await;
 
         let api = self.api.clone();
-        let (found, media) = tokio::join!(
-            loudness::fetch(&api, &missing),
-            self.media(&file.id, &file.format_number)
-        );
+        let (found, opened) = tokio::join!(loudness::fetch(&api, &missing), self.open(&pick, &uri));
         self.store_loudness(found);
-        let gain_db = self
+        let (media, bitrate) = opened?;
+        let Some(playing) = self
             .playing
             .as_ref()
-            .and_then(|playing| self.gain_at(&playing.machine, playing.index));
+            .filter(|playing| playing.generation == generation)
+        else {
+            return Ok(());
+        };
+        let gain_db = self.gain_at(&playing.machine, playing.index);
         if let Some(playing) = self.playing.as_mut() {
             playing.gain_db = gain_db;
+            if bitrate > 0 {
+                playing.bitrate = bitrate;
+            }
         }
         let media = Media {
             start_ms: seek.unwrap_or(initial),
             play: !paused,
             gain: linear(gain_db),
-            ..media?
+            ..media
         };
         self.player.set_volume(f32::from(self.volume) / GAIA_VOLUME);
-        self.player.load(self.generation, media);
+        self.player.load(generation, media);
         Ok(())
     }
 
@@ -865,8 +882,8 @@ impl Engine {
             return;
         }
         if let Err(error) = self.start_state(machine, index, paused, None).await {
-            let _ = error;
             self.report("error").await;
+            self.audio.updates.push(Update::Notice(error.to_string()));
         }
     }
 

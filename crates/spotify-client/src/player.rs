@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
+    path::PathBuf,
     ptr::NonNull,
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
@@ -41,9 +42,29 @@ pub struct FairPlay {
     pub token: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hls {
+    pub playlists: Vec<(String, Vec<u8>)>,
+    pub root: String,
+}
+
 #[derive(Clone)]
 pub enum Source {
     FairPlay(FairPlay),
+    Url(String),
+    Hls(Hls),
+    File(PathBuf),
+}
+
+impl Source {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::FairPlay(_) => "fairplay",
+            Self::Url(_) => "url",
+            Self::Hls(_) => "hls",
+            Self::File(_) => "file",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -153,6 +174,7 @@ struct Item {
     item: Retained<AVPlayerItem>,
     asset: Retained<AVURLAsset>,
     key: String,
+    keyed: bool,
     file_id: Option<String>,
     gain: f32,
     ready: bool,
@@ -230,6 +252,10 @@ fn emit(event: PlayerEvent) {
     }
 }
 
+fn playlist_key(host: &str, path: &str) -> String {
+    format!("{host}/{}", path.trim_start_matches('/'))
+}
+
 fn generation_for(file_id: &str) -> u64 {
     files()
         .lock()
@@ -257,8 +283,11 @@ define_class!(
         ) -> Bool {
             let key = unsafe { request.request() }
                 .URL()
-                .and_then(|url| url.host())
-                .map(|host| host.to_string())
+                .and_then(|url| {
+                    let host = url.host()?.to_string();
+                    let path = url.path().map(|path| path.to_string()).unwrap_or_default();
+                    Some(playlist_key(&host, &path))
+                })
                 .unwrap_or_default();
             let Some(playlist) = playlists()
                 .lock()
@@ -614,11 +643,14 @@ impl MainState {
 
     fn make_item(&mut self, mtm: MainThreadMarker, generation: u64, media: &Media) -> Option<Item> {
         let key = format!("track{generation}");
-        let file_id = match &media.source {
+        let store = |name: &str, bytes: Vec<u8>| {
+            if let Ok(mut map) = playlists().lock() {
+                map.insert(playlist_key(&key, name), bytes);
+            }
+        };
+        let (url, file_id, loaded, keyed) = match &media.source {
             Source::FairPlay(fairplay) => {
-                if let Ok(mut map) = playlists().lock() {
-                    map.insert(key.clone(), playlist(fairplay));
-                }
+                store("playlist.m3u8", playlist(fairplay));
                 if let Ok(mut licensing) = licensing().lock() {
                     *licensing = Some(Licensing {
                         certificate: fairplay.certificate.clone(),
@@ -629,24 +661,62 @@ impl MainState {
                 if let Ok(mut files) = files().lock() {
                     files.insert(fairplay.file_id.clone(), generation);
                 }
-                Some(fairplay.file_id.clone())
+                (
+                    NSURL::URLWithString(&NSString::from_str(&format!(
+                        "{SCHEME}://{key}/playlist.m3u8"
+                    ))),
+                    Some(fairplay.file_id.clone()),
+                    true,
+                    true,
+                )
             }
+            Source::Hls(hls) => {
+                for (name, bytes) in &hls.playlists {
+                    store(name, bytes.clone());
+                }
+                (
+                    NSURL::URLWithString(&NSString::from_str(&format!(
+                        "{SCHEME}://{key}/{}",
+                        hls.root.trim_start_matches('/')
+                    ))),
+                    None,
+                    true,
+                    false,
+                )
+            }
+            Source::Url(url) => (
+                NSURL::URLWithString(&NSString::from_str(url)),
+                None,
+                false,
+                false,
+            ),
+            Source::File(path) => (
+                Some(NSURL::fileURLWithPath(&NSString::from_str(
+                    &path.to_string_lossy(),
+                ))),
+                None,
+                false,
+                false,
+            ),
         };
-        let url = NSURL::URLWithString(&NSString::from_str(&format!(
-            "{SCHEME}://{key}/playlist.m3u8"
-        )));
         let Some(url) = url else {
             self.forget(&key, file_id.as_deref(), generation);
             return None;
         };
         let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
-        let queue = DispatchQueue::new("openmusic.playlist", None);
-        unsafe {
-            asset
-                .resourceLoader()
-                .setDelegate_queue(Some(ProtocolObject::from_ref(&*self.loader)), Some(&queue));
-            self.session
-                .addContentKeyRecipient(ProtocolObject::from_ref(&*asset));
+        if loaded {
+            let queue = DispatchQueue::new("openmusic.playlist", None);
+            unsafe {
+                asset
+                    .resourceLoader()
+                    .setDelegate_queue(Some(ProtocolObject::from_ref(&*self.loader)), Some(&queue));
+            }
+        }
+        if keyed {
+            unsafe {
+                self.session
+                    .addContentKeyRecipient(ProtocolObject::from_ref(&*asset));
+            }
         }
         let item = unsafe { AVPlayerItem::playerItemWithAsset(&asset, mtm) };
         Some(Item {
@@ -654,6 +724,7 @@ impl MainState {
             item,
             asset,
             key,
+            keyed,
             file_id,
             gain: media.gain.max(0.),
             ready: false,
@@ -663,8 +734,9 @@ impl MainState {
     }
 
     fn forget(&self, key: &str, file_id: Option<&str>, generation: u64) {
+        let prefix = format!("{key}/");
         if let Ok(mut map) = playlists().lock() {
-            map.remove(key);
+            map.retain(|name, _| !name.starts_with(&prefix));
         }
         if let (Some(file_id), Ok(mut files)) = (file_id, files().lock())
             && files.get(file_id) == Some(&generation)
@@ -675,9 +747,11 @@ impl MainState {
 
     fn release(&self, item: Item) {
         self.forget(&item.key, item.file_id.as_deref(), item.generation);
-        unsafe {
-            self.session
-                .removeContentKeyRecipient(ProtocolObject::from_ref(&*item.asset));
+        if item.keyed {
+            unsafe {
+                self.session
+                    .removeContentKeyRecipient(ProtocolObject::from_ref(&*item.asset));
+            }
         }
     }
 
@@ -1281,6 +1355,24 @@ mod tests {
         ramp.elapsed = Duration::ZERO;
         ramp.resumed = Some(Instant::now());
         assert!(ramp.progress() < 0.01);
+    }
+
+    #[test]
+    fn keys_playlists_by_host_and_path() {
+        assert_eq!(
+            playlist_key("track7", "/playlist.m3u8"),
+            "track7/playlist.m3u8"
+        );
+        assert_eq!(playlist_key("track7", "audio.m3u8"), "track7/audio.m3u8");
+        assert_ne!(
+            playlist_key("track7", "/master.m3u8"),
+            playlist_key("track7", "/audio.m3u8")
+        );
+        assert_eq!(
+            Source::Url("https://example.com/a.mp3".into()).kind(),
+            "url"
+        );
+        assert_eq!(Source::File(PathBuf::from("/tmp/a.m4a")).kind(), "file");
     }
 
     #[test]

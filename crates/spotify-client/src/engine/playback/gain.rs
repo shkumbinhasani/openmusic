@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::{AudioSettings, join::track_at};
 use crate::{
     engine::Engine,
-    loudness::{self, TrackLoudness},
+    loudness::{self, Loudness, TrackLoudness},
 };
 
 const CACHE: usize = 512;
@@ -74,7 +74,18 @@ impl Gains {
         if self.known.len() + found.len() > CACHE {
             self.known.clear();
         }
-        self.known.extend(found);
+        for (uri, loudness) in found {
+            let entry = self.known.entry(uri).or_default();
+            entry.track = loudness.track.or(entry.track);
+            entry.album = loudness.album.or(entry.album);
+        }
+    }
+
+    pub(super) fn learn(&mut self, uri: &str, loudness: Loudness) {
+        let entry = self.known.entry(uri.to_owned()).or_default();
+        if entry.track.is_none() {
+            entry.track = Some(loudness);
+        }
     }
 
     pub(super) fn get(&self, uri: &str) -> Option<&TrackLoudness> {
@@ -131,7 +142,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{loudness::Loudness, playback_settings::LoudnessLevel};
+    use crate::playback_settings::LoudnessLevel;
 
     fn machine(context: &str, shuffling: bool) -> Value {
         json!({
@@ -169,6 +180,16 @@ mod tests {
             gains.get("spotify:track:a"),
             Some(&TrackLoudness::default())
         );
+        let measured = Loudness {
+            loudness_db: -16.,
+            true_peak_db: 0.,
+        };
+        gains.learn("spotify:track:a", measured);
+        gains.store(HashMap::from([(
+            "spotify:track:a".to_owned(),
+            TrackLoudness::default(),
+        )]));
+        assert_eq!(gains.get("spotify:track:a").unwrap().track, Some(measured));
     }
 
     #[test]

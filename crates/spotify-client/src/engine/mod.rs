@@ -443,7 +443,7 @@ impl Engine {
                 "disable_connect": false,
                 "audio_podcasts": true,
                 "lossless_playback": false,
-                "manifest_formats": ["file_ids_mp4_cbcs"],
+                "manifest_formats": playback::MANIFEST_FORMATS,
                 "supports_preferred_media_type": true,
                 "supports_playback_offsets": true,
                 "supports_playback_speed": false
