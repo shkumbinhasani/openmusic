@@ -37,6 +37,7 @@ const REFRESH_AFTER_PLAYBACK_MS: u64 = 3000;
 const REFRESH_AFTER_MARK_MS: u64 = 1500;
 const PROGRESS_REDRAW: Duration = Duration::from_secs(2);
 const LOOKUP_PATIENCE: Duration = Duration::from_secs(10);
+const LOCATE_PATIENCE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -63,6 +64,8 @@ pub struct State {
     pub transcript: Option<TranscriptView>,
     pub similar: Option<(String, Result<Vec<Card>, String>)>,
     pub kinds: HashMap<String, ShowKind>,
+    pub shows: HashMap<String, String>,
+    pub locating: Option<(String, Instant)>,
 }
 
 impl State {
@@ -102,6 +105,12 @@ impl State {
             .or_else(|| self.yours.episodes.get(uri))
     }
 
+    pub fn show_of(&self, uri: &str) -> Option<String> {
+        self.loaded_episode(uri)
+            .and_then(|episode| episode.show_uri.clone())
+            .or_else(|| self.shows.get(uri).cloned())
+    }
+
     fn note_kinds(&mut self, episodes: &[Episode]) {
         for episode in episodes {
             if let Some(show) = &episode.show_uri {
@@ -111,6 +120,7 @@ impl State {
                     ShowKind::Podcast
                 };
                 self.kinds.insert(show.clone(), kind);
+                self.shows.insert(episode.uri.clone(), show.clone());
             }
         }
     }
@@ -429,6 +439,39 @@ impl OpenMusic {
         self.mark_played(vec![uri.to_owned()], !finished);
     }
 
+    pub fn go_to_show(&mut self, episode: &str, known: Option<String>) {
+        match known.or_else(|| self.content.show_of(episode)) {
+            Some(show) => self.navigate(Page::Show(show)),
+            None => {
+                self.content.locating = Some((episode.to_owned(), Instant::now()));
+                self.send(Command::Locate(episode.to_owned()));
+            }
+        }
+    }
+
+    fn located(&mut self, uri: String, result: Result<Box<Episode>, String>) {
+        let Some((wanted, since)) = self.content.locating.take() else {
+            return;
+        };
+        if wanted != uri {
+            self.content.locating = Some((wanted, since));
+            return;
+        }
+        if since.elapsed() > LOCATE_PATIENCE {
+            return;
+        }
+        match result {
+            Ok(episode) => {
+                self.content.note(std::slice::from_ref(&episode));
+                match episode.show_uri {
+                    Some(show) => self.navigate(Page::Show(show)),
+                    None => self.show_toast("Couldn’t open this podcast. Try again.", None),
+                }
+            }
+            Err(message) => self.show_toast(message, None),
+        }
+    }
+
     pub fn load_more_episodes(&mut self) {
         let Some((uri, Ok(show))) = &self.content.show else {
             return;
@@ -709,6 +752,7 @@ pub fn on_event(
                 app.content.patch(episode);
             }
         }
+        Event::Located { uri, result } => app.located(uri, result),
         Event::YourEpisodes(result) => {
             app.content.yours.take_entries(result);
             app.took_your_episodes();
@@ -909,6 +953,7 @@ pub fn debug(
         ("episodesave" | "showfollow", [uri, setting @ ("on" | "off")]) => {
             app.change_saved(uri, *setting == "on");
         }
+        ("gotoshow", [uri]) => app.go_to_show(uri, None),
         ("yours", []) => {
             let mut lines = String::new();
             app.describe_your_episodes(&mut lines);
@@ -968,6 +1013,13 @@ pub fn debug(
             }
             for (uri, (saved, _)) in &app.content.wanted {
                 let _ = writeln!(lines, "wanted {uri} saved={saved}");
+            }
+            if let Some((uri, since)) = &app.content.locating {
+                let _ = writeln!(
+                    lines,
+                    "locating {uri} for {}ms",
+                    since.elapsed().as_millis()
+                );
             }
             describe_words(app, &mut lines);
             app.describe_your_episodes(&mut lines);
@@ -1259,6 +1311,15 @@ mod tests {
             Some(&ShowKind::Podcast)
         );
         assert!(state.unavailable.contains("spotify:episode:c"));
+        assert_eq!(
+            state.show_of("spotify:episode:p").as_deref(),
+            Some("spotify:show:podcast")
+        );
+        assert_eq!(
+            state.show_of("spotify:episode:c").as_deref(),
+            Some("spotify:show:book")
+        );
+        assert_eq!(state.show_of("spotify:episode:unknown"), None);
 
         let card = |uri: &str, kind: Kind| Card {
             uri: uri.into(),

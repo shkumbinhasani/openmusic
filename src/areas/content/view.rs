@@ -1394,101 +1394,240 @@ impl OpenMusic {
 }
 
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    match target {
-        Target::Episode { uri } => episode_items(uri, app),
+    let choices = match target {
+        Target::Episode { uri } => episode_choices(&episode_facts(app, uri, None), &app.page),
         Target::Track(track) if track.track.uri.starts_with("spotify:episode:") => {
-            episode_items(&track.track.uri, app)
+            let linked = linked_show(&track.track);
+            episode_choices(&episode_facts(app, &track.track.uri, linked), &app.page)
         }
-        Target::Show { uri } => show_items(uri, app),
+        Target::Show { uri } => show_choices(&show_facts(app, uri), &app.page),
         _ => Vec::new(),
-    }
+    };
+    choices
+        .into_iter()
+        .map(|(group, choice)| (group, menu_item(choice)))
+        .collect()
 }
 
-fn library_item(app: &OpenMusic, uri: &str, titles: [(&'static str, &'static str); 2]) -> MenuItem {
-    let saved = app.saved_or_known(uri) == Some(true);
-    let (title, symbol) = titles[usize::from(saved)];
-    let target = uri.to_owned();
-    MenuItem::action(title, move |app, _, _| {
-        app.change_saved(&target, !saved);
-    })
-    .symbol(symbol)
-    .enabled(!app.saving(uri))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shelf {
+    Episodes,
+    Follow,
+    Library,
 }
 
-fn open_item(uri: String) -> MenuItem {
-    MenuItem::action("Open in Spotify", move |_, _, cx| open_in_spotify(&uri, cx))
-        .symbol("arrow.up.forward.app")
+#[derive(Clone, Debug, PartialEq)]
+enum Choice {
+    Save {
+        uri: String,
+        shelf: Shelf,
+        saved: bool,
+        busy: bool,
+    },
+    Played {
+        uri: String,
+        finished: bool,
+        busy: bool,
+    },
+    GoToShow {
+        episode: String,
+        show: Option<String>,
+    },
+    GoToBook(String),
+    Open(String),
 }
 
-fn episode_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    let book = app
+#[derive(Debug, Default)]
+struct EpisodeFacts {
+    uri: String,
+    show: Option<String>,
+    chapter: bool,
+    saved: bool,
+    saving: bool,
+    finished: bool,
+    marking: bool,
+}
+
+#[derive(Debug, Default)]
+struct ShowFacts {
+    uri: String,
+    audiobook: bool,
+    saved: bool,
+    saving: bool,
+}
+
+fn linked_show(track: &Track) -> Option<String> {
+    track
+        .artists
+        .iter()
+        .map(|link| link.uri.as_str())
+        .chain(track.artist_uri.as_deref())
+        .chain(track.album_uri.as_deref())
+        .find(|uri| uri.starts_with("spotify:show:"))
+        .map(str::to_owned)
+}
+
+fn episode_facts(app: &OpenMusic, uri: &str, linked: Option<String>) -> EpisodeFacts {
+    let show = app.content.show_of(uri).or(linked);
+    let chapter = app
         .content
         .loaded_episode(uri)
-        .filter(|episode| episode.chapter)
-        .map(|episode| episode.show_uri.clone());
-    let mut items = Vec::new();
-    if let Some(book) = &book {
-        items.push((
-            Group::Navigate,
-            open_item(book.clone().unwrap_or_else(|| uri.to_owned())),
-        ));
-    } else {
-        items.push((
-            Group::Library,
-            library_item(
-                app,
-                uri,
-                [
-                    ("Save to Your Episodes", "plus.circle"),
-                    ("Remove from Your Episodes", "minus.circle"),
-                ],
-            ),
-        ));
+        .is_some_and(|episode| episode.chapter)
+        || show
+            .as_deref()
+            .is_some_and(|show| app.show_kind(show) == Some(ShowKind::Audiobook));
+    EpisodeFacts {
+        uri: uri.to_owned(),
+        show,
+        chapter,
+        saved: app.saved_or_known(uri) == Some(true),
+        saving: app.saving(uri),
+        finished: app.played_uri(uri).is_some_and(Played::finished),
+        marking: app.content.marking.contains_key(uri),
     }
-    let finished = app.played_uri(uri).is_some_and(Played::finished);
-    let pending = app.content.marking.contains_key(uri);
-    let (title, symbol) = if finished {
-        ("Mark as not started", "arrow.counterclockwise.circle")
-    } else {
-        ("Mark as finished", "checkmark.circle")
-    };
-    let target = uri.to_owned();
-    items.push((
-        Group::Library,
-        MenuItem::action(title, move |app, _, _| {
-            app.mark_played(vec![target.clone()], !finished)
-        })
-        .symbol(symbol)
-        .enabled(!pending),
-    ));
-    items
 }
 
-fn show_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    if app.show_kind(uri) == Some(ShowKind::Audiobook) {
-        return vec![
-            (
-                Group::Library,
-                library_item(
-                    app,
-                    uri,
-                    [
-                        ("Add to Your Library", "plus.circle"),
-                        ("Remove from Your Library", "minus.circle"),
-                    ],
-                ),
-            ),
-            (Group::Navigate, open_item(uri.to_owned())),
-        ];
+fn show_facts(app: &OpenMusic, uri: &str) -> ShowFacts {
+    ShowFacts {
+        uri: uri.to_owned(),
+        audiobook: app.show_kind(uri) == Some(ShowKind::Audiobook),
+        saved: app.saved_or_known(uri) == Some(true),
+        saving: app.saving(uri),
     }
-    vec![(
-        Group::Library,
-        library_item(
-            app,
-            uri,
-            [("Follow", "plus.circle"), ("Unfollow", "minus.circle")],
+}
+
+fn showing(page: &Page, uri: &str) -> bool {
+    matches!(page, Page::Show(open) if open == uri)
+}
+
+fn episode_choices(facts: &EpisodeFacts, page: &Page) -> Vec<(Group, Choice)> {
+    if facts.chapter {
+        let book = facts.show.clone();
+        let mut choices = Vec::new();
+        if let Some(book) = book.as_ref().filter(|book| !showing(page, book)) {
+            choices.push((Group::Navigate, Choice::GoToBook(book.clone())));
+        }
+        choices.push((
+            Group::Navigate,
+            Choice::Open(book.unwrap_or_else(|| facts.uri.clone())),
+        ));
+        return choices;
+    }
+    let mut choices = vec![
+        (
+            Group::Library,
+            Choice::Save {
+                uri: facts.uri.clone(),
+                shelf: Shelf::Episodes,
+                saved: facts.saved,
+                busy: facts.saving,
+            },
         ),
-    )]
+        (
+            Group::Library,
+            Choice::Played {
+                uri: facts.uri.clone(),
+                finished: facts.finished,
+                busy: facts.marking,
+            },
+        ),
+    ];
+    if !facts
+        .show
+        .as_deref()
+        .is_some_and(|show| showing(page, show))
+    {
+        choices.push((
+            Group::Navigate,
+            Choice::GoToShow {
+                episode: facts.uri.clone(),
+                show: facts.show.clone(),
+            },
+        ));
+    }
+    choices
+}
+
+fn show_choices(facts: &ShowFacts, page: &Page) -> Vec<(Group, Choice)> {
+    let save = Choice::Save {
+        uri: facts.uri.clone(),
+        shelf: if facts.audiobook {
+            Shelf::Library
+        } else {
+            Shelf::Follow
+        },
+        saved: facts.saved,
+        busy: facts.saving,
+    };
+    let mut choices = vec![(Group::Library, save)];
+    if facts.audiobook {
+        if !showing(page, &facts.uri) {
+            choices.push((Group::Navigate, Choice::GoToBook(facts.uri.clone())));
+        }
+        choices.push((Group::Navigate, Choice::Open(facts.uri.clone())));
+    }
+    choices
+}
+
+fn choice_label(choice: &Choice) -> (&'static str, &'static str, Option<&'static str>) {
+    match choice {
+        Choice::Save { shelf, saved, .. } => {
+            let (title, key) = match (shelf, saved) {
+                (Shelf::Episodes, false) => ("Save to Your Episodes", "s"),
+                (Shelf::Episodes, true) => ("Remove from Your Episodes", "s"),
+                (Shelf::Follow, false) => ("Follow", "f"),
+                (Shelf::Follow, true) => ("Unfollow", "f"),
+                (Shelf::Library, false) => ("Add to Your Library", "s"),
+                (Shelf::Library, true) => ("Remove from Your Library", "s"),
+            };
+            let symbol = if *saved {
+                "minus.circle"
+            } else {
+                "plus.circle"
+            };
+            (title, symbol, Some(key))
+        }
+        Choice::Played { finished: true, .. } => {
+            ("Mark as not started", "arrow.counterclockwise.circle", None)
+        }
+        Choice::Played {
+            finished: false, ..
+        } => ("Mark as finished", "checkmark.circle", None),
+        Choice::GoToShow { .. } => ("Go to podcast", "mic", None),
+        Choice::GoToBook(_) => ("Go to audiobook", "book", None),
+        Choice::Open(_) => ("Open in Spotify", "arrow.up.forward.app", None),
+    }
+}
+
+fn menu_item(choice: Choice) -> MenuItem {
+    let (title, symbol, key) = choice_label(&choice);
+    let item = match choice {
+        Choice::Save {
+            uri, saved, busy, ..
+        } => {
+            MenuItem::action(title, move |app, _, _| app.change_saved(&uri, !saved)).enabled(!busy)
+        }
+        Choice::Played {
+            uri,
+            finished,
+            busy,
+        } => MenuItem::action(title, move |app, _, _| {
+            app.mark_played(vec![uri.clone()], !finished)
+        })
+        .enabled(!busy),
+        Choice::GoToShow { episode, show } => MenuItem::action(title, move |app, _, _| {
+            app.go_to_show(&episode, show.clone())
+        }),
+        Choice::GoToBook(book) => MenuItem::action(title, move |app, _, _| {
+            app.navigate(Page::Show(book.clone()))
+        }),
+        Choice::Open(uri) => MenuItem::action(title, move |_, _, cx| open_in_spotify(&uri, cx)),
+    };
+    let item = item.symbol(symbol);
+    match key {
+        Some(key) => item.key(key),
+        None => item,
+    }
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
@@ -1535,4 +1674,168 @@ pub fn row_accessories(
 
 pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, _options: &RowOptions) -> bool {
     app.content.unavailable.contains(&track.uri)
+}
+
+#[cfg(test)]
+mod tests {
+    use spotify_client::catalog::Link;
+
+    use super::*;
+
+    const EPISODE: &str = "spotify:episode:00000000000000000000e1";
+    const SHOW: &str = "spotify:show:00000000000000000000s1";
+    const BOOK: &str = "spotify:show:00000000000000000000b1";
+
+    fn titles(choices: &[(Group, Choice)]) -> Vec<(Group, &'static str)> {
+        choices
+            .iter()
+            .map(|(group, choice)| (*group, choice_label(choice).0))
+            .collect()
+    }
+
+    fn episode(show: Option<&str>) -> EpisodeFacts {
+        EpisodeFacts {
+            uri: EPISODE.into(),
+            show: show.map(str::to_owned),
+            ..EpisodeFacts::default()
+        }
+    }
+
+    #[test]
+    fn episodes_save_mark_and_lead_to_their_podcast() {
+        let choices = episode_choices(&episode(Some(SHOW)), &Page::Home);
+        assert_eq!(
+            titles(&choices),
+            vec![
+                (Group::Library, "Save to Your Episodes"),
+                (Group::Library, "Mark as finished"),
+                (Group::Navigate, "Go to podcast"),
+            ]
+        );
+        assert_eq!(
+            choices[2].1,
+            Choice::GoToShow {
+                episode: EPISODE.into(),
+                show: Some(SHOW.into()),
+            }
+        );
+
+        let on_show = episode_choices(&episode(Some(SHOW)), &Page::Show(SHOW.into()));
+        assert_eq!(on_show.len(), 2);
+
+        let unknown = episode_choices(&episode(None), &Page::Show(SHOW.into()));
+        assert_eq!(
+            unknown[2].1,
+            Choice::GoToShow {
+                episode: EPISODE.into(),
+                show: None,
+            }
+        );
+    }
+
+    #[test]
+    fn episode_items_follow_saved_finished_and_busy_state() {
+        let facts = EpisodeFacts {
+            saved: true,
+            finished: true,
+            saving: true,
+            ..episode(Some(SHOW))
+        };
+        let choices = episode_choices(&facts, &Page::Episode(EPISODE.into()));
+        assert_eq!(
+            titles(&choices)[..2],
+            [
+                (Group::Library, "Remove from Your Episodes"),
+                (Group::Library, "Mark as not started"),
+            ]
+        );
+        assert!(matches!(choices[0].1, Choice::Save { busy: true, .. }));
+        assert!(matches!(choices[1].1, Choice::Played { busy: false, .. }));
+        assert_eq!(choice_label(&choices[0].1).2, Some("s"));
+    }
+
+    #[test]
+    fn chapters_lead_to_their_book() {
+        let facts = EpisodeFacts {
+            chapter: true,
+            ..episode(Some(BOOK))
+        };
+        assert_eq!(
+            episode_choices(&facts, &Page::Home),
+            vec![
+                (Group::Navigate, Choice::GoToBook(BOOK.into())),
+                (Group::Navigate, Choice::Open(BOOK.into())),
+            ]
+        );
+        assert_eq!(
+            episode_choices(&facts, &Page::Show(BOOK.into())),
+            vec![(Group::Navigate, Choice::Open(BOOK.into()))]
+        );
+        let loose = EpisodeFacts {
+            chapter: true,
+            ..episode(None)
+        };
+        assert_eq!(
+            episode_choices(&loose, &Page::Home),
+            vec![(Group::Navigate, Choice::Open(EPISODE.into()))]
+        );
+    }
+
+    #[test]
+    fn podcasts_follow_and_books_go_to_their_page() {
+        let podcast = ShowFacts {
+            uri: SHOW.into(),
+            ..ShowFacts::default()
+        };
+        let choices = show_choices(&podcast, &Page::Home);
+        assert_eq!(titles(&choices), vec![(Group::Library, "Follow")]);
+        assert_eq!(choice_label(&choices[0].1).2, Some("f"));
+        let followed = ShowFacts {
+            saved: true,
+            ..podcast
+        };
+        assert_eq!(
+            titles(&show_choices(&followed, &Page::Home)),
+            vec![(Group::Library, "Unfollow")]
+        );
+
+        let book = ShowFacts {
+            uri: BOOK.into(),
+            audiobook: true,
+            ..ShowFacts::default()
+        };
+        assert_eq!(
+            titles(&show_choices(&book, &Page::Home)),
+            vec![
+                (Group::Library, "Add to Your Library"),
+                (Group::Navigate, "Go to audiobook"),
+                (Group::Navigate, "Open in Spotify"),
+            ]
+        );
+        assert_eq!(
+            titles(&show_choices(&book, &Page::Show(BOOK.into()))),
+            vec![
+                (Group::Library, "Add to Your Library"),
+                (Group::Navigate, "Open in Spotify"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finds_the_show_an_episode_row_links_to() {
+        let mut track = Track {
+            uri: EPISODE.into(),
+            artists: vec![Link {
+                uri: SHOW.into(),
+                name: "A show".into(),
+            }],
+            ..Track::default()
+        };
+        assert_eq!(linked_show(&track).as_deref(), Some(SHOW));
+        track.artists.clear();
+        track.album_uri = Some(SHOW.into());
+        assert_eq!(linked_show(&track).as_deref(), Some(SHOW));
+        track.album_uri = Some("spotify:album:00000000000000000000a1".into());
+        assert_eq!(linked_show(&track), None);
+    }
 }

@@ -41,6 +41,7 @@ pub enum Command {
         uri: String,
         kind: ShowKind,
     },
+    Locate(String),
 }
 
 pub enum Event {
@@ -74,6 +75,10 @@ pub enum Event {
     Similar {
         uri: String,
         result: Result<Vec<Card>, String>,
+    },
+    Located {
+        uri: String,
+        result: Result<Box<Episode>, String>,
     },
 }
 
@@ -121,7 +126,8 @@ impl Event {
             | Self::Marked { .. }
             | Self::YourEpisodes(_)
             | Self::Decorated { .. }
-            | Self::Similar { .. } => Vec::new(),
+            | Self::Similar { .. }
+            | Self::Located { .. } => Vec::new(),
         }
     }
 }
@@ -165,6 +171,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Similar { uri, kind } => ctx
             .tasks
             .spawn_keyed("show-similar", similar_shows(ctx.api.clone(), uri, kind)),
+        Command::Locate(uri) => ctx
+            .tasks
+            .spawn_keyed("locate", locate(ctx.api.clone(), uri)),
     }
 }
 
@@ -220,6 +229,17 @@ async fn episode(api: Api, uri: String) -> crate::worker::Event {
         .map(Box::new)
         .map_err(|error| failure(&error, "episode"));
     Event::Episode { uri, result }.into()
+}
+
+async fn locate(api: Api, uri: String) -> crate::worker::Event {
+    let result = podcast::episode(&api, &uri)
+        .await
+        .map(Box::new)
+        .map_err(|error| match error.downcast_ref::<Unavailable>() {
+            Some(_) => failure(&error, "episode"),
+            None => "Couldn’t open this podcast. Try again.".to_owned(),
+        });
+    Event::Located { uri, result }.into()
 }
 
 async fn refresh(api: Api, uri: String, delay: Duration) -> crate::worker::Event {
