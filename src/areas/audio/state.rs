@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use spotify_client::{
     catalog::LocalTrack,
     connect::SleepState,
-    engine::playback::{AudioSettings, AudioStatus, Quality, SleepChoice},
+    engine::playback::{AudioSettings, AudioStatus, Quality, SleepChoice, device_name},
     playback_settings::{
         LoudnessLevel, MAX_CROSSFADE_MS, Remote, Setting, round_speed, valid_speed,
     },
@@ -36,7 +36,15 @@ pub const SLEEP_MINUTES: [(u32, &str); 6] = [
     (60, "1 hour"),
 ];
 pub const SPEEDS: [f32; 10] = [0.5, 0.8, 1., 1.2, 1.5, 1.8, 2., 2.5, 3., 3.5];
+pub const DEFAULT_DEVICE_NAME: &str = "OpenMusic";
 const PENDING: Duration = Duration::from_secs(3);
+
+pub fn base_device_name() -> String {
+    std::env::var("OPENMUSIC_DEVICE_NAME")
+        .ok()
+        .and_then(|name| device_name(&name).ok())
+        .unwrap_or_else(|| DEFAULT_DEVICE_NAME.to_owned())
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,6 +55,7 @@ pub struct AudioPrefs {
     pub normalize: bool,
     pub level: LoudnessLevel,
     pub quality: Quality,
+    pub device_names: BTreeMap<String, String>,
 }
 
 impl Default for AudioPrefs {
@@ -59,6 +68,7 @@ impl Default for AudioPrefs {
             normalize: settings.normalize,
             level: settings.level,
             quality: settings.quality,
+            device_names: BTreeMap::new(),
         }
     }
 }
@@ -73,6 +83,23 @@ impl AudioPrefs {
             level: self.level,
             quality: self.quality,
         }
+    }
+
+    pub fn device_name(&self, base: &str) -> String {
+        self.device_names
+            .get(base)
+            .and_then(|name| device_name(name).ok())
+            .unwrap_or_else(|| base.to_owned())
+    }
+
+    pub fn rename(&mut self, base: &str, text: &str) -> Result<String, &'static str> {
+        let name = device_name(text)?;
+        if name == base {
+            self.device_names.remove(base);
+        } else {
+            self.device_names.insert(base.to_owned(), name.clone());
+        }
+        Ok(name)
     }
 
     pub fn apply(&mut self, setting: Setting) {
@@ -303,6 +330,19 @@ impl OpenMusic {
         self.update_settings(|current| current.audio.quality = quality);
     }
 
+    pub fn device_name(&self) -> String {
+        self.settings.audio.device_name(&base_device_name())
+    }
+
+    pub fn rename_device(&mut self, text: &str) -> Result<String, String> {
+        let mut prefs = self.settings.audio.clone();
+        let name = prefs
+            .rename(&base_device_name(), text)
+            .map_err(str::to_owned)?;
+        self.update_settings(|current| current.audio = prefs);
+        Ok(name)
+    }
+
     pub fn stream_text(&self) -> Option<String> {
         self.audio
             .status
@@ -327,13 +367,14 @@ impl OpenMusic {
         let prefs = &self.settings.audio;
         let mut lines = vec![
             format!(
-                "prefs gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={}",
+                "prefs gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} device=\"{}\"",
                 prefs.gapless,
                 prefs.crossfade,
                 prefs.crossfade_ms,
                 prefs.normalize,
                 prefs.level.name(),
-                prefs.quality.name()
+                prefs.quality.name(),
+                self.device_name()
             ),
             format!(
                 "synced {}",
@@ -500,6 +541,17 @@ pub fn debug(
                 app.set_quality(quality);
             }
         }
+        "rename" => {
+            let text = rest.trim().trim_matches('"');
+            let text = if text.is_empty() {
+                base_device_name()
+            } else {
+                text.to_owned()
+            };
+            if let Err(message) = app.rename_device(&text) {
+                app.show_toast(message, None);
+            }
+        }
         _ => return false,
     }
     true
@@ -508,7 +560,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let prefs = &app.settings.audio;
     format!(
-        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} speed={} sleep={}",
+        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} speed={} sleep={} device=\"{}\"",
         prefs.gapless,
         prefs.crossfade,
         prefs.crossfade_ms,
@@ -525,7 +577,8 @@ pub fn state_fragment(app: &OpenMusic) -> String {
                     .duration_since(SystemTime::now())
                     .map_or(0, |left| left.as_secs())
             ),
-        }
+        },
+        app.device_name()
     )
 }
 
@@ -756,6 +809,7 @@ mod tests {
         let settings: Settings =
             serde_json::from_str(r#"{"audio":{"gapless":false,"level":"Loud"}}"#).unwrap();
         assert_eq!(settings.audio.quality, Quality::Automatic);
+        assert!(settings.audio.device_names.is_empty());
         let settings: Settings = serde_json::from_str(r#"{"audio":{"quality":"Normal"}}"#).unwrap();
         let engine = settings.audio.engine();
         assert_eq!(engine.quality, Quality::Normal);
@@ -766,5 +820,32 @@ mod tests {
             speeds: HashMap::new(),
         });
         assert_eq!(remote_only.quality, Quality::Normal);
+    }
+
+    #[test]
+    fn names_each_instance_on_its_own() {
+        let mut prefs = AudioPrefs::default();
+        assert_eq!(prefs.device_name("OpenMusic"), "OpenMusic");
+        assert_eq!(
+            prefs.rename("OpenMusic Dev", "  Desk   Mac ").unwrap(),
+            "Desk Mac"
+        );
+        assert_eq!(prefs.device_name("OpenMusic Dev"), "Desk Mac");
+        assert_eq!(prefs.device_name("OpenMusic"), "OpenMusic");
+        assert!(prefs.rename("OpenMusic Dev", " ").is_err());
+        assert!(prefs.rename("OpenMusic Dev", &"x".repeat(65)).is_err());
+        assert_eq!(prefs.device_name("OpenMusic Dev"), "Desk Mac");
+        assert_eq!(
+            prefs.rename("OpenMusic Dev", "OpenMusic Dev").unwrap(),
+            "OpenMusic Dev"
+        );
+        assert!(prefs.device_names.is_empty());
+        let saved = serde_json::to_string(&AudioPrefs {
+            device_names: BTreeMap::from([("OpenMusic".to_owned(), "Kitchen".to_owned())]),
+            ..AudioPrefs::default()
+        })
+        .unwrap();
+        let back: AudioPrefs = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.device_name("OpenMusic"), "Kitchen");
     }
 }

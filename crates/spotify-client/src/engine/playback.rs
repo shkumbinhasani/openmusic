@@ -16,6 +16,7 @@ use crate::{
     playback_settings::LoudnessLevel,
     player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
 };
+pub use device::{MAX_NAME, device_name};
 use gain::{Gains, fetch_loudness, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
@@ -26,6 +27,7 @@ pub use sleep::{FADE_MS, SleepChoice};
 pub use source::MANIFEST_FORMATS;
 use speed::{Shows, read_show_speed, show_of, starting_speed, state_speed};
 
+mod device;
 mod gain;
 mod join;
 mod local;
@@ -50,6 +52,7 @@ pub enum Control {
         speed: f32,
     },
     Sleep(SleepChoice),
+    Rename(String),
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +135,7 @@ pub struct AudioReport {
     pub local: Option<String>,
     pub sleep: SleepState,
     pub notes: Vec<String>,
+    pub device_name: String,
 }
 
 impl fmt::Display for AudioReport {
@@ -147,6 +151,7 @@ impl fmt::Display for AudioReport {
             settings.level.name(),
             settings.quality.name()
         )?;
+        writeln!(f, "device name=\"{}\"", self.device_name)?;
         match &self.playing {
             Some(item) => writeln!(
                 f,
@@ -434,6 +439,7 @@ impl Engine {
             Control::Speed(speed) => self.change_speed(speed).await?,
             Control::ShowSpeed { show, speed } => self.learn_show_speed(show, speed),
             Control::Sleep(choice) => self.set_sleep(choice)?,
+            Control::Rename(name) => self.rename(&name).await?,
         }
         Ok(())
     }
@@ -503,6 +509,7 @@ impl Engine {
             local: self.audio.local.as_ref().map(LocalQueue::describe),
             sleep: self.audio.sleep.state(),
             notes: self.audio.notes.clone(),
+            device_name: self.device_name.clone(),
         }
     }
 

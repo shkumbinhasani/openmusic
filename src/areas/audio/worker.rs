@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use spotify_client::{
     catalog::LocalTrack,
     dealer::Message,
@@ -8,10 +10,12 @@ use spotify_client::{
     playback_settings::{self, Change, DeviceDescriptor, Remote, Setting},
 };
 
-use super::state::AudioPrefs;
+use super::state::{AudioPrefs, base_device_name};
 use crate::worker::{Ctx, Mutation};
 
 const SYNC: &str = "audio-settings";
+
+static NAME: Mutex<Option<String>> = Mutex::new(None);
 
 pub enum Command {
     Sync,
@@ -51,7 +55,10 @@ impl Event {
 }
 
 fn device_name() -> String {
-    std::env::var("OPENMUSIC_DEVICE_NAME").unwrap_or_else(|_| "OpenMusic".into())
+    NAME.lock()
+        .ok()
+        .and_then(|name| name.clone())
+        .unwrap_or_else(base_device_name)
 }
 
 fn descriptor(ctx: &Ctx) -> DeviceDescriptor {
@@ -184,6 +191,12 @@ pub fn on_update(update: Update, ctx: &mut Ctx) {
 }
 
 pub fn apply_settings(prefs: &AudioPrefs, ctx: &mut Ctx) {
+    let name = prefs.device_name(&base_device_name());
+    if let Ok(mut slot) = NAME.lock() {
+        *slot = Some(name.clone());
+    }
     ctx.handle
         .send(Control::Audio(playback::Control::Settings(prefs.engine())));
+    ctx.handle
+        .send(Control::Audio(playback::Control::Rename(name)));
 }
