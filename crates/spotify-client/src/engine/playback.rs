@@ -19,6 +19,8 @@ use crate::{
 use gain::{Gains, fetch_loudness, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
+use quality::Automatic;
+pub use quality::{Quality, Stream, StreamKind, codec_of};
 use sleep::Sleep;
 pub use sleep::{FADE_MS, SleepChoice};
 pub use source::MANIFEST_FORMATS;
@@ -27,9 +29,12 @@ use speed::{Shows, read_show_speed, show_of, starting_speed, state_speed};
 mod gain;
 mod join;
 mod local;
+mod quality;
 mod sleep;
 mod source;
 mod speed;
+
+const NOTES: usize = 12;
 
 #[derive(Clone, Debug)]
 pub enum Control {
@@ -58,6 +63,8 @@ pub enum Update {
 pub struct AudioStatus {
     pub speed_allowed: bool,
     pub sleep: SleepState,
+    pub stream: Option<Stream>,
+    pub lowered: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +74,7 @@ pub struct AudioSettings {
     pub crossfade_ms: u32,
     pub normalize: bool,
     pub level: LoudnessLevel,
+    pub quality: Quality,
 }
 
 impl Default for AudioSettings {
@@ -77,6 +85,7 @@ impl Default for AudioSettings {
             crossfade_ms: 0,
             normalize: true,
             level: LoudnessLevel::Normal,
+            quality: Quality::Automatic,
         }
     }
 }
@@ -90,6 +99,7 @@ pub struct ReportItem {
     pub paused: bool,
     pub format: String,
     pub bitrate: u64,
+    pub quality: Option<String>,
     pub gain_db: Option<f32>,
     pub source: String,
     pub speed: f32,
@@ -121,6 +131,7 @@ pub struct AudioReport {
     pub player: Snapshot,
     pub local: Option<String>,
     pub sleep: SleepState,
+    pub notes: Vec<String>,
 }
 
 impl fmt::Display for AudioReport {
@@ -128,17 +139,18 @@ impl fmt::Display for AudioReport {
         let settings = &self.settings;
         writeln!(
             f,
-            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={}",
+            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={}",
             settings.gapless,
             settings.crossfade,
             settings.crossfade_ms,
             settings.normalize,
-            settings.level.name()
+            settings.level.name(),
+            settings.quality.name()
         )?;
         match &self.playing {
             Some(item) => writeln!(
                 f,
-                "playing generation={} uri={} source={} position={} duration={} paused={} format={} bitrate={} gain={} speed={}",
+                "playing generation={} uri={} source={} position={} duration={} paused={} format={} bitrate={} quality={} gain={} speed={}",
                 item.generation,
                 item.uri,
                 item.source,
@@ -147,6 +159,7 @@ impl fmt::Display for AudioReport {
                 item.paused,
                 item.format,
                 item.bitrate,
+                item.quality.as_deref().unwrap_or("none"),
                 gain_text(item.gain_db),
                 item.speed
             )?,
@@ -195,6 +208,9 @@ impl fmt::Display for AudioReport {
         for join in &self.joins {
             writeln!(f, "join {join}")?;
         }
+        for note in &self.notes {
+            writeln!(f, "note {note}")?;
+        }
         if let Some(local) = &self.local {
             writeln!(f, "local {local}")?;
         }
@@ -227,6 +243,17 @@ pub(super) struct State {
     shows: Shows,
     status: Option<AudioStatus>,
     sleep: Sleep,
+    automatic: Automatic,
+    notes: Vec<String>,
+}
+
+impl State {
+    fn note(&mut self, line: String) {
+        self.notes.push(line);
+        if self.notes.len() > NOTES {
+            self.notes.remove(0);
+        }
+    }
 }
 
 pub(super) struct Playing {
@@ -236,6 +263,8 @@ pub(super) struct Playing {
     generation: u64,
     format: Value,
     bitrate: u64,
+    codec: Option<String>,
+    audio_quality: Option<String>,
     duration_ms: u32,
     pub(super) position_ms: u32,
     previous_position_ms: u32,
@@ -257,6 +286,8 @@ impl Playing {
             generation,
             format: Value::Null,
             bitrate: 0,
+            codec: None,
+            audio_quality: None,
             duration_ms: 0,
             position_ms,
             previous_position_ms: 0,
@@ -274,6 +305,20 @@ impl Playing {
         self.track()
             .and_then(|track| track["metadata"]["uri"].as_str())
             .unwrap_or_default()
+    }
+
+    fn stream(&self) -> Option<Stream> {
+        let kind = match self.source {
+            "fairplay" => StreamKind::FairPlay,
+            "external" => StreamKind::Host,
+            "director" => StreamKind::Video,
+            _ => return None,
+        };
+        Some(Stream {
+            kind,
+            codec: self.codec.clone(),
+            kbps: (self.bitrate > 0).then_some((self.bitrate / 1000) as u32),
+        })
     }
 
     fn state(&self) -> Option<&Value> {
@@ -393,6 +438,21 @@ impl Engine {
         Ok(())
     }
 
+    fn stream(&self) -> Option<Stream> {
+        if let Some(queue) = self.audio.local.as_ref() {
+            let track = queue.current()?;
+            return Some(Stream {
+                kind: StreamKind::File,
+                codec: codec_of(&track.path.to_string_lossy()),
+                kbps: None,
+            });
+        }
+        self.playing
+            .as_ref()
+            .filter(|_| self.is_active_here())
+            .and_then(Playing::stream)
+    }
+
     pub(super) fn audio_updates(&mut self) -> Vec<Update> {
         let sounding = self.playing.as_ref().is_some_and(|playing| !playing.paused)
             || self.audio.local.as_ref().is_some_and(|queue| !queue.paused);
@@ -402,6 +462,8 @@ impl Engine {
         let status = AudioStatus {
             speed_allowed: self.speed_allowed(),
             sleep: self.audio.sleep.state(),
+            stream: self.stream(),
+            lowered: self.lowered_quality(),
         };
         if self.audio.status.as_ref() != Some(&status) {
             self.audio.status = Some(status.clone());
@@ -425,6 +487,7 @@ impl Engine {
                     .map(str::to_owned)
                     .unwrap_or_else(|| playing.format.to_string()),
                 bitrate: playing.bitrate,
+                quality: playing.audio_quality.clone(),
                 gain_db: playing.gain_db,
                 source: playing.source.to_owned(),
                 speed: playing.speed,
@@ -439,20 +502,24 @@ impl Engine {
             player: self.player.snapshot(),
             local: self.audio.local.as_ref().map(LocalQueue::describe),
             sleep: self.audio.sleep.state(),
+            notes: self.audio.notes.clone(),
         }
     }
 
     pub(super) fn state_payload(&self, state_ref: Option<Value>, source: &str) -> Value {
         let sub_state = self.playing.as_ref().map(|playing| {
-            json!({
+            let mut sub_state = json!({
                 "playback_speed": if playing.paused { 0. } else { reported_speed(playing.speed) },
                 "position": playing.position_ms,
                 "duration": playing.duration_ms,
                 "media_type": "AUDIO",
                 "bitrate": playing.bitrate,
-                "audio_quality": "HIGH",
                 "format": playing.format,
-            })
+            });
+            if let Some(quality) = &playing.audio_quality {
+                sub_state["audio_quality"] = json!(quality);
+            }
+            sub_state
         });
         json!({
             "seq_num": self.seq,
@@ -734,6 +801,8 @@ impl Engine {
         playing.format = pick.format();
         playing.bitrate = pick.bitrate();
         playing.source = pick.name();
+        playing.codec = pick.codec();
+        playing.audio_quality = pick.reported_quality(playing.bitrate);
         playing.duration_ms = track["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
         let missing = self.audio.gains.missing(&playing.machine);
         let generation = playing.generation;
@@ -775,6 +844,7 @@ impl Engine {
             if bitrate > 0 {
                 playing.bitrate = bitrate;
             }
+            playing.audio_quality = pick.reported_quality(playing.bitrate);
         }
         let media = Media {
             start_ms: seek.unwrap_or(initial),
@@ -951,6 +1021,7 @@ impl Engine {
                 self.crossfade_due().await;
             }
             PlayerEvent::Advanced { from, to } => self.joined(from, to).await,
+            PlayerEvent::Stalled { generation } => self.playback_stalled(generation),
             PlayerEvent::Ended { generation } => {
                 if self
                     .playing

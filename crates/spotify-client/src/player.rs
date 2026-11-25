@@ -18,7 +18,8 @@ use objc2_av_foundation::{
     AVAssetResourceLoader, AVAssetResourceLoaderDelegate, AVAssetResourceLoadingRequest,
     AVContentKeyRequest, AVContentKeyResponse, AVContentKeySession, AVContentKeySessionDelegate,
     AVContentKeySystemFairPlayStreaming, AVPlayerItem, AVPlayerItemDidPlayToEndTimeNotification,
-    AVPlayerItemFailedToPlayToEndTimeNotification, AVPlayerItemStatus, AVQueuePlayer, AVURLAsset,
+    AVPlayerItemFailedToPlayToEndTimeNotification, AVPlayerItemPlaybackStalledNotification,
+    AVPlayerItemStatus, AVQueuePlayer, AVURLAsset,
 };
 use objc2_core_media::CMTime;
 use objc2_foundation::{
@@ -132,6 +133,9 @@ pub enum PlayerEvent {
     Failed {
         generation: u64,
         message: String,
+    },
+    Stalled {
+        generation: u64,
     },
 }
 
@@ -553,10 +557,17 @@ fn create_main_state(mtm: MainThreadMarker) -> MainState {
         loader: LoaderDelegate::new(),
         _keys: keys,
         _observers: vec![
-            observe_items(unsafe { AVPlayerItemDidPlayToEndTimeNotification }, false),
+            observe_items(
+                unsafe { AVPlayerItemDidPlayToEndTimeNotification },
+                item_ended,
+            ),
             observe_items(
                 unsafe { AVPlayerItemFailedToPlayToEndTimeNotification },
-                true,
+                item_failed,
+            ),
+            observe_items(
+                unsafe { AVPlayerItemPlaybackStalledNotification },
+                item_stalled,
             ),
         ],
         master: 1.,
@@ -569,9 +580,11 @@ fn create_main_state(mtm: MainThreadMarker) -> MainState {
     }
 }
 
+type ItemHandler = fn(Sendable<Retained<AnyObject>>);
+
 fn observe_items(
     name: &objc2_foundation::NSNotificationName,
-    failed: bool,
+    handle: ItemHandler,
 ) -> Retained<ProtocolObject<dyn NSObjectProtocol>> {
     let block = RcBlock::new(move |notification: NonNull<NSNotification>| {
         let notification = unsafe { notification.as_ref() };
@@ -581,7 +594,7 @@ fn observe_items(
         let object = Sendable(object);
         DispatchQueue::main().exec_async(move || {
             let object = object;
-            item_finished(object, failed);
+            handle(object);
         });
     });
     unsafe {
@@ -591,6 +604,31 @@ fn observe_items(
             None,
             &block,
         )
+    }
+}
+
+fn item_ended(object: Sendable<Retained<AnyObject>>) {
+    item_finished(object, false);
+}
+
+fn item_failed(object: Sendable<Retained<AnyObject>>) {
+    item_finished(object, true);
+}
+
+fn item_stalled(object: Sendable<Retained<AnyObject>>) {
+    let handled = with_main(|state| {
+        if let Some((deck, index)) = state.find_object(&object.0) {
+            emit(PlayerEvent::Stalled {
+                generation: state.decks[deck].items[index].generation,
+            });
+        }
+        None
+    });
+    if handled.is_err() {
+        DispatchQueue::main().exec_async(move || {
+            let object = object;
+            item_stalled(object);
+        });
     }
 }
 

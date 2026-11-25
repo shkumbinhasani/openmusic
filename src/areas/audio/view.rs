@@ -122,6 +122,9 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
         Group::Queue,
         MenuItem::submenu("Sleep timer", app.sleep_items()).symbol("moon.zzz"),
     ));
+    if let Some(stream) = app.stream_text() {
+        items.push((Group::Info, MenuItem::note(stream)));
+    }
     items
 }
 

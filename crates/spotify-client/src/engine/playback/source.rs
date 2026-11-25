@@ -1,7 +1,10 @@
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use super::join::{File, choose_file};
+use super::{
+    join::{File, choose_file},
+    quality::{codec_of, quality_label},
+};
 use crate::{
     director,
     engine::Engine,
@@ -50,6 +53,21 @@ impl Pick {
             Self::Director(_) => "director",
         }
     }
+
+    pub(super) fn codec(&self) -> Option<String> {
+        match self {
+            Self::FairPlay(_) | Self::Director(_) => Some("AAC".to_owned()),
+            Self::External(url) => codec_of(url),
+        }
+    }
+
+    pub(super) fn reported_quality(&self, bitrate: u64) -> Option<String> {
+        match self {
+            Self::FairPlay(file) => file.quality.clone(),
+            Self::External(_) => None,
+            Self::Director(_) => (bitrate > 0).then(|| quality_label(bitrate).to_owned()),
+        }
+    }
 }
 
 pub(super) fn external(manifest: &Value) -> Option<String> {
@@ -70,12 +88,12 @@ pub(super) fn video_manifest(manifest: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(super) fn pick(track: &Value) -> Option<Pick> {
+pub(super) fn pick(track: &Value, ceiling: Option<u64>) -> Option<Pick> {
     let manifest = &track["manifest"];
     if let Some(url) = external(manifest) {
         return Some(Pick::External(url));
     }
-    if let Some(file) = choose_file(track) {
+    if let Some(file) = choose_file(track, ceiling) {
         return Some(Pick::FairPlay(file));
     }
     video_manifest(manifest).map(Pick::Director)
@@ -122,12 +140,12 @@ pub(super) fn media_path(uri: &str) -> String {
     format!("/track-playback/v1/media/{uri}?{formats}")
 }
 
-pub(super) fn pick_from_media(response: &Value, uri: &str) -> Option<Pick> {
+pub(super) fn pick_from_media(response: &Value, uri: &str, ceiling: Option<u64>) -> Option<Pick> {
     let item = response["media"].get(uri)?.get("item")?;
     if is_book(item) {
         return None;
     }
-    pick(item)
+    pick(item, ceiling)
 }
 
 impl Engine {
@@ -135,13 +153,14 @@ impl Engine {
         if is_book(track) {
             bail!(BOOK);
         }
-        if let Some(pick) = pick(track) {
+        let ceiling = self.bitrate_ceiling();
+        if let Some(pick) = pick(track, ceiling) {
             return Ok(pick);
         }
         let uri = uri(track);
         if is_spoken(uri)
             && let Ok(response) = self.api.get_json::<Value>(&media_path(uri)).await
-            && let Some(pick) = pick_from_media(&response, uri)
+            && let Some(pick) = pick_from_media(&response, uri, ceiling)
         {
             return Ok(pick);
         }
@@ -195,7 +214,7 @@ mod tests {
             ],
             "manifest_ids_video": [{"file_id": "7cad856b55c54b159b87fbf205abae87"}]
         }));
-        let pick = pick(&track).unwrap();
+        let pick = pick(&track, None).unwrap();
         assert_eq!(
             pick,
             Pick::External("https://dts.podtrac.com/redirect.mp3/example.com/a.mp3".into())
@@ -203,6 +222,8 @@ mod tests {
         assert_eq!(pick.format(), json!("file_urls_external"));
         assert_eq!(pick.bitrate(), 0);
         assert_eq!(pick.name(), "external");
+        assert_eq!(pick.codec().as_deref(), Some("MP3"));
+        assert_eq!(pick.reported_quality(0), None);
     }
 
     #[test]
@@ -211,12 +232,15 @@ mod tests {
             "file_ids_mp4_dual": [{"file_id": "b1de", "format": "12"}],
             "manifest_ids_video": [{"file_id": "7cad856b55c54b159b87fbf205abae87", "format": null}]
         }));
-        let pick = pick(&track).unwrap();
+        let pick = pick(&track, None).unwrap();
         assert_eq!(
             pick,
             Pick::Director("7cad856b55c54b159b87fbf205abae87".into())
         );
         assert_eq!(pick.format(), Value::Null);
+        assert_eq!(pick.codec().as_deref(), Some("AAC"));
+        assert_eq!(pick.reported_quality(0), None);
+        assert_eq!(pick.reported_quality(96_000).as_deref(), Some("NORMAL"));
         assert_eq!(
             video_manifest(&json!({"manifest_ids_video": [{"file_id": "../x"}]})),
             None
@@ -233,11 +257,17 @@ mod tests {
                 "manifest_ids_video": [{"file_id": "7cad856b55c54b159b87fbf205abae87"}]
             }
         });
-        let Some(Pick::FairPlay(file)) = pick(&track) else {
+        let Some(Pick::FairPlay(file)) = pick(&track, None) else {
             panic!("expected FairPlay");
         };
         assert_eq!(file.id, "cc");
-        assert_eq!(Pick::FairPlay(file).name(), "fairplay");
+        let fairplay = Pick::FairPlay(file);
+        assert_eq!(fairplay.name(), "fairplay");
+        assert_eq!(fairplay.reported_quality(0).as_deref(), Some("VERY_HIGH"));
+        let Some(Pick::FairPlay(only)) = pick(&track, Some(128_000)) else {
+            panic!("expected FairPlay");
+        };
+        assert_eq!(only.id, "cc");
     }
 
     #[test]
@@ -246,7 +276,7 @@ mod tests {
             "file_ids_mp4_dual": [{"file_id": "b1de", "format": "12"}],
             "file_ids_mp4": [{"file_id": "d2d5", "format": "10"}]
         }));
-        assert_eq!(pick(&hosted), None);
+        assert_eq!(pick(&hosted, None), None);
         assert_eq!(unplayable(&hosted), EPISODE);
 
         let mut chapter = hosted.clone();
@@ -273,12 +303,12 @@ mod tests {
             "file_urls_external": [{"file_url": "https://pdrl.fm/example/a.mp3"}]
         }))}}});
         assert_eq!(
-            pick_from_media(&response, uri),
+            pick_from_media(&response, uri, None),
             Some(Pick::External("https://pdrl.fm/example/a.mp3".into()))
         );
-        assert_eq!(pick_from_media(&json!({"media": {}}), uri), None);
+        assert_eq!(pick_from_media(&json!({"media": {}}), uri, None), None);
         let mut book = response.clone();
         book["media"][uri]["item"]["metadata"]["show_content_type"] = json!("AUDIOBOOK");
-        assert_eq!(pick_from_media(&book, uri), None);
+        assert_eq!(pick_from_media(&book, uri, None), None);
     }
 }

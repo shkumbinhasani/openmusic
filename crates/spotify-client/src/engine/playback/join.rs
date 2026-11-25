@@ -5,6 +5,7 @@ use serde_json::Value;
 use super::{
     AudioSettings, Playing, ReportPrepared,
     gain::{fetch_loudness, linear},
+    quality::{choose, reported_quality},
     source::Pick,
     speed::{show_of, starting_speed, state_speed},
 };
@@ -93,14 +94,12 @@ pub(super) struct File {
     pub(super) format: Value,
     pub(super) format_number: String,
     pub(super) bitrate: u64,
+    pub(super) quality: Option<String>,
 }
 
-pub(super) fn choose_file(track: &Value) -> Option<File> {
-    let file = track["manifest"]["file_ids_mp4_cbcs"]
-        .as_array()?
-        .iter()
-        .filter(|file| file["file_id"].is_string())
-        .max_by_key(|file| file["bitrate"].as_u64().unwrap_or_default())?;
+pub(super) fn choose_file(track: &Value, ceiling: Option<u64>) -> Option<File> {
+    let files = track["manifest"]["file_ids_mp4_cbcs"].as_array()?;
+    let file = choose(files, ceiling)?;
     Some(File {
         id: file["file_id"].as_str()?.to_owned(),
         format: file["format"].clone(),
@@ -109,6 +108,7 @@ pub(super) fn choose_file(track: &Value) -> Option<File> {
             .map(str::to_owned)
             .unwrap_or_else(|| file["format"].to_string()),
         bitrate: file["bitrate"].as_u64().unwrap_or(128_000),
+        quality: reported_quality(file),
     })
 }
 
@@ -206,13 +206,25 @@ impl Engine {
         Some((target, join))
     }
 
+    fn prepared_file_current(&self, prepared: &Prepared) -> bool {
+        let Pick::FairPlay(file) = &prepared.pick else {
+            return true;
+        };
+        self.playing
+            .as_ref()
+            .and_then(|playing| track_at(&playing.machine, prepared.index()))
+            .and_then(|track| choose_file(track, self.bitrate_ceiling()))
+            .is_some_and(|wanted| wanted.id == file.id)
+    }
+
     pub(super) fn check_prepared(&mut self) {
         let Some(prepared) = &self.audio.joins.prepared else {
             return;
         };
         let keep = self
             .wanted_join()
-            .is_some_and(|(target, join)| prepared.matches(&target) && prepared.join == join);
+            .is_some_and(|(target, join)| prepared.matches(&target) && prepared.join == join)
+            && self.prepared_file_current(prepared);
         if !keep {
             self.discard_prepared();
             self.audio.joins.tried = None;
@@ -390,6 +402,8 @@ impl Engine {
         next.format = prepared.pick.format();
         next.bitrate = prepared.bitrate;
         next.source = prepared.pick.name();
+        next.codec = prepared.pick.codec();
+        next.audio_quality = prepared.pick.reported_quality(prepared.bitrate);
         next.duration_ms = prepared.duration_ms;
         next.gain_db = prepared.gain_db;
         next.speed = prepared.speed;
@@ -498,6 +512,7 @@ mod tests {
                 format: json!(14),
                 format_number: "14".into(),
                 bitrate: 128_000,
+                quality: Some("HIGH".into()),
             }),
             bitrate: 128_000,
             duration_ms: 180_000,
@@ -574,16 +589,21 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_highest_fairplay_file() {
+    fn picks_the_fairplay_file_for_the_chosen_quality() {
         let machine = machine();
-        let file = choose_file(track_at(&machine, 0).unwrap()).unwrap();
+        let file = choose_file(track_at(&machine, 0).unwrap(), None).unwrap();
         assert_eq!(file.id, "ab");
         assert_eq!(file.format_number, "15");
         assert_eq!(file.bitrate, 256_000);
-        let file = choose_file(track_at(&machine, 1).unwrap()).unwrap();
+        assert_eq!(file.quality.as_deref(), Some("VERY_HIGH"));
+        let file = choose_file(track_at(&machine, 0).unwrap(), Some(128_000)).unwrap();
+        assert_eq!(file.id, "aa");
         assert_eq!(file.format_number, "14");
-        assert_eq!(choose_file(track_at(&machine, 2).unwrap()), None);
-        assert_eq!(choose_file(track_at(&machine, 3).unwrap()), None);
+        let file = choose_file(track_at(&machine, 1).unwrap(), None).unwrap();
+        assert_eq!(file.format_number, "14");
+        assert_eq!(file.quality.as_deref(), Some("HIGH"));
+        assert_eq!(choose_file(track_at(&machine, 2).unwrap(), None), None);
+        assert_eq!(choose_file(track_at(&machine, 3).unwrap(), None), None);
     }
 
     #[test]

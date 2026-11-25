@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use spotify_client::{
     catalog::LocalTrack,
     connect::SleepState,
-    engine::playback::{AudioSettings, AudioStatus, SleepChoice},
+    engine::playback::{AudioSettings, AudioStatus, Quality, SleepChoice},
     playback_settings::{
         LoudnessLevel, MAX_CROSSFADE_MS, Remote, Setting, round_speed, valid_speed,
     },
@@ -46,6 +46,7 @@ pub struct AudioPrefs {
     pub crossfade_ms: u32,
     pub normalize: bool,
     pub level: LoudnessLevel,
+    pub quality: Quality,
 }
 
 impl Default for AudioPrefs {
@@ -57,6 +58,7 @@ impl Default for AudioPrefs {
             crossfade_ms: settings.crossfade_ms,
             normalize: settings.normalize,
             level: settings.level,
+            quality: settings.quality,
         }
     }
 }
@@ -69,6 +71,7 @@ impl AudioPrefs {
             crossfade_ms: self.crossfade_ms.min(MAX_CROSSFADE_MS),
             normalize: self.normalize,
             level: self.level,
+            quality: self.quality,
         }
     }
 
@@ -296,6 +299,22 @@ impl OpenMusic {
         ]);
     }
 
+    pub fn set_quality(&mut self, quality: Quality) {
+        self.update_settings(|current| current.audio.quality = quality);
+    }
+
+    pub fn stream_text(&self) -> Option<String> {
+        self.audio
+            .status
+            .stream
+            .as_ref()
+            .map(|stream| stream.describe())
+    }
+
+    pub fn quality_lowered(&self) -> bool {
+        self.audio.status.lowered
+    }
+
     fn apply_audio(&mut self, settings: &[Setting]) {
         self.update_settings(|current| {
             for setting in settings {
@@ -308,12 +327,13 @@ impl OpenMusic {
         let prefs = &self.settings.audio;
         let mut lines = vec![
             format!(
-                "prefs gapless={} crossfade={} crossfade_ms={} normalize={} level={}",
+                "prefs gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={}",
                 prefs.gapless,
                 prefs.crossfade,
                 prefs.crossfade_ms,
                 prefs.normalize,
-                prefs.level.name()
+                prefs.level.name(),
+                prefs.quality.name()
             ),
             format!(
                 "synced {}",
@@ -325,11 +345,13 @@ impl OpenMusic {
             ),
         ];
         lines.push(format!(
-            "status speed_allowed={} speed={} episode={} sleep={}",
+            "status speed_allowed={} speed={} episode={} sleep={} lowered={} stream={}",
             self.audio.status.speed_allowed,
             self.current_speed(),
             self.playback.now.episode,
-            self.sleep_label().unwrap_or_else(|| "off".to_owned())
+            self.sleep_label().unwrap_or_else(|| "off".to_owned()),
+            self.quality_lowered(),
+            self.stream_text().unwrap_or_else(|| "none".to_owned())
         ));
         let mut speeds: Vec<_> = self.audio.speeds.iter().collect();
         speeds.sort_by(|a, b| a.0.cmp(b.0));
@@ -473,6 +495,11 @@ pub fn debug(
             (None, Some(level)) => app.set_loudness_level(level),
             _ => {}
         },
+        "quality" => {
+            if let Some(quality) = Quality::parse(rest) {
+                app.set_quality(quality);
+            }
+        }
         _ => return false,
     }
     true
@@ -481,12 +508,13 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let prefs = &app.settings.audio;
     format!(
-        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} speed={} sleep={}",
+        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} speed={} sleep={}",
         prefs.gapless,
         prefs.crossfade,
         prefs.crossfade_ms,
         prefs.normalize,
         prefs.level.name(),
+        prefs.quality.name(),
         app.current_speed(),
         match app.sleep_state() {
             SleepState::Off => "off".to_owned(),
@@ -721,5 +749,22 @@ mod tests {
         assert!(engine.crossfade);
         assert_eq!(engine.crossfade_ms, MAX_CROSSFADE_MS);
         assert_eq!(engine.level, LoudnessLevel::Quiet);
+    }
+
+    #[test]
+    fn keeps_quality_local() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"audio":{"gapless":false,"level":"Loud"}}"#).unwrap();
+        assert_eq!(settings.audio.quality, Quality::Automatic);
+        let settings: Settings = serde_json::from_str(r#"{"audio":{"quality":"Normal"}}"#).unwrap();
+        let engine = settings.audio.engine();
+        assert_eq!(engine.quality, Quality::Normal);
+        let mut remote_only = settings.audio.clone();
+        remote_only.merge(&Remote {
+            user: Some(UserAudio::default()),
+            device: Some(DeviceAudio::default()),
+            speeds: HashMap::new(),
+        });
+        assert_eq!(remote_only.quality, Quality::Normal);
     }
 }
