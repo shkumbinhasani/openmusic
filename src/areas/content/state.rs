@@ -12,6 +12,7 @@ use spotify_client::{
     catalog::Lyrics,
     engine::NowPlaying,
     entity::{Card, Kind},
+    library::ItemKind,
     podcast::{
         self, Availability, Episode, Played, Show, ShowKind,
         your_episodes::{Filter, Sort},
@@ -509,12 +510,14 @@ impl OpenMusic {
     }
 
     pub fn saved_or_known(&self, uri: &str) -> Option<bool> {
-        self.is_saved(uri).or_else(|| {
-            self.content
-                .loaded_show()
-                .filter(|show| show.uri == uri)
-                .map(|show| show.saved)
-        })
+        self.is_saved(uri)
+            .or_else(|| {
+                self.content
+                    .loaded_show()
+                    .filter(|show| show.uri == uri)
+                    .map(|show| show.saved)
+            })
+            .or_else(|| self.library_item(uri).map(|_| true))
     }
 
     pub fn show_kind(&self, uri: &str) -> Option<ShowKind> {
@@ -523,6 +526,11 @@ impl OpenMusic {
             .filter(|show| show.uri == uri)
             .map(|show| show.kind)
             .or_else(|| self.content.kinds.get(uri).copied())
+            .or_else(|| match self.library_item(uri)?.kind {
+                ItemKind::Audiobook => Some(ShowKind::Audiobook),
+                ItemKind::Show => Some(ShowKind::Podcast),
+                _ => None,
+            })
     }
 
     pub fn saving(&self, uri: &str) -> bool {
@@ -532,13 +540,19 @@ impl OpenMusic {
     pub fn save_when_known(&mut self, uri: &str, saved: bool) {
         match save_step(self.saved_or_known(uri), saved) {
             SaveStep::Keep => {}
-            SaveStep::Write => self.set_saved(vec![uri.to_owned()], saved),
+            SaveStep::Write => self.write_save(uri, saved),
             SaveStep::LookUp => {
                 self.content
                     .wanted
                     .insert(uri.to_owned(), (saved, Instant::now()));
                 self.lookup_saved([uri.to_owned()]);
             }
+        }
+    }
+
+    fn write_save(&mut self, uri: &str, saved: bool) {
+        if self.write_saved(vec![uri.to_owned()], saved) > 0 {
+            self.announce_save(uri, saved);
         }
     }
 
@@ -556,7 +570,7 @@ impl OpenMusic {
             match self.is_saved(&uri) {
                 Some(current) => {
                     if current != saved {
-                        self.set_saved(vec![uri], saved);
+                        self.write_save(&uri, saved);
                     }
                     changed = true;
                 }

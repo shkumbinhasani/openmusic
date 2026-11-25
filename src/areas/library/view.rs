@@ -324,13 +324,12 @@ impl OpenMusic {
 fn save_item(target: &Target, app: &OpenMusic) -> Option<MenuItem> {
     let uri = match target {
         Target::Track(target) => target.track.uri.clone(),
-        Target::Album { uri }
-        | Target::Artist { uri }
-        | Target::Show { uri }
-        | Target::Episode { uri } => uri.clone(),
+        Target::Album { uri } | Target::Artist { uri } => uri.clone(),
         _ => return None,
     };
-    saves::saves(&uri)?;
+    if saves::saves(&uri)? == saves::Saves::Episodes {
+        return None;
+    }
     let row = app.library_item(&uri);
     let audiobook = row.is_some_and(|item| item.kind == ItemKind::Audiobook);
     let known = app.is_saved(&uri).or_else(|| row.map(|_| true));

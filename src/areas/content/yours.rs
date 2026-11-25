@@ -16,6 +16,7 @@ use super::{
 };
 use crate::{
     app::{OpenMusic, Page},
+    areas::library::saves::saved_toast,
     icons, overlay,
     ui::{
         Palette,
@@ -582,14 +583,20 @@ pub fn your_episodes_tile(side: Pixels) -> Div {
 impl OpenMusic {
     pub fn change_saved(&mut self, uri: &str, saved: bool) {
         self.save_when_known(uri, saved);
+    }
+
+    pub(super) fn announce_save(&mut self, uri: &str, saved: bool) {
         let listed =
             self.page == Page::YourEpisodes && self.content.yours.episodes.contains_key(uri);
-        if saved || !listed {
-            return;
+        if !saved && listed {
+            let target = uri.to_owned();
+            let undo: Undo = Rc::new(move |app, _| {
+                app.write_saved(vec![target.clone()], true);
+            });
+            self.show_toast("Removed from Your Episodes.", Some(undo));
+        } else if let Some(text) = saved_toast(uri, saved) {
+            self.show_toast(text, None);
         }
-        let target = uri.to_owned();
-        let undo: Undo = Rc::new(move |app, _| app.save_when_known(&target, true));
-        self.show_toast("Removed from Your Episodes.", Some(undo));
     }
 }
 
