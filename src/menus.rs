@@ -268,6 +268,62 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Recently played",
     ),
     shortcut(
+        "alt-shift-0",
+        boxed::<library::state::ShowLibrary>,
+        QUIET,
+        Navigation,
+        "Your Library",
+    ),
+    shortcut(
+        "alt-shift-1",
+        boxed::<library::state::ShowPlaylists>,
+        QUIET,
+        Navigation,
+        "Your playlists",
+    ),
+    shortcut(
+        "alt-shift-2",
+        boxed::<library::state::ShowPodcasts>,
+        QUIET,
+        Navigation,
+        "Your podcasts and shows",
+    ),
+    shortcut(
+        "alt-shift-3",
+        boxed::<library::state::ShowArtists>,
+        QUIET,
+        Navigation,
+        "Your artists",
+    ),
+    shortcut(
+        "alt-shift-4",
+        boxed::<library::state::ShowAlbums>,
+        QUIET,
+        Navigation,
+        "Your albums",
+    ),
+    shortcut(
+        "alt-shift-5",
+        boxed::<library::state::ShowAudiobooks>,
+        QUIET,
+        Navigation,
+        "Your audiobooks",
+    ),
+    shortcut(
+        "alt-shift-6",
+        boxed::<library::state::ShowAuthors>,
+        QUIET,
+        Navigation,
+        "Your authors",
+    ),
+    shortcut(
+        "alt-shift-7",
+        boxed::<library::state::ShowEvents>,
+        QUIET,
+        Navigation,
+        "Your events",
+    ),
+    shortcut(
         "alt-shift-d",
         boxed::<ShowDevices>,
         QUIET,
@@ -676,6 +732,8 @@ mod tests {
         assert_eq!(row("Search").keys, ["cmd-l", "cmd-f", "cmd-k"]);
         assert_eq!(row("Go back").keys, ["alt-cmd-left", "cmd-[", "alt-left"]);
         assert_eq!(row("Keyboard shortcuts").keys, ["cmd-/", "?"]);
+        assert_eq!(row("Your Library").keys, ["alt-shift-0"]);
+        assert_eq!(row("Your events").keys, ["alt-shift-7"]);
         let total: usize = sheet
             .iter()
             .flat_map(|(_, rows)| rows)

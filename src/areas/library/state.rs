@@ -1186,18 +1186,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
-    let quiet = Some("!Input");
-    cx.bind_keys([
-        KeyBinding::new("cmd-f", FilterLibrary, Some(LIBRARY_CONTEXT)),
-        KeyBinding::new("alt-shift-0", ShowLibrary, quiet),
-        KeyBinding::new("alt-shift-1", ShowPlaylists, quiet),
-        KeyBinding::new("alt-shift-2", ShowPodcasts, quiet),
-        KeyBinding::new("alt-shift-3", ShowArtists, quiet),
-        KeyBinding::new("alt-shift-4", ShowAlbums, quiet),
-        KeyBinding::new("alt-shift-5", ShowAudiobooks, quiet),
-        KeyBinding::new("alt-shift-6", ShowAuthors, quiet),
-        KeyBinding::new("alt-shift-7", ShowEvents, quiet),
-    ]);
+    cx.bind_keys([KeyBinding::new(
+        "cmd-f",
+        FilterLibrary,
+        Some(LIBRARY_CONTEXT),
+    )]);
     fn shelf<A: gpui::Action>(cx: &mut App, handle: &Handle, shelf: Shelf) {
         menus::route(cx, handle, move |_: &A, app, _, cx| {
             app.open_shelf(shelf);
