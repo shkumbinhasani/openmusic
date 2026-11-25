@@ -120,27 +120,23 @@ fn liked_count(detail: &str) -> Option<i64> {
     detail.split_whitespace().next()?.parse().ok()
 }
 
+fn toggled(known: Option<bool>) -> bool {
+    known != Some(true)
+}
+
 impl OpenMusic {
     pub fn toggle_saved(&mut self, uri: &str) {
-        if saves(uri).is_none() || self.saved.pending.contains_key(uri) {
-            return;
-        }
-        let Some(saved) = self.is_saved(uri) else {
-            self.library.when_known = Some((uri.to_owned(), None, Instant::now()));
-            self.lookup_saved([uri.to_owned()]);
-            return;
-        };
-        self.apply_save(uri, !saved);
+        self.make_saved(uri, toggled(self.is_saved(uri)));
     }
 
-    pub fn save_from_menu(&mut self, uri: &str, saved: bool) {
+    pub fn make_saved(&mut self, uri: &str, saved: bool) {
         if saves(uri).is_none() || self.saved.pending.contains_key(uri) {
             return;
         }
         if self.is_saved(uri).is_some() {
             self.apply_save(uri, saved);
         } else {
-            self.library.when_known = Some((uri.to_owned(), Some(saved), Instant::now()));
+            self.library.when_known = Some((uri.to_owned(), saved, Instant::now()));
             self.lookup_saved([uri.to_owned()]);
         }
     }
@@ -375,15 +371,12 @@ pub fn tick(app: &mut OpenMusic) -> bool {
         app.lookup_saved(fresh);
     }
     let mut changed = false;
-    if let Some((uri, wanted, at)) = app.library.when_known.clone() {
+    if let Some((uri, saved, at)) = app.library.when_known.clone() {
         if at.elapsed() >= TOGGLE_WAIT {
             app.library.when_known = None;
         } else if app.is_saved(&uri).is_some() {
             app.library.when_known = None;
-            match wanted {
-                Some(saved) => app.save_from_menu(&uri, saved),
-                None => app.toggle_saved(&uri),
-            }
+            app.make_saved(&uri, saved);
             changed = true;
         }
     }
@@ -486,5 +479,12 @@ mod tests {
         assert_eq!(header_uri(&Page::Liked), None);
         assert_eq!(liked_count("64 songs"), Some(64));
         assert_eq!(liked_count(""), None);
+    }
+
+    #[test]
+    fn a_click_on_an_unknown_state_does_what_the_control_shows() {
+        assert!(toggled(None));
+        assert!(toggled(Some(false)));
+        assert!(!toggled(Some(true)));
     }
 }

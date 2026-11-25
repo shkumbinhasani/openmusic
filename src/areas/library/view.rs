@@ -340,7 +340,7 @@ fn save_item(target: &Target, app: &OpenMusic) -> Option<MenuItem> {
     let pending = app.saved.pending.contains_key(&uri);
     let save = menu.save;
     let item = MenuItem::action(menu.title, move |app, _, cx| {
-        app.save_from_menu(&uri, save);
+        app.make_saved(&uri, save);
         cx.notify();
     })
     .symbol(menu.symbol)
