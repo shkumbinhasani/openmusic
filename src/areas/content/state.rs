@@ -251,6 +251,10 @@ fn is_episode(uri: &str) -> bool {
     uri.starts_with("spotify:episode:")
 }
 
+fn wants_episode(page: &Page, loaded: Option<&str>, uri: &str) -> bool {
+    matches!(page, Page::Episode(open) if open == uri) || loaded == Some(uri)
+}
+
 fn left_episode<'a>(
     before: Option<&'a (String, bool)>,
     track: Option<&str>,
@@ -828,26 +832,18 @@ pub fn on_event(
             }
         }
         Event::Episode { uri, result } => {
-            if app
-                .content
-                .episode
-                .as_ref()
-                .is_some_and(|(loaded, _)| *loaded != uri)
-            {
-                return;
-            }
+            let loaded = app.content.episode.as_ref();
+            let wanted = wants_episode(&app.page, loaded.map(|(loaded, _)| loaded.as_str()), &uri);
+            let shown = loaded.is_some_and(|(loaded, episode)| *loaded == uri && episode.is_ok());
             match result {
                 Ok(episode) => {
-                    app.content.episode = Some((uri, Ok(*episode.clone())));
+                    if wanted {
+                        app.content.episode = Some((uri, Ok(*episode.clone())));
+                    }
                     app.content.patch(&episode);
                 }
                 Err(message) => {
-                    let shown = app
-                        .content
-                        .episode
-                        .as_ref()
-                        .is_some_and(|(loaded, episode)| *loaded == uri && episode.is_ok());
-                    if !shown {
+                    if wanted && !shown {
                         app.content.episode = Some((uri, Err(message)));
                     }
                 }
@@ -1660,6 +1656,18 @@ mod tests {
         assert!(state.took_words(song.into(), Ok(Some(found)), now));
         assert!(matches!(&state.lyrics, Some((_, Some(_)))));
         assert!(state.transcript.is_none());
+    }
+
+    #[test]
+    fn keeps_an_episode_page_on_the_episode_it_opened() {
+        let (a, b) = ("spotify:episode:a", "spotify:episode:b");
+        let open_b = Page::Episode(b.to_owned());
+        assert!(!wants_episode(&open_b, None, a));
+        assert!(wants_episode(&open_b, None, b));
+        assert!(wants_episode(&open_b, Some(b), b));
+        assert!(!wants_episode(&open_b, Some(b), a));
+        assert!(wants_episode(&Page::Home, Some(a), a));
+        assert!(!wants_episode(&Page::Home, None, a));
     }
 
     #[test]
