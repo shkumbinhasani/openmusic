@@ -576,7 +576,12 @@ impl Engine {
                 repeat,
                 speed: playing.speed,
                 episode: track.as_ref().is_some_and(is_episode),
-                sleep: here.map_or(SleepState::Off, |playback| playback.sleep_timer),
+                sleep: match self.local_sleep() {
+                    SleepState::Off => {
+                        here.map_or(SleepState::Off, |playback| playback.sleep_timer)
+                    }
+                    local => local,
+                },
                 track,
                 playing: !playing.paused,
                 position_ms: playing.position_ms,

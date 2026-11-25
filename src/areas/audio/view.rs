@@ -6,7 +6,7 @@ use spotify_client::{
     playback_settings::{MAX_SPEED, MIN_SPEED, round_speed},
 };
 
-use super::state::{SPEED_KEY, speed_text};
+use super::state::{SLEEP_KEY, SPEED_KEY, speed_text};
 use crate::{
     app::OpenMusic,
     overlay::{self, ButtonSpec, Label},
@@ -20,6 +20,7 @@ use crate::{
 };
 
 const SPEED_WEIGHT: u32 = 620;
+const SLEEP_WEIGHT: u32 = 660;
 
 fn speed_label(speed: f32) -> &'static str {
     static LABELS: Mutex<Vec<(u32, &'static str)>> = Mutex::new(Vec::new());
@@ -79,6 +80,21 @@ impl OpenMusic {
             .w(px(56.))
             .child(overlay::anchor(SPEED_KEY))
     }
+
+    fn sleep_control(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let spec = ButtonSpec {
+            label: Label::Symbol("moon.zzz.fill"),
+            prominent: false,
+            enabled: true,
+            tooltip: Some(format!(
+                "Sleep timer: {}",
+                self.sleep_label().unwrap_or_default()
+            )),
+        };
+        self.glass_control(SLEEP_KEY, spec, true, palette, cx)
+            .size(px(48.))
+            .child(overlay::anchor(SLEEP_KEY))
+    }
 }
 
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
@@ -88,18 +104,25 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     let current = app.playback.now.track.as_ref();
     if track.surface != Surface::NowPlaying
         || current.is_none_or(|current| current.uri != track.track.uri)
-        || !app.playback.now.episode
     {
         return Vec::new();
     }
-    vec![(
+    let mut items = Vec::new();
+    if app.playback.now.episode {
+        items.push((
+            Group::Queue,
+            MenuItem::submenu(
+                format!("Playback speed ({})", speed_text(app.current_speed())),
+                app.speed_items(),
+            )
+            .symbol("speedometer"),
+        ));
+    }
+    items.push((
         Group::Queue,
-        MenuItem::submenu(
-            format!("Playback speed ({})", speed_text(app.current_speed())),
-            app.speed_items(),
-        )
-        .symbol("speedometer"),
-    )]
+        MenuItem::submenu("Sleep timer", app.sleep_items()).symbol("moon.zzz"),
+    ));
+    items
 }
 
 pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
@@ -108,7 +131,7 @@ pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
 
 pub fn dock_items(
     app: &OpenMusic,
-    _roomy: bool,
+    roomy: bool,
     palette: Palette,
     cx: &mut Context<OpenMusic>,
 ) -> Vec<DockItem> {
@@ -119,6 +142,14 @@ pub fn dock_items(
             SPEED_WEIGHT,
             60.,
             app.speed_control(palette, cx),
+        ));
+    }
+    if roomy && app.sleep_label().is_some() {
+        items.push(DockItem::new(
+            SLEEP_KEY,
+            SLEEP_WEIGHT,
+            48.,
+            app.sleep_control(palette, cx),
         ));
     }
     items

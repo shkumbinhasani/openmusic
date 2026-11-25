@@ -3,7 +3,7 @@ use spotify_client::{
     dealer::Message,
     engine::{
         Control,
-        playback::{self, AudioReport, AudioStatus, Update},
+        playback::{self, AudioReport, AudioStatus, SleepChoice, Update},
     },
     playback_settings::{self, Change, DeviceDescriptor, Remote, Setting},
 };
@@ -25,6 +25,7 @@ pub enum Command {
         speed: f32,
         show: Option<String>,
     },
+    Sleep(SleepChoice),
 }
 
 pub enum Event {
@@ -96,6 +97,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                     index,
                 }))
         }
+        Command::Sleep(choice) => ctx
+            .handle
+            .send(Control::Audio(playback::Control::Sleep(choice))),
         Command::Speed { speed, show } => {
             ctx.handle
                 .send(Control::Audio(playback::Control::Speed(speed)));

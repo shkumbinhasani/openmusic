@@ -188,6 +188,9 @@ impl Engine {
     }
 
     pub(super) fn wanted_join(&self) -> Option<(Target, Join)> {
+        if self.audio.sleep.ends_track() {
+            return None;
+        }
         let playing = self.playing.as_ref()?;
         let target = target(&playing.machine, playing.index, "advance")?;
         if !preparable(&playing.machine, &target) {

@@ -151,6 +151,7 @@ pub struct Snapshot {
     pub master: f32,
     pub playing: bool,
     pub ramp: Option<f32>,
+    pub quiet: f32,
 }
 
 pub fn fade_levels(progress: f32) -> (f32, f32) {
@@ -217,6 +218,21 @@ impl Ramp {
     }
 }
 
+struct Fade {
+    started: Instant,
+    duration: Duration,
+}
+
+impl Fade {
+    fn progress(&self) -> f32 {
+        if self.duration.is_zero() {
+            1.
+        } else {
+            (self.started.elapsed().as_secs_f32() / self.duration.as_secs_f32()).clamp(0., 1.)
+        }
+    }
+}
+
 struct MainState {
     decks: [Deck; 2],
     active: usize,
@@ -225,6 +241,8 @@ struct MainState {
     _keys: Retained<KeyDelegate>,
     _observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     master: f32,
+    quiet: f32,
+    fade_out: Option<Fade>,
     playing: bool,
     ramp: Option<Ramp>,
     ticking: bool,
@@ -542,6 +560,8 @@ fn create_main_state(mtm: MainThreadMarker) -> MainState {
             ),
         ],
         master: 1.,
+        quiet: 1.,
+        fade_out: None,
         playing: false,
         ramp: None,
         ticking: false,
@@ -813,7 +833,7 @@ impl MainState {
             let gain = deck.items.first().map_or(1., |item| item.gain);
             unsafe {
                 deck.player
-                    .setVolume(deck_volume(self.master, gain, deck.fade))
+                    .setVolume(deck_volume(self.master * self.quiet, gain, deck.fade))
             };
         }
     }
@@ -1025,28 +1045,59 @@ impl MainState {
         self.ensure_ticking();
     }
 
-    fn step(&mut self) -> Option<Duration> {
+    fn step_ramp(&mut self) -> bool {
         let Some(ramp) = self.ramp.as_ref() else {
-            self.stepping = false;
-            return None;
+            return false;
         };
         if ramp.resumed.is_none() {
-            self.stepping = false;
-            return None;
+            return false;
         }
         let progress = ramp.progress();
         let (outgoing, incoming) = fade_levels(progress);
         let from = ramp.from;
         self.decks[from].fade = outgoing;
         self.decks[self.active].fade = incoming;
-        self.apply_volumes();
         if progress >= 1. {
             self.finish_ramp();
-            self.stepping = false;
-            self.update_snapshot();
-            return None;
+            return false;
         }
-        Some(RAMP_STEP)
+        true
+    }
+
+    fn step_fade(&mut self) -> bool {
+        let Some(fade) = self.fade_out.as_ref() else {
+            return false;
+        };
+        let progress = fade.progress();
+        self.quiet = fade_levels(progress).0;
+        progress < 1.
+    }
+
+    fn step(&mut self) -> Option<Duration> {
+        let ramping = self.step_ramp();
+        let fading = self.step_fade();
+        self.apply_volumes();
+        self.update_snapshot();
+        if ramping || fading {
+            Some(RAMP_STEP)
+        } else {
+            self.stepping = false;
+            None
+        }
+    }
+
+    fn fade_out(&mut self, duration: Duration) {
+        self.fade_out = Some(Fade {
+            started: Instant::now(),
+            duration,
+        });
+        self.ensure_stepping();
+    }
+
+    fn reset_fade(&mut self) {
+        self.fade_out = None;
+        self.quiet = 1.;
+        self.apply_volumes();
     }
 
     fn pause(&mut self) {
@@ -1249,6 +1300,7 @@ impl MainState {
             master: self.master,
             playing: self.playing,
             ramp: self.ramp.as_ref().map(Ramp::progress),
+            quiet: self.quiet,
         };
         if let Ok(mut slot) = SNAPSHOT.lock() {
             *slot = Some(snapshot);
@@ -1300,6 +1352,15 @@ impl Player {
     pub fn crossfade(&self, generation: u64, duration_ms: u32) {
         let duration = Duration::from_millis(u64::from(duration_ms));
         on_main(move |_, state| state.crossfade(generation, duration));
+    }
+
+    pub fn fade_out(&self, duration_ms: u32) {
+        let duration = Duration::from_millis(u64::from(duration_ms));
+        on_main(move |_, state| state.fade_out(duration));
+    }
+
+    pub fn reset_fade(&self) {
+        on_main(|_, state| state.reset_fade());
     }
 
     pub fn set_speed(&self, generation: u64, speed: f32) {
@@ -1375,6 +1436,19 @@ mod tests {
         assert_eq!(deck_volume(1., 1.5, 1.), 1.);
         assert_eq!(deck_volume(0.8, 0.5, 0.), 0.);
         assert_eq!(deck_volume(-1., 1., 1.), 0.);
+    }
+
+    #[test]
+    fn fades_out_from_full_to_silent() {
+        let mut fade = Fade {
+            started: Instant::now(),
+            duration: Duration::ZERO,
+        };
+        assert_eq!(fade.progress(), 1.);
+        assert!(fade_levels(fade.progress()).0 < 1e-6);
+        fade.duration = Duration::from_secs(3600);
+        assert!(fade.progress() < 0.01);
+        assert!(fade_levels(fade.progress()).0 > 0.99);
     }
 
     #[test]

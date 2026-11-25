@@ -12,7 +12,7 @@ use super::{Engine, GAIA_VOLUME};
 use crate::{
     api::Body,
     catalog::{LocalTrack, Track, image_url},
-    connect::{Repeat, Shuffle},
+    connect::{Repeat, Shuffle, SleepState},
     loudness,
     playback_settings::LoudnessLevel,
     player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
@@ -20,12 +20,15 @@ use crate::{
 use gain::{Gains, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
+use sleep::Sleep;
+pub use sleep::{FADE_MS, SleepChoice};
 pub use source::MANIFEST_FORMATS;
 use speed::{Shows, read_show_speed, show_of, starting_speed, state_speed};
 
 mod gain;
 mod join;
 mod local;
+mod sleep;
 mod source;
 mod speed;
 
@@ -42,6 +45,7 @@ pub enum Control {
         show: String,
         speed: f32,
     },
+    Sleep(SleepChoice),
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +58,7 @@ pub enum Update {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioStatus {
     pub speed_allowed: bool,
+    pub sleep: SleepState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,6 +117,7 @@ pub struct AudioReport {
     pub joins: Vec<String>,
     pub player: Snapshot,
     pub local: Option<String>,
+    pub sleep: SleepState,
 }
 
 impl fmt::Display for AudioReport {
@@ -158,9 +164,10 @@ impl fmt::Display for AudioReport {
         let player = &self.player;
         writeln!(
             f,
-            "player active={} master={:.3} playing={} ramp={}",
+            "player active={} master={:.3} quiet={:.3} playing={} ramp={}",
             player.active,
             player.master,
+            player.quiet,
             player.playing,
             player
                 .ramp
@@ -188,6 +195,20 @@ impl fmt::Display for AudioReport {
         if let Some(local) = &self.local {
             writeln!(f, "local {local}")?;
         }
+        match self.sleep {
+            SleepState::Off => writeln!(f, "sleep off")?,
+            SleepState::EndOfTrack => writeln!(f, "sleep end_of_track")?,
+            SleepState::At(deadline) => writeln!(
+                f,
+                "sleep at={} left_ms={}",
+                deadline
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis()),
+                deadline
+                    .duration_since(std::time::SystemTime::now())
+                    .map_or(0, |left| left.as_millis())
+            )?,
+        }
         Ok(())
     }
 }
@@ -202,6 +223,7 @@ pub(super) struct State {
     unloaded: bool,
     shows: Shows,
     status: Option<AudioStatus>,
+    sleep: Sleep,
 }
 
 pub(super) struct Playing {
@@ -363,13 +385,20 @@ impl Engine {
             }
             Control::Speed(speed) => self.change_speed(speed).await?,
             Control::ShowSpeed { show, speed } => self.learn_show_speed(show, speed),
+            Control::Sleep(choice) => self.set_sleep(choice)?,
         }
         Ok(())
     }
 
     pub(super) fn audio_updates(&mut self) -> Vec<Update> {
+        let sounding = self.playing.as_ref().is_some_and(|playing| !playing.paused)
+            || self.audio.local.as_ref().is_some_and(|queue| !queue.paused);
+        if !sounding && self.audio.sleep.expired(std::time::SystemTime::now()) {
+            self.end_sleep();
+        }
         let status = AudioStatus {
             speed_allowed: self.speed_allowed(),
+            sleep: self.audio.sleep.state(),
         };
         if self.audio.status.as_ref() != Some(&status) {
             self.audio.status = Some(status.clone());
@@ -406,6 +435,7 @@ impl Engine {
             joins: self.audio.joins.log.clone(),
             player: self.player.snapshot(),
             local: self.audio.local.as_ref().map(LocalQueue::describe),
+            sleep: self.audio.sleep.state(),
         }
     }
 
@@ -907,6 +937,13 @@ impl Engine {
                 if let Some(source) = source {
                     self.report(source).await;
                 }
+                let sounding =
+                    is_playing && self.playing.as_ref().is_some_and(|playing| !playing.paused);
+                if self.sleep_due(sounding) {
+                    self.pause_local().await;
+                    self.player.reset_fade();
+                    return;
+                }
                 self.prepare_next().await;
                 self.crossfade_due().await;
             }
@@ -958,6 +995,7 @@ impl Engine {
         };
         let Some((index, paused)) = playing.transition(transition) else {
             if transition == "advance" {
+                self.sleep_after_track();
                 if let Some(playing) = self.playing.as_mut() {
                     playing.paused = true;
                     playing.position_ms = playing.duration_ms;
@@ -968,6 +1006,7 @@ impl Engine {
         };
         let machine = playing.machine.clone();
         let old = playing.generation;
+        let paused = paused || (transition == "advance" && self.sleep_after_track());
         if transition == "advance"
             && let Some(playing) = self.playing.as_mut()
         {

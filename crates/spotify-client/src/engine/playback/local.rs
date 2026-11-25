@@ -163,6 +163,15 @@ impl Engine {
         self.load_local(step.play);
     }
 
+    fn finish_local(&mut self) {
+        let Some(queue) = self.audio.local.as_ref() else {
+            return;
+        };
+        let step = queue.step(true);
+        let play = step.play && !self.sleep_after_track();
+        self.go_local(Step { play, ..step });
+    }
+
     pub(super) fn end_local(&mut self) {
         if self.audio.local.take().is_some() {
             self.player.stop();
@@ -186,6 +195,9 @@ impl Engine {
                 if queue.paused == play {
                     queue.paused = !play;
                     if play {
+                        if self.audio.sleep.expired(std::time::SystemTime::now()) {
+                            self.end_sleep();
+                        }
                         self.player.play();
                     } else {
                         self.player.pause();
@@ -244,18 +256,20 @@ impl Engine {
             PlayerEvent::Position {
                 generation,
                 position_ms,
-                ..
+                playing,
             } if *generation == current => {
                 queue.position_ms = *position_ms;
+                let sounding = *playing && !queue.paused;
+                if self.sleep_due(sounding) {
+                    if let Some(queue) = self.audio.local.as_mut() {
+                        queue.paused = true;
+                    }
+                    self.player.pause();
+                    self.player.reset_fade();
+                }
             }
-            PlayerEvent::Ended { generation } if *generation == current => {
-                let step = queue.step(true);
-                self.go_local(step);
-            }
-            PlayerEvent::Advanced { from, .. } if *from == current => {
-                let step = queue.step(true);
-                self.go_local(step);
-            }
+            PlayerEvent::Ended { generation } if *generation == current => self.finish_local(),
+            PlayerEvent::Advanced { from, .. } if *from == current => self.finish_local(),
             PlayerEvent::Failed {
                 generation,
                 message,
@@ -289,6 +303,7 @@ impl Engine {
             device: Some(self.device_name.clone()),
             local: true,
             volume: self.volume,
+            sleep: self.audio.sleep.state(),
             ..NowPlaying::default()
         })
     }

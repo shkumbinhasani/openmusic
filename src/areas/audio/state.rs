@@ -1,14 +1,15 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::{
     catalog::LocalTrack,
-    engine::playback::{AudioSettings, AudioStatus},
+    connect::SleepState,
+    engine::playback::{AudioSettings, AudioStatus, SleepChoice},
     playback_settings::{
         LoudnessLevel, MAX_CROSSFADE_MS, Remote, Setting, round_speed, valid_speed,
     },
@@ -17,7 +18,7 @@ use spotify_client::{
 use super::worker::{Command, Event};
 use crate::{
     app::OpenMusic,
-    menus::Handle,
+    menus::{self, Handle, SleepAtEndOfTrack, SleepTimer},
     ui::{
         menu::{MenuItem, Place},
         tracks::{RowDrag, RowDrop},
@@ -25,6 +26,15 @@ use crate::{
 };
 
 pub const SPEED_KEY: &str = "audio-speed";
+pub const SLEEP_KEY: &str = "audio-sleep";
+pub const SLEEP_MINUTES: [(u32, &str); 6] = [
+    (5, "5 minutes"),
+    (10, "10 minutes"),
+    (15, "15 minutes"),
+    (30, "30 minutes"),
+    (45, "45 minutes"),
+    (60, "1 hour"),
+];
 pub const SPEEDS: [f32; 10] = [0.5, 0.8, 1., 1.2, 1.5, 1.8, 2., 2.5, 3., 3.5];
 const PENDING: Duration = Duration::from_secs(3);
 
@@ -93,6 +103,7 @@ pub struct State {
     pub report_to: Option<PathBuf>,
     pub status: AudioStatus,
     pending_speed: Option<(f32, Instant)>,
+    sleep_label: Option<String>,
 }
 
 impl State {
@@ -176,6 +187,96 @@ impl OpenMusic {
         self.show_menu(items, Place::Under(SPEED_KEY), None)
     }
 
+    pub fn sleep_state(&self) -> SleepState {
+        self.audio.status.sleep
+    }
+
+    pub fn sleep_label(&self) -> Option<String> {
+        sleep_left(
+            self.sleep_state(),
+            SystemTime::now(),
+            self.playback.now.episode,
+        )
+    }
+
+    pub fn sleep_available(&self) -> bool {
+        let now = &self.playback.now;
+        now.local || now.device.is_none()
+    }
+
+    pub fn set_sleep(&mut self, choice: SleepChoice) {
+        let set = choice != SleepChoice::Off && choice != SleepChoice::Minutes(0);
+        if set && !self.sleep_available() {
+            self.show_toast("The sleep timer works when music plays on this Mac.", None);
+            return;
+        }
+        if !set && self.sleep_state() == SleepState::Off {
+            return;
+        }
+        self.audio.status.sleep = match choice {
+            SleepChoice::EndOfTrack => SleepState::EndOfTrack,
+            SleepChoice::Minutes(minutes) if minutes > 0 => {
+                SleepState::At(SystemTime::now() + Duration::from_secs(u64::from(minutes) * 60))
+            }
+            _ => SleepState::Off,
+        };
+        self.send(Command::Sleep(choice));
+        self.show_toast(
+            if set {
+                "OK, your sleep timer is set."
+            } else {
+                "Sleep timer turned off."
+            },
+            None,
+        );
+    }
+
+    pub fn sleep_items(&self) -> Vec<MenuItem> {
+        let state = self.sleep_state();
+        let enabled = self.sleep_available();
+        let mut items = vec![MenuItem::header("Sleep timer")];
+        if let Some(label) = self.sleep_label() {
+            items.push(MenuItem::note(label));
+        }
+        items.extend(SLEEP_MINUTES.into_iter().map(|(minutes, title)| {
+            MenuItem::action(title, move |app, _, cx| {
+                app.set_sleep(SleepChoice::Minutes(minutes));
+                cx.notify();
+            })
+            .enabled(enabled)
+        }));
+        let end = if self.playback.now.episode {
+            "End of episode"
+        } else {
+            "End of track"
+        };
+        items.push(
+            MenuItem::action(end, |app, _, cx| {
+                app.set_sleep(SleepChoice::EndOfTrack);
+                cx.notify();
+            })
+            .checked(state == SleepState::EndOfTrack)
+            .enabled(enabled),
+        );
+        if state != SleepState::Off {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::action("Turn off timer", |app, _, cx| {
+                app.set_sleep(SleepChoice::Off);
+                cx.notify();
+            }));
+        }
+        if !enabled {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::note("Works when music plays on this Mac"));
+        }
+        items
+    }
+
+    pub fn open_sleep_menu(&mut self) -> bool {
+        let items = self.sleep_items();
+        self.show_menu(items, Place::Under(SLEEP_KEY), None)
+    }
+
     pub fn set_gapless(&mut self, on: bool) {
         self.change_audio(vec![Setting::Gapless(on)]);
     }
@@ -224,10 +325,11 @@ impl OpenMusic {
             ),
         ];
         lines.push(format!(
-            "status speed_allowed={} speed={} episode={}",
+            "status speed_allowed={} speed={} episode={} sleep={}",
             self.audio.status.speed_allowed,
             self.current_speed(),
-            self.playback.now.episode
+            self.playback.now.episode,
+            self.sleep_label().unwrap_or_else(|| "off".to_owned())
         ));
         let mut speeds: Vec<_> = self.audio.speeds.iter().collect();
         speeds.sort_by(|a, b| a.0.cmp(b.0));
@@ -342,6 +444,15 @@ pub fn debug(
                 _ => {}
             }
         }
+        "sleep" => match rest.trim() {
+            "off" | "0" => app.set_sleep(SleepChoice::Off),
+            "end" => app.set_sleep(SleepChoice::EndOfTrack),
+            minutes => {
+                if let Ok(minutes) = minutes.parse::<u32>() {
+                    app.set_sleep(SleepChoice::Minutes(minutes));
+                }
+            }
+        },
         "speed" => {
             if let Ok(speed) = rest.trim().trim_end_matches(['x', '×']).parse::<f32>() {
                 app.set_speed(speed);
@@ -370,16 +481,39 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let prefs = &app.settings.audio;
     format!(
-        "gapless={} crossfade={} crossfade_ms={} normalize={} level={}",
+        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} speed={} sleep={}",
         prefs.gapless,
         prefs.crossfade,
         prefs.crossfade_ms,
         prefs.normalize,
-        prefs.level.name()
+        prefs.level.name(),
+        app.current_speed(),
+        match app.sleep_state() {
+            SleepState::Off => "off".to_owned(),
+            SleepState::EndOfTrack => "end".to_owned(),
+            SleepState::At(deadline) => format!(
+                "{}s",
+                deadline
+                    .duration_since(SystemTime::now())
+                    .map_or(0, |left| left.as_secs())
+            ),
+        }
     )
 }
 
-pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
+pub fn register_actions(cx: &mut App, handle: &Handle) {
+    menus::route(cx, handle, |action: &SleepTimer, app, _, cx| {
+        app.set_sleep(match action.minutes {
+            0 => SleepChoice::Off,
+            minutes => SleepChoice::Minutes(minutes),
+        });
+        cx.notify();
+    });
+    menus::route(cx, handle, |_: &SleepAtEndOfTrack, app, _, cx| {
+        app.set_sleep(SleepChoice::EndOfTrack);
+        cx.notify();
+    });
+}
 
 pub fn on_press(
     app: &mut OpenMusic,
@@ -390,6 +524,10 @@ pub fn on_press(
     match key {
         SPEED_KEY => {
             app.open_speed_menu();
+            true
+        }
+        SLEEP_KEY => {
+            app.open_sleep_menu();
             true
         }
         _ => false,
@@ -413,6 +551,44 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
         app.audio.pending_speed = None;
         cx.notify();
     }
+    if let SleepState::At(deadline) = app.sleep_state()
+        && !app.playback.now.playing
+        && deadline + PENDING < SystemTime::now()
+    {
+        app.audio.status.sleep = SleepState::Off;
+    }
+    let label = app.sleep_label();
+    if label != app.audio.sleep_label {
+        app.audio.sleep_label = label;
+        cx.notify();
+    }
+}
+
+pub fn sleep_left(state: SleepState, now: SystemTime, episode: bool) -> Option<String> {
+    match state {
+        SleepState::Off => None,
+        SleepState::EndOfTrack => Some(
+            if episode {
+                "Stops at the end of this episode"
+            } else {
+                "Stops at the end of this track"
+            }
+            .to_owned(),
+        ),
+        SleepState::At(deadline) => {
+            let seconds = deadline
+                .duration_since(now)
+                .map_or(0, |left| left.as_secs());
+            let minutes = seconds.div_ceil(60);
+            Some(match minutes {
+                0 => "Stopping now".to_owned(),
+                1 if seconds < 60 => "Less than a minute left".to_owned(),
+                minutes if minutes < 60 => format!("{minutes} min left"),
+                minutes if minutes % 60 == 0 => format!("{} hr left", minutes / 60),
+                minutes => format!("{} hr {} min left", minutes / 60, minutes % 60),
+            })
+        }
+    }
 }
 
 pub fn speed_text(speed: f32) -> String {
@@ -427,6 +603,54 @@ mod tests {
 
     use super::*;
     use crate::app::settings::Settings;
+
+    #[test]
+    fn says_how_long_the_sleep_timer_has_left() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let at = |seconds: u64| SleepState::At(now + Duration::from_secs(seconds));
+        assert_eq!(sleep_left(SleepState::Off, now, false), None);
+        assert_eq!(
+            sleep_left(SleepState::EndOfTrack, now, false).as_deref(),
+            Some("Stops at the end of this track")
+        );
+        assert_eq!(
+            sleep_left(SleepState::EndOfTrack, now, true).as_deref(),
+            Some("Stops at the end of this episode")
+        );
+        assert_eq!(
+            sleep_left(at(0), now, false).as_deref(),
+            Some("Stopping now")
+        );
+        assert_eq!(
+            sleep_left(at(59), now, false).as_deref(),
+            Some("Less than a minute left")
+        );
+        assert_eq!(
+            sleep_left(at(60), now, false).as_deref(),
+            Some("1 min left")
+        );
+        assert_eq!(
+            sleep_left(at(61), now, false).as_deref(),
+            Some("2 min left")
+        );
+        assert_eq!(
+            sleep_left(at(1800), now, false).as_deref(),
+            Some("30 min left")
+        );
+        assert_eq!(
+            sleep_left(at(3600), now, false).as_deref(),
+            Some("1 hr left")
+        );
+        assert_eq!(
+            sleep_left(at(3900), now, false).as_deref(),
+            Some("1 hr 5 min left")
+        );
+        let past = SleepState::At(now - Duration::from_secs(30));
+        assert_eq!(
+            sleep_left(past, now, false).as_deref(),
+            Some("Stopping now")
+        );
+    }
 
     #[test]
     fn writes_speeds_the_way_the_menu_shows_them() {
