@@ -335,6 +335,31 @@ fn invalid(error: &anyhow::Error) -> bool {
     )
 }
 
+async fn fetch_view(
+    api: &Api,
+    user: &User,
+    query: LibraryQuery,
+    offset: u32,
+    reset: LibraryQuery,
+) -> (LibraryQuery, u32, anyhow::Result<LibraryPage>) {
+    let result = fetch(api, user, &query, offset).await;
+    if !result.as_ref().is_err_and(invalid) {
+        return (query, offset, result);
+    }
+    if query.sort.is_some() {
+        let unsorted = LibraryQuery {
+            sort: None,
+            ..query
+        };
+        let result = fetch(api, user, &unsorted, 0).await;
+        if !result.as_ref().is_err_and(invalid) {
+            return (unsorted, 0, result);
+        }
+    }
+    let result = fetch(api, user, &reset, 0).await;
+    (reset, 0, result)
+}
+
 async fn library(
     api: Api,
     user: User,
@@ -342,17 +367,11 @@ async fn library(
     offset: u32,
     request: u64,
 ) -> worker::Event {
-    let (query, offset, result) = match fetch(&api, &user, &query, offset).await {
-        Err(error) if invalid(&error) => {
-            let reset = LibraryQuery {
-                expanded: query.expanded,
-                ..LibraryQuery::default()
-            };
-            let result = fetch(&api, &user, &reset, 0).await;
-            (reset, 0, result)
-        }
-        result => (query, offset, result),
+    let reset = LibraryQuery {
+        expanded: query.expanded.clone(),
+        ..LibraryQuery::default()
     };
+    let (query, offset, result) = fetch_view(&api, &user, query, offset, reset).await;
     if offset == 0
         && let Ok(page) = &result
     {
@@ -374,14 +393,8 @@ async fn grid(
     offset: u32,
     request: u64,
 ) -> worker::Event {
-    let (query, offset, result) = match fetch(&api, &user, &query, offset).await {
-        Err(error) if invalid(&error) => {
-            let reset = LibraryQuery::default();
-            let result = fetch(&api, &user, &reset, 0).await;
-            (reset, 0, result)
-        }
-        result => (query, offset, result),
-    };
+    let (query, offset, result) =
+        fetch_view(&api, &user, query, offset, LibraryQuery::default()).await;
     Event::Grid {
         request,
         query,
