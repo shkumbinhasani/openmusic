@@ -805,6 +805,10 @@ impl SaveTo {
         self.search.update(cx, |input, cx| input.focus(window, cx));
     }
 
+    pub fn uris(&self) -> &[String] {
+        &self.uris
+    }
+
     fn targets(&self, cx: &App) -> Option<Result<Vec<EditTarget>, String>> {
         let app = self.app.upgrade()?;
         app.read(cx).playlists.editable_for(&self.uris).cloned()
@@ -844,7 +848,10 @@ impl SaveTo {
     }
 
     pub fn done(&mut self, cx: &mut Context<Self>) -> bool {
-        let changes = self.changes(cx);
+        let Some(Ok(targets)) = self.targets(cx) else {
+            return self.chosen.is_empty();
+        };
+        let changes = curation_changes(&targets, &self.chosen);
         if changes.is_empty() {
             return true;
         }
@@ -858,7 +865,9 @@ impl SaveTo {
     }
 
     fn new_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.done(cx);
+        if !self.done(cx) {
+            return;
+        }
         let (sources, name) = (self.uris.clone(), self.name.clone());
         let _ = self.app.update(cx, |app, cx| {
             app.create_playlist_from(sources, name, None);

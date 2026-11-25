@@ -70,18 +70,25 @@ pub fn outdated(pushed: Option<&str>, current: Option<&str>) -> bool {
     pushed.is_none() || pushed != current
 }
 
+#[derive(Default)]
 pub struct Editable {
-    pub at: Instant,
     pub result: Option<Result<Vec<EditTarget>, String>>,
+    loaded: Option<Instant>,
+    asked: Option<Instant>,
 }
 
 impl Editable {
     fn fresh(&self) -> bool {
-        let limit = match self.result {
-            None => EDITABLE_WAIT,
-            Some(_) => EDITABLE_FRESH,
-        };
-        self.at.elapsed() < limit
+        self.loaded.is_some_and(|at| at.elapsed() < EDITABLE_FRESH)
+    }
+
+    fn waiting(&self) -> bool {
+        self.asked.is_some_and(|at| at.elapsed() < EDITABLE_WAIT)
+    }
+
+    fn stale(&mut self) {
+        self.loaded = None;
+        self.asked = None;
     }
 }
 
@@ -192,6 +199,51 @@ impl State {
 
     pub fn editable_for(&self, uris: &[String]) -> Option<&Result<Vec<EditTarget>, String>> {
         self.editable.get(uris)?.result.as_ref()
+    }
+
+    fn ask_editable(&mut self, uris: &[String]) -> bool {
+        if uris.is_empty() {
+            return false;
+        }
+        if let Some(entry) = self.editable.get_mut(uris) {
+            if entry.fresh() || entry.waiting() {
+                return false;
+            }
+            entry.asked = Some(Instant::now());
+            return true;
+        }
+        if self.editable.len() >= EDITABLE_KEEP
+            && let Some(oldest) = self
+                .editable
+                .iter()
+                .min_by_key(|(_, entry)| entry.loaded.max(entry.asked))
+                .map(|(key, _)| key.clone())
+        {
+            self.editable.remove(&oldest);
+        }
+        self.editable.insert(
+            uris.to_vec(),
+            Editable {
+                asked: Some(Instant::now()),
+                ..Editable::default()
+            },
+        );
+        true
+    }
+
+    fn store_editable(&mut self, uris: Vec<String>, result: Result<Vec<EditTarget>, String>) {
+        let entry = self.editable.entry(uris).or_default();
+        if result.is_err() && matches!(entry.result, Some(Ok(_))) {
+            entry.asked = Some(Instant::now());
+            return;
+        }
+        entry.result = Some(result);
+        entry.loaded = Some(Instant::now());
+        entry.asked = None;
+    }
+
+    fn stale_editable(&mut self) {
+        self.editable.values_mut().for_each(Editable::stale);
     }
 
     pub fn curates(&self, uris: &[String]) -> HashMap<String, bool> {
@@ -838,7 +890,7 @@ impl OpenMusic {
         if uris.is_empty() {
             return;
         }
-        self.playlists.editable.clear();
+        self.playlists.stale_editable();
         self.write(
             Write::Add {
                 uri: target,
@@ -954,7 +1006,7 @@ impl OpenMusic {
                 .total
                 .saturating_sub(before - collection.tracks.len());
         }
-        self.playlists.editable.clear();
+        self.playlists.stale_editable();
         let done = format!("Removed from {}.", info.name);
         self.write(
             Write::Remove {
@@ -995,33 +1047,9 @@ impl OpenMusic {
     }
 
     pub fn request_editable(&mut self, uris: &[String]) {
-        if uris.is_empty()
-            || self
-                .playlists
-                .editable
-                .get(uris)
-                .is_some_and(Editable::fresh)
-        {
-            return;
+        if self.playlists.ask_editable(uris) {
+            self.send(Command::Editable(uris.to_vec()));
         }
-        if self.playlists.editable.len() >= EDITABLE_KEEP
-            && let Some(oldest) = self
-                .playlists
-                .editable
-                .iter()
-                .min_by_key(|(_, editable)| editable.at)
-                .map(|(key, _)| key.clone())
-        {
-            self.playlists.editable.remove(&oldest);
-        }
-        self.playlists.editable.insert(
-            uris.to_vec(),
-            Editable {
-                at: Instant::now(),
-                result: None,
-            },
-        );
-        self.send(Command::Editable(uris.to_vec()));
     }
 
     pub fn open_save_to(
@@ -1038,11 +1066,10 @@ impl OpenMusic {
         if uris.is_empty() {
             return;
         }
-        if let Some(stale) = self.playlists.editable.get(&uris)
-            && stale.result.is_some()
-            && !stale.fresh()
+        if let Some(entry) = self.playlists.editable.get_mut(&uris)
+            && !entry.fresh()
         {
-            self.playlists.editable.remove(&uris);
+            entry.result = None;
         }
         self.request_editable(&uris);
         let app = cx.weak_entity();
@@ -1069,7 +1096,7 @@ impl OpenMusic {
             _ => None,
         }
         .unwrap_or_else(|| "Changes saved.".to_owned());
-        self.playlists.editable.clear();
+        self.playlists.stale_editable();
         self.write(Write::Curate { items, changes }, Some(done));
     }
 
@@ -1276,7 +1303,7 @@ impl OpenMusic {
 impl OpenMusic {
     pub fn on_playlist_push(&mut self, push: Push) {
         self.playlists.pushes.seen += 1;
-        self.playlists.editable.clear();
+        self.playlists.stale_editable();
         match push {
             Push::Rootlist { user, revision } => {
                 if self.playlists.user.as_deref().is_some_and(|me| me != user) {
@@ -1347,7 +1374,7 @@ impl OpenMusic {
             return;
         }
         self.playlists.refreshed = Some(Instant::now());
-        self.playlists.editable.clear();
+        self.playlists.stale_editable();
         self.send(Command::Rootlist);
         if let Some((_, Ok(collection))) = &self.playlists.collection
             && collection.kind == "PLAYLIST"
@@ -1572,13 +1599,7 @@ pub fn on_event(
             app.navigate(Page::Collection(uri));
         }
         Event::Editable { uris, result } => {
-            app.playlists.editable.insert(
-                uris.clone(),
-                Editable {
-                    at: Instant::now(),
-                    result: Some(result),
-                },
-            );
+            app.playlists.store_editable(uris.clone(), result);
             let newer = app
                 .playlists
                 .wanted
@@ -1623,7 +1644,9 @@ pub fn on_event(
                     }
                 }
             }
-            app.playlists.editable.retain(|uris, _| *uris != items);
+            if let Some(entry) = app.playlists.editable.get_mut(&items) {
+                entry.stale();
+            }
             if let Some(done) = done {
                 app.show_toast(done, None);
             }
@@ -2031,8 +2054,9 @@ pub fn debug(
             }
         }
         ("save-to", ["done"]) => {
-            if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade) {
-                sheet.update(cx, |sheet, cx| sheet.done(cx));
+            if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade)
+                && sheet.update(cx, |sheet, cx| sheet.done(cx))
+            {
                 window.close_dialog(cx);
             }
         }
@@ -2315,6 +2339,10 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
         app.request_editable(&source.uris);
         app.playlists.menu_source = Some(source);
     }
+    if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade) {
+        let uris = sheet.read(cx).uris().to_vec();
+        app.request_editable(&uris);
+    }
     if app.playlists.sentinel.take()
         && !app.playlists.loading_more
         && let Some((uri, Ok(collection))) = &app.playlists.collection
@@ -2399,6 +2427,57 @@ mod tests {
             Received::Shown
         );
         assert_eq!(shown(&state), Some(Ok(("Road trip".into(), 251))));
+    }
+
+    fn target(uri: &str, curates: bool) -> EditTarget {
+        EditTarget {
+            uri: uri.into(),
+            name: uri.into(),
+            kind: TargetKind::Playlist,
+            curates,
+            pinned: false,
+            cover: None,
+            folder: None,
+        }
+    }
+
+    fn curated(state: &State, uris: &[String]) -> Option<Vec<bool>> {
+        match state.editable_for(uris)? {
+            Ok(targets) => Some(targets.iter().map(|target| target.curates).collect()),
+            Err(_) => None,
+        }
+    }
+
+    #[test]
+    fn keeps_the_save_sheet_list_while_it_refreshes() {
+        let mut state = State::default();
+        let song = vec!["spotify:track:t".to_owned()];
+        assert!(state.ask_editable(&song));
+        assert!(!state.ask_editable(&song));
+        state.store_editable(song.clone(), Ok(vec![target(LIST, false)]));
+        assert!(!state.ask_editable(&song));
+        state.stale_editable();
+        assert_eq!(curated(&state, &song), Some(vec![false]));
+        assert!(state.ask_editable(&song));
+        assert!(!state.ask_editable(&song));
+        state.store_editable(song.clone(), Err("Couldn’t load your playlists.".into()));
+        assert_eq!(curated(&state, &song), Some(vec![false]));
+        assert!(!state.ask_editable(&song));
+        state.store_editable(song.clone(), Ok(vec![target(LIST, true)]));
+        assert_eq!(curated(&state, &song), Some(vec![true]));
+        assert!(!state.ask_editable(&[]));
+    }
+
+    #[test]
+    fn caches_a_failed_first_list_like_any_answer() {
+        let mut state = State::default();
+        let song = vec!["spotify:track:t".to_owned()];
+        assert!(state.ask_editable(&song));
+        state.store_editable(song.clone(), Err("Couldn’t load your playlists.".into()));
+        assert!(matches!(state.editable_for(&song), Some(Err(_))));
+        assert!(!state.ask_editable(&song));
+        state.stale_editable();
+        assert!(state.ask_editable(&song));
     }
 
     #[test]
