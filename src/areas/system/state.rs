@@ -17,7 +17,7 @@ use super::{
     native_window,
     notify::{self, Authorization, Seen, TrackNote, Watch},
     now_playing::{self, Snapshot},
-    shortcuts,
+    shortcuts, view,
     worker::Event,
 };
 use crate::{
@@ -80,6 +80,8 @@ pub struct State {
     pub watch: Watch,
     pub notes: u64,
     pub notify_asked: bool,
+    pub on_settings: bool,
+    pub was_active: bool,
 }
 
 impl State {
@@ -271,6 +273,45 @@ impl OpenMusic {
         {
             self.system.notes += 1;
         }
+    }
+
+    pub fn set_mini_on_minimize(&mut self, on: bool, cx: &mut App) {
+        self.update_settings(|settings| settings.system.mini_player_when_minimized = on);
+        self.sync_system(cx);
+    }
+
+    fn refresh_settings_status(&mut self) {
+        notify::refresh_status();
+    }
+
+    pub fn settings_summary(&self) -> String {
+        let prefs = &self.settings.system;
+        let status = notify::status();
+        [
+            format!(
+                "startup mini_on_minimize={}",
+                prefs.mini_player_when_minimized
+            ),
+            format!(
+                "notifications shown={} status={} notify={} denied={}",
+                notify::available(),
+                status.name(),
+                prefs.notify_on_track_change,
+                status == Authorization::Denied
+            ),
+        ]
+        .join("\n")
+    }
+
+    fn watch_settings_page(&mut self, cx: &mut Context<Self>) {
+        let open = self.page == Page::Settings;
+        let active = native_window::state().app_active;
+        if open && (!self.system.on_settings || (active && !self.system.was_active)) {
+            self.refresh_settings_status();
+            cx.notify();
+        }
+        self.system.on_settings = open;
+        self.system.was_active = active;
     }
 
     fn window_miniaturized(&mut self) {
@@ -615,6 +656,27 @@ pub fn debug(
                 ),
             );
         }
+        "system-settings" => {
+            let (name, value) = rest.split_once(' ').unwrap_or((rest, ""));
+            let on = match value.trim() {
+                "on" => Some(true),
+                "off" => Some(false),
+                _ => None,
+            };
+            match (name, on) {
+                ("", _) => {}
+                ("mini", Some(on)) => app.set_mini_on_minimize(on, cx),
+                ("notify", Some(on)) => {
+                    if on != app.settings.system.notify_on_track_change && notify::available() {
+                        app.toggle_notifications(cx);
+                    }
+                }
+                _ => return false,
+            }
+            app.refresh_settings_status();
+            cx.notify();
+            write(directory, "system-settings.txt", app.settings_summary());
+        }
         "window" => {
             match rest {
                 "hide" => app.close_main_window(window, cx),
@@ -736,10 +798,8 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         });
     }
     route(cx, handle, |_: &ToggleMiniOnMinimize, app, _, cx| {
-        app.update_settings(|settings| {
-            settings.system.mini_player_when_minimized = !settings.system.mini_player_when_minimized
-        });
-        app.sync_system(cx);
+        let on = !app.settings.system.mini_player_when_minimized;
+        app.set_mini_on_minimize(on, cx);
     });
     cx.on_action(|_: &About, _| menu_bar::about());
     cx.on_action(|_: &HideApp, cx| cx.hide());
@@ -765,7 +825,8 @@ pub fn on_press(
         mini_player::CLOSE => app.close_mini_player(),
         notify::OPEN => app.act(Intent::ShowMainWindow, window, cx),
         notify::STATUS => app.notification_status(cx),
-        super::view::MINI_BUTTON => app.act(Intent::ToggleMiniPlayer, window, cx),
+        view::NOTIFICATION_SETTINGS => cx.open_url(notify::SETTINGS_URL),
+        view::MINI_BUTTON => app.act(Intent::ToggleMiniPlayer, window, cx),
         _ => return false,
     }
     app.sync_system(cx);
@@ -784,6 +845,7 @@ pub fn row_dropped(
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     app.sync_system(cx);
+    app.watch_settings_page(cx);
 }
 
 #[cfg(test)]
