@@ -1,4 +1,4 @@
-pub use native::{close, hide, install, show, state, width};
+pub use native::{close, hide, install, order_front, show, state, width};
 
 pub const REOPEN: &str = "system-reopen";
 pub const MINIATURIZED: &str = "system-miniaturized";
@@ -211,6 +211,12 @@ mod native {
         window.makeKeyAndOrderFront(None);
     }
 
+    pub fn order_front() {
+        if let Some(window) = window().filter(|window| window.isVisible()) {
+            window.orderFront(None);
+        }
+    }
+
     pub fn width() -> f32 {
         window().map_or(0., |window| window.frame().size.width as f32)
     }
@@ -249,6 +255,8 @@ mod native {
     pub fn close() {}
 
     pub fn show() {}
+
+    pub fn order_front() {}
 
     pub fn state() -> WindowState {
         WindowState::default()

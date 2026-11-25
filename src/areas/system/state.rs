@@ -937,7 +937,10 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    cx.on_action(|_: &BringAllToFront, _| menu_bar::arrange_in_front());
+    cx.on_action(|_: &BringAllToFront, _| {
+        menu_bar::arrange_in_front();
+        native_window::order_front();
+    });
 }
 
 pub fn on_press(
