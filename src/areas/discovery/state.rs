@@ -1,14 +1,28 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use gpui::{App, Context, Window};
 use gpui_component::input::InputEvent;
-use spotify_client::{Track, catalog::Artist, engine::NowPlaying};
+use spotify_client::{
+    Track,
+    catalog::Artist,
+    search::{SearchKind, SearchResults},
+};
 
-use super::worker::{Command, Discovery, Event, Mix};
+use super::{
+    artist::{ArtistView, MORE_KEY, PLAY_KEY},
+    browse::{BrowseAllState, BrowseState, Kept, SectionState},
+    home::HomeFeed,
+    search::{Keys, Recent, Suggest, TabState},
+    worker::{Command, Event},
+};
 use crate::{
-    app::{OpenMusic, Page, Session, intent::Intent},
+    app::{OpenMusic, Page, intent::Intent},
     menus::{self, FocusSearch, Handle},
     ui::{
+        components::Sentinel,
         menu::Target,
         tracks::{RowDrag, RowDrop},
     },
@@ -90,30 +104,35 @@ impl SectionSource {
 
 #[derive(Default)]
 pub struct State {
-    pub results: Vec<Track>,
-    pub home: Discovery,
-    pub newest_mix: Option<Mix>,
-    pub last_seed: Option<String>,
-    pub discovery_pending: bool,
+    pub feed: HomeFeed,
+    pub browse_all: BrowseAllState,
+    pub browse_pages: Kept<BrowseState>,
+    pub sections: Kept<SectionState>,
+    pub more_sentinel: Sentinel,
     pub artist: Option<(String, Result<Artist, String>)>,
+    pub artist_view: ArtistView,
     pub search_query: String,
     pub search_pending: bool,
-    pub search_error: Option<String>,
+    pub search: Option<Result<Box<SearchResults>, String>>,
+    pub search_tabs: HashMap<SearchKind, TabState>,
+    pub search_sentinel: Sentinel,
+    pub suggest: Suggest,
+    pub recent: Recent,
+    pub search_keys: Keys,
 }
 
 impl State {
-    pub fn station(&self) -> Option<&Mix> {
-        self.newest_mix.as_ref().or(self.home.mix.as_ref())
+    pub fn artist_tracks(&self) -> &[Track] {
+        match &self.artist {
+            Some((_, Ok(artist))) => &artist.top_tracks,
+            _ => &[],
+        }
     }
 
     pub fn covers(&self, urls: &mut HashSet<String>) {
-        let tracks = self
-            .results
-            .iter()
-            .chain(&self.home.tracks)
-            .chain(self.home.mix.iter().flat_map(|mix| &mix.tracks))
-            .chain(self.newest_mix.iter().flat_map(|mix| &mix.tracks));
-        urls.extend(tracks.filter_map(|track| track.cover.clone()));
+        self.search_covers(urls);
+        urls.extend(self.feed.images());
+        urls.extend(self.browse_images());
         if let Some((_, Ok(artist))) = &self.artist {
             urls.extend(artist.image.clone());
             urls.extend(
@@ -138,59 +157,36 @@ impl State {
     }
 }
 
-impl OpenMusic {
-    pub fn search(&mut self, cx: &mut Context<Self>) {
-        let value = self.input.read(cx).value();
-        let query = value.trim();
-        if query.is_empty()
-            || self.discovery.search_pending
-            || !matches!(self.session, Session::Connected)
-        {
-            return;
-        }
-        self.navigate(Page::Search(SearchTab::All));
-        self.discovery.search_query = query.to_owned();
-        self.discovery.search_pending = true;
-        self.discovery.search_error = None;
-        self.discovery.results.clear();
-        self.send(Command::Search(query.to_owned()));
-        cx.notify();
-    }
-
-    pub fn recommend_from(&mut self, now: &NowPlaying) {
-        if let Some(track) = &now.track
-            && track.is_track()
-            && !track.title.is_empty()
-            && self.discovery.last_seed.as_ref() != Some(&track.uri)
-        {
-            self.discovery.last_seed = Some(track.uri.clone());
-            self.send(Command::Recommend(Box::new(track.clone())));
-        }
-    }
-}
-
 pub fn load(app: &mut OpenMusic, page: &Page) {
-    if let Page::Artist(uri) = page
-        && app
-            .discovery
-            .artist
-            .as_ref()
-            .is_none_or(|(loaded, _)| loaded != uri)
-    {
-        app.discovery.artist = None;
-        app.send(Command::Artist(uri.clone()));
+    match page {
+        Page::Home => app.load_home(false),
+        Page::Search(tab) => app.open_search_tab(*tab),
+        Page::Browse(uri) => app.load_browse(uri),
+        Page::Section { uri, source } => app.load_section(uri, *source),
+        Page::Artist(uri) => {
+            app.discovery.artist_view.show(uri);
+            app.lookup_saved([uri.clone()]);
+            let loaded = app
+                .discovery
+                .artist
+                .as_ref()
+                .is_some_and(|(loaded, result)| loaded == uri && result.is_ok());
+            if !loaded {
+                app.discovery.artist = None;
+                app.send(Command::Artist(uri.clone()));
+            }
+        }
+        _ => {}
     }
 }
 
 pub fn on_input(
     app: &mut OpenMusic,
     event: &InputEvent,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) {
-    if let InputEvent::PressEnter { .. } = event {
-        app.search(cx);
-    }
+    app.search_input(event, window, cx);
 }
 
 pub fn on_event(
@@ -200,65 +196,76 @@ pub fn on_event(
     cx: &mut Context<OpenMusic>,
 ) {
     match event {
-        Event::SearchDone(result) => {
-            app.discovery.search_pending = false;
-            match result {
-                Ok(tracks) => app.discovery.results = tracks,
-                Err(error) => app.discovery.search_error = Some(error),
+        Event::Discovered(cached) => {
+            if let Some(home) = cached.home {
+                app.restore_home(home);
+            }
+            if let Some(all) = cached.browse {
+                app.restore_browse_all(all);
             }
         }
-        Event::DirectTrack(result) => {
-            app.discovery.search_pending = false;
-            match result {
-                Ok(track) => {
-                    app.discovery.results = vec![track.clone()];
-                    app.play(&[track], 0, cx);
-                }
-                Err(error) => app.discovery.search_error = Some(error),
-            }
-        }
-        Event::Discovered(home) => {
-            app.discovery.discovery_pending = false;
-            app.discovery.home = home;
-        }
-        Event::Recommendations(mix) => {
-            if mix.is_some() {
-                app.discovery.newest_mix = mix;
-            }
-        }
+        Event::Home { facet, result } => app.on_home(facet, result),
+        Event::BrowseAll(result) => app.on_browse_all(result),
+        Event::Browse {
+            uri,
+            offset,
+            result,
+        } => app.on_browse(uri, offset, result),
+        Event::Section {
+            uri,
+            source,
+            offset,
+            result,
+        } => app.on_section(uri, source, offset, result),
         Event::Artist { uri, result } => app.discovery.artist = Some((uri, result)),
+        event => app.on_search_event(event, cx),
     }
 }
 
-pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
-    app.discovery.discovery_pending = true;
-    app.send(Command::Discover);
+pub fn connected(app: &mut OpenMusic, _window: &mut Window, cx: &mut Context<OpenMusic>) {
+    app.discovery.feed.pending = None;
+    app.discovery.browse_all.pending = false;
+    app.load_home(true);
+    app.watch_search_keys(cx);
+    app.discovery.recent.pending = false;
+    app.load_recent_searches(true);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
-    app.discovery.search_error = None;
-    app.discovery.results.clear();
-    app.discovery.home = Discovery::default();
-    app.discovery.newest_mix = None;
-    app.discovery.last_seed = None;
-    app.discovery.discovery_pending = false;
+    app.discovery.reset_search();
+    app.discovery.feed = HomeFeed::default();
+    app.discovery.browse_all = BrowseAllState::default();
+    app.discovery.browse_pages.clear();
+    app.discovery.sections.clear();
     app.discovery.artist = None;
-    app.discovery.search_pending = false;
+    app.discovery.artist_view = ArtistView::default();
 }
 
 pub fn debug(
-    _app: &mut OpenMusic,
-    _verb: &str,
-    _rest: &str,
-    _directory: &Path,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    app: &mut OpenMusic,
+    verb: &str,
+    rest: &str,
+    directory: &Path,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    app.search_debug(verb, rest, directory, window, cx)
+        || app.feed_debug(verb, rest, directory, window, cx)
+        || app.artist_debug(verb, rest, directory)
 }
 
-pub fn state_fragment(_app: &OpenMusic) -> String {
-    String::new()
+pub fn state_fragment(app: &OpenMusic) -> String {
+    [
+        app.discovery
+            .search_fragment(&app.page, app.search_dropdown_visible()),
+        app.home_fragment(),
+        app.browse_fragment(),
+        app.artist_fragment(),
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
@@ -274,19 +281,9 @@ pub fn on_press(
     cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
-        "play-station" => {
-            if let Some(mix) = app.discovery.station() {
-                let tracks = mix.tracks.clone();
-                app.play(&tracks, 0, cx);
-            }
-        }
-        "play-artist" => {
-            if let Some((uri, Ok(artist))) = &app.discovery.artist {
-                let (uri, tracks) = (uri.clone(), artist.top_tracks.clone());
-                app.play_context(&uri, &tracks, 0, cx);
-            }
-        }
-        "more-artist" => {
+        PLAY_KEY => app.play_artist(cx),
+        "search-top-play" => app.play_top_result(cx),
+        MORE_KEY => {
             if let Page::Artist(uri) = &app.page
                 && let Some(target) = Target::for_uri(uri)
             {
@@ -308,4 +305,11 @@ pub fn row_dropped(
     false
 }
 
-pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if app.discovery.search_sentinel.take() && app.more_search_results() {
+        cx.notify();
+    }
+    if app.discovery.more_sentinel.take() && app.more_page_results() {
+        cx.notify();
+    }
+}

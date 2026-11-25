@@ -5,7 +5,7 @@ use gpui::{
     img, prelude::*, px, rgb, rgba,
 };
 use spotify_client::{
-    Track,
+    Track, connect,
     entity::{Card, Kind},
 };
 
@@ -21,6 +21,36 @@ use crate::{
 };
 
 const CARD_TEXT_HEIGHT: f32 = 50.;
+const CARD_GROUP: &str = "card";
+const CARD_RADIUS: f32 = 12.;
+const PLAY_INSET: f32 = 8.;
+
+pub type CardOpen = Rc<dyn Fn(&mut OpenMusic, &Card, &mut Window, &mut Context<OpenMusic>)>;
+
+#[derive(Clone)]
+pub struct CardOptions {
+    pub on_use: Option<CardOpen>,
+    pub origin: &'static str,
+}
+
+impl Default for CardOptions {
+    fn default() -> Self {
+        Self::from(connect::ORIGIN)
+    }
+}
+
+impl CardOptions {
+    pub fn from(origin: &'static str) -> Self {
+        Self {
+            on_use: None,
+            origin,
+        }
+    }
+}
+
+pub fn play_side(card_side: Pixels) -> f32 {
+    (f32::from(card_side) * 0.24).clamp(34., 48.)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Face {
@@ -186,36 +216,77 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.card_grid_with(
+            cards,
+            prefix,
+            card_side,
+            &CardOptions::default(),
+            palette,
+            cx,
+        )
+    }
+
+    pub fn card_grid_with(
+        &self,
+        cards: &[Card],
+        prefix: &'static str,
+        card_side: Pixels,
+        options: &CardOptions,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_wrap()
             .gap_4()
             .children(cards.iter().enumerate().map(|(index, card)| {
-                let image = card.image.as_ref().and_then(|url| self.covers.get(url));
                 let radius = if round_kind(card.kind) {
                     card_side / 2.
                 } else {
-                    px(12.)
+                    px(CARD_RADIUS)
                 };
                 let page = page_for(&card.uri);
                 let target = card_target(card);
+                let on_use = options.on_use.clone();
+                let opened = card.clone();
                 let subtitle = div()
                     .text_size(px(12.))
                     .text_color(rgb(palette.muted))
                     .truncate()
                     .child(card.subtitle.clone());
+                let play =
+                    self.play_bubble(CARD_GROUP, card, options, play_side(card_side), palette, cx);
                 div()
                     .id((prefix, index))
+                    .group(CARD_GROUP)
                     .w(card_side)
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .cursor_pointer()
+                    .when(page.is_some(), |card| card.cursor_pointer())
                     .when(!card.playable, |card| card.opacity(0.5))
-                    .child(artwork(image, card_side, radius, palette).shadow_md())
+                    .child(
+                        div()
+                            .relative()
+                            .size(card_side)
+                            .child(self.card_art(card, card_side, radius, palette).shadow_md())
+                            .children(play.map(|play| {
+                                play.absolute().right(px(PLAY_INSET)).bottom(px(PLAY_INSET))
+                            })),
+                    )
                     .child(
                         div()
                             .w_full()
+                            .when_some(card.reason.clone(), |text, reason| {
+                                text.child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(palette.accent))
+                                        .truncate()
+                                        .child(reason),
+                                )
+                            })
                             .child(
                                 div()
                                     .text_size(px(13.))
@@ -239,11 +310,15 @@ impl OpenMusic {
                                 }
                             }),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(page) = page.clone() {
-                            this.navigate(page);
-                            cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let Some(page) = page.clone() else {
+                            return;
+                        };
+                        if let Some(on_use) = &on_use {
+                            on_use(this, &opened, window, cx);
                         }
+                        this.navigate(page);
+                        cx.notify();
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -260,6 +335,30 @@ impl OpenMusic {
         cards: &[Card],
         prefix: &'static str,
         card_side: Pixels,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.shelf_with(
+            title,
+            show_all,
+            cards,
+            prefix,
+            card_side,
+            &CardOptions::default(),
+            palette,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn shelf_with(
+        &self,
+        title: impl Into<SharedString>,
+        show_all: Option<Page>,
+        cards: &[Card],
+        prefix: &'static str,
+        card_side: Pixels,
+        options: &CardOptions,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -304,7 +403,7 @@ impl OpenMusic {
                     }),
             )
             .child(
-                self.card_grid(cards, prefix, card_side, palette, cx)
+                self.card_grid_with(cards, prefix, card_side, options, palette, cx)
                     .max_h(card_side + px(CARD_TEXT_HEIGHT))
                     .overflow_hidden(),
             )
@@ -318,6 +417,18 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.hero_card_with(card, prefix, play, None, palette, cx)
+    }
+
+    pub fn hero_card_with(
+        &self,
+        card: &Card,
+        prefix: &'static str,
+        play: Option<&'static str>,
+        open: Option<CardOpen>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let image = card.image.as_ref().and_then(|url| self.covers.get(url));
         let side = px(92.);
         let radius = if round_kind(card.kind) {
@@ -327,6 +438,7 @@ impl OpenMusic {
         };
         let page = page_for(&card.uri);
         let target = card_target(card);
+        let open = open.map(|open| (open, card.clone()));
         div()
             .id(prefix)
             .flex()
@@ -337,11 +449,14 @@ impl OpenMusic {
             .bg(rgba(palette.press))
             .cursor_pointer()
             .when(!card.playable, |hero| hero.opacity(0.5))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some((open, card)) = &open {
+                    open(this, card, window, cx);
+                }
                 if let Some(page) = page.clone() {
                     this.navigate(page);
-                    cx.notify();
                 }
+                cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,
@@ -396,13 +511,29 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        let chips: Vec<(SharedString, bool)> = chips
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (label.clone(), selected == Some(index)))
+            .collect();
+        self.chip_strip(key, &chips, pick, palette, cx)
+    }
+
+    pub fn chip_strip(
+        &self,
+        key: &'static str,
+        chips: &[(SharedString, bool)],
+        pick: impl Fn(&mut OpenMusic, usize, &mut Window, &mut Context<OpenMusic>) + 'static,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let pick = Rc::new(pick);
         div()
             .flex()
             .flex_wrap()
             .gap_2()
-            .children(chips.iter().enumerate().map(|(index, label)| {
-                let chosen = selected == Some(index);
+            .children(chips.iter().enumerate().map(|(index, (label, chosen))| {
+                let chosen = *chosen;
                 let pick = pick.clone();
                 let chip = if chosen {
                     div()
@@ -460,6 +591,15 @@ mod tests {
         assert_eq!(initial("  @émile"), "É");
         assert_eq!(initial(""), "?");
         assert_eq!(tint("same"), tint("same"));
+    }
+
+    #[test]
+    fn play_buttons_scale_with_the_card() {
+        assert_eq!(play_side(px(110.)), 34.);
+        assert_eq!(play_side(px(175.)), 42.);
+        assert_eq!(play_side(px(260.)), 48.);
+        assert_eq!(CardOptions::default().origin, connect::ORIGIN);
+        assert!(CardOptions::from("home").on_use.is_none());
     }
 
     #[test]

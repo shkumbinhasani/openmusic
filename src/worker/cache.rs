@@ -50,7 +50,7 @@ pub fn save_playlists(playlists: &[Playlist]) {
 }
 
 pub fn save_discovery(discovery: &Discovery) {
-    if discovery.tracks.is_empty() && discovery.mix.is_none() {
+    if discovery.is_empty() {
         return;
     }
     let Ok(copy) = serde_json::to_value(discovery).and_then(serde_json::from_value) else {

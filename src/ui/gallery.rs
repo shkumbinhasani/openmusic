@@ -129,17 +129,14 @@ pub fn panel(app: &OpenMusic, palette: Palette) -> Option<Panel> {
 }
 
 fn sample_tracks(app: &OpenMusic) -> Vec<Track> {
-    let mut tracks: Vec<Track> = [
-        app.discovery.results.as_slice(),
-        app.discovery.home.tracks.as_slice(),
-    ]
-    .into_iter()
-    .find(|tracks| !tracks.is_empty())
-    .unwrap_or_default()
-    .iter()
-    .take(4)
-    .cloned()
-    .collect();
+    let mut tracks: Vec<Track> = [app.discovery.search_tracks(), app.discovery.artist_tracks()]
+        .into_iter()
+        .find(|tracks| !tracks.is_empty())
+        .unwrap_or_default()
+        .iter()
+        .take(4)
+        .cloned()
+        .collect();
     let now = now_ms();
     let ages = [5 * 60_000, 3 * 3_600_000, 4 * 86_400_000, 400 * 86_400_000];
     for (track, age) in tracks.iter_mut().zip(ages) {
