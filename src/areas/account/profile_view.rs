@@ -8,7 +8,7 @@ use spotify_client::{
 };
 
 use super::{
-    profile::{FollowFilter, ProfileList},
+    profile::{BLOCKED_NOTE, FollowFilter, ProfileList},
     state::ProfileListKind,
     worker::{Listing, ProfileView},
 };
@@ -25,6 +25,7 @@ use crate::{
 
 pub const MORE_PROFILE: &str = "more-profile";
 pub const FOLLOW_PROFILE: &str = "profile-follow";
+pub const UNBLOCK_PROFILE: &str = "profile-unblock";
 const CARD_TEXT: f32 = 50.;
 const SHELF_LIMIT: usize = 12;
 
@@ -272,6 +273,8 @@ impl OpenMusic {
             .collect::<Vec<_>>();
         let target = Target::User { uri: uri.clone() };
         let actions = self.profile_actions(view, palette, cx);
+        let blocked = !profile.is_current_user
+            && self.account.profiles.known_blocking(&profile.uri) == Some(true);
         div()
             .flex()
             .items_center()
@@ -318,6 +321,14 @@ impl OpenMusic {
                                 .children(stats),
                         )
                     })
+                    .when(blocked, |column| {
+                        column.child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(rgb(palette.muted))
+                                .child(BLOCKED_NOTE),
+                        )
+                    })
                     .when_some(actions, |column, actions| column.child(actions)),
             )
     }
@@ -358,6 +369,9 @@ impl OpenMusic {
         let profile = &view.profile;
         if profile.is_current_user || self.is_own_profile(&profile.uri) {
             return None;
+        }
+        if self.account.profiles.known_blocking(&profile.uri) == Some(true) {
+            return Some(self.text_control(UNBLOCK_PROFILE, "Unblock", false, palette, cx));
         }
         let following = self
             .account

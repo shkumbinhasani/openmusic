@@ -7,7 +7,7 @@ use spotify_client::account::{AccountInfo, Explicit};
 
 use super::{
     profile::{self, Profiles},
-    profile_view::{FOLLOW_PROFILE, MORE_PROFILE},
+    profile_view::{FOLLOW_PROFILE, MORE_PROFILE, UNBLOCK_PROFILE},
     worker::{Command, Event},
 };
 use crate::{
@@ -483,6 +483,8 @@ pub fn on_event(
         Event::Followed { states, message } => profile::on_followed(app, states, message),
         Event::FollowFailed { uris, message } => profile::on_follow_failed(app, uris, message),
         Event::FollowState(states) => app.account.profiles.learn_following(states),
+        Event::Blocked { uri, block, state } => profile::on_blocked(app, uri, block, state),
+        Event::BlockState(states) => app.account.profiles.learn_blocking(states),
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -548,8 +550,8 @@ pub fn debug(
             let _ = std::fs::write(directory.join("account.txt"), text);
         }
         "account-menu" => app.open_account_menu(),
-        "profile" | "profiles" | "follow-user" | "follows" => {
-            return profile::debug(app, verb, rest, directory);
+        "profile" | "profiles" | "follow-user" | "follows" | "block" | "block-ask" | "blocking" => {
+            return profile::debug(app, verb, rest, directory, window, cx);
         }
         "cache" => {
             match rest {
@@ -612,9 +614,10 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         .as_ref()
         .map_or("none", |(uri, _)| uri.as_str());
     format!(
-        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={}",
+        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={} blocks_pending={}",
         app.language(),
-        app.account.profiles.pending.len()
+        app.account.profiles.pending.len(),
+        app.account.profiles.block_pending.len()
     )
 }
 
@@ -653,6 +656,11 @@ pub fn on_press(
             if let Page::Profile(uri) = &app.page {
                 let target = Target::User { uri: uri.clone() };
                 app.open_menu_under(target, MORE_PROFILE);
+            }
+        }
+        UNBLOCK_PROFILE => {
+            if let Page::Profile(uri) = &app.page {
+                app.set_blocking(uri.clone(), false);
             }
         }
         _ => return false,

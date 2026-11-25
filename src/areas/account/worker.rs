@@ -9,7 +9,7 @@ use spotify_client::{
 };
 
 use super::state::{AccountPrefs, ProfileListKind, chosen_language, system_language};
-use crate::worker::{Ctx, Mutation, cache};
+use crate::worker::{Ctx, Mutation, User, cache};
 
 const SECOND_LOOK: Duration = Duration::from_secs(5);
 const LOOKUP_BATCH: usize = 50;
@@ -30,6 +30,11 @@ pub enum Command {
         follow: bool,
     },
     FollowLookup(Vec<String>),
+    Block {
+        uri: String,
+        block: bool,
+    },
+    BlockLookup(Vec<String>),
 }
 
 pub struct ProfileView {
@@ -37,6 +42,7 @@ pub struct ProfileView {
     pub top: Option<TopContent>,
     pub followers: Vec<ProfileRef>,
     pub following: Vec<ProfileRef>,
+    pub blocking: Option<bool>,
 }
 
 impl ProfileView {
@@ -118,6 +124,12 @@ pub enum Event {
         message: String,
     },
     FollowState(Vec<(String, bool)>),
+    Blocked {
+        uri: String,
+        block: bool,
+        state: Option<bool>,
+    },
+    BlockState(Vec<(String, bool)>),
 }
 
 impl Event {
@@ -137,7 +149,9 @@ impl Event {
             | Self::ProfileList { .. }
             | Self::Followed { .. }
             | Self::FollowFailed { .. }
-            | Self::FollowState(_) => Vec::new(),
+            | Self::FollowState(_)
+            | Self::Blocked { .. }
+            | Self::BlockState(_) => Vec::new(),
         }
     }
 }
@@ -148,9 +162,10 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Language(language) => apply_language(language.as_deref(), ctx),
         Command::CacheSize => ctx.tasks.spawn_keyed("cache-size", cache_size(false)),
         Command::ClearCache => ctx.tasks.spawn(cache_size(true)),
-        Command::Profile(uri) => ctx
-            .tasks
-            .spawn_keyed("profile", profile_view(ctx.api.clone(), uri)),
+        Command::Profile(uri) => ctx.tasks.spawn_keyed(
+            "profile",
+            profile_view(ctx.api.clone(), ctx.user.clone(), uri),
+        ),
         Command::ProfileList { uri, kind, offset } => ctx.tasks.spawn_keyed(
             "profile-list",
             profile_list(ctx.api.clone(), uri, kind, offset),
@@ -163,6 +178,17 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             }));
         }
         Command::FollowLookup(uris) => ctx.tasks.spawn(follow_lookup(ctx.api.clone(), uris)),
+        Command::Block { uri, block } => {
+            let keys = vec![format!("block:{uri}")];
+            let (api, user) = (ctx.api.clone(), ctx.user.clone());
+            ctx.writes.push(Mutation::new(keys, async move {
+                Ok(block_user(api, user, uri, block).await)
+            }));
+        }
+        Command::BlockLookup(uris) => {
+            ctx.tasks
+                .spawn(block_lookup(ctx.api.clone(), ctx.user.clone(), uris))
+        }
     }
 }
 
@@ -222,8 +248,8 @@ fn missing(error: &anyhow::Error) -> bool {
         .is_some_and(|status| status.0 == reqwest::StatusCode::NOT_FOUND)
 }
 
-async fn profile_view(api: Api, uri: String) -> crate::worker::Event {
-    let result = load_profile(&api, &uri)
+async fn profile_view(api: Api, user: User, uri: String) -> crate::worker::Event {
+    let result = load_profile(&api, &user, &uri)
         .await
         .map(Box::new)
         .map_err(|error| {
@@ -236,11 +262,11 @@ async fn profile_view(api: Api, uri: String) -> crate::worker::Event {
     Event::Profile { uri, result }.into()
 }
 
-async fn load_profile(api: &Api, uri: &str) -> anyhow::Result<ProfileView> {
+async fn load_profile(api: &Api, user: &User, uri: &str) -> anyhow::Result<ProfileView> {
     let profile = social::profile(api, uri).await?;
     let own = profile.is_current_user;
     let lists = own || profile.show_follows;
-    let (top, followers, following) = tokio::join!(
+    let (top, followers, following, blocking) = tokio::join!(
         async {
             if own {
                 social::top_content(api, social::TOP_PREVIEW_ARTISTS, social::TOP_PREVIEW_TRACKS)
@@ -264,13 +290,52 @@ async fn load_profile(api: &Api, uri: &str) -> anyhow::Result<ProfileView> {
                 Vec::new()
             }
         },
+        async {
+            if own {
+                return None;
+            }
+            let me = user.name(api).await.ok()?;
+            social::is_blocking(api, &me, uri).await.ok()
+        },
     );
     Ok(ProfileView {
         profile,
         top,
         followers,
         following,
+        blocking,
     })
+}
+
+async fn block_user(api: Api, user: User, uri: String, block: bool) -> crate::worker::Event {
+    let state = async {
+        let me = user.name(&api).await.ok()?;
+        social::set_blocking(&api, &me, &uri, block).await.ok()?;
+        Some(social::is_blocking(&api, &me, &uri).await.unwrap_or(block))
+    }
+    .await;
+    Event::Blocked { uri, block, state }.into()
+}
+
+async fn block_lookup(api: Api, user: User, uris: Vec<String>) -> crate::worker::Event {
+    let mut states = Vec::new();
+    if let Ok(me) = user.name(&api).await {
+        for uri in uris {
+            if let Ok(blocking) = social::is_blocking(&api, &me, &uri).await {
+                states.push((uri, blocking));
+            }
+        }
+    }
+    Event::BlockState(states).into()
+}
+
+pub fn block_message(block: bool, done: bool) -> &'static str {
+    match (block, done) {
+        (true, true) => "You have blocked this account.",
+        (false, true) => "You have unblocked this account.",
+        (true, false) => "Couldn’t block this account. Try again.",
+        (false, false) => "Couldn’t unblock this account. Try again.",
+    }
 }
 
 async fn profile_list(

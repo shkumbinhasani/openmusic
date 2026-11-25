@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use prost::Message;
+use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::{
-    api::Api,
+    api::{Api, Body},
     catalog::{self, Track},
     entity,
     pathfinder::{self, Operation},
@@ -34,6 +36,7 @@ pub const TOP_PREVIEW_ARTISTS: usize = 10;
 pub const TOP_PREVIEW_TRACKS: usize = 4;
 pub const TOP_ALL: usize = 50;
 const IMAGE_SIZE: u32 = 300;
+const PROTOBUF: &str = "application/x-protobuf";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RefKind {
@@ -85,6 +88,7 @@ pub struct Profile {
     pub is_following: bool,
     pub allow_follows: bool,
     pub show_follows: bool,
+    pub name_locked: bool,
     pub playlists: Vec<PlaylistRef>,
     pub total_playlists: u64,
     pub recent_artists: Vec<ProfileRef>,
@@ -253,6 +257,7 @@ pub fn parse_profile(reply: &Value) -> Option<Profile> {
         is_following: flag(&reply["is_following"]),
         allow_follows: flag(&reply["allow_follows"]),
         show_follows: flag(&reply["show_follows"]),
+        name_locked: flag(&reply["edit_name_disabled"]) || flag(&reply["edit_profile_disabled"]),
         playlists,
         total_playlists,
         recent_artists: parse_refs(reply, "recently_played_artists"),
@@ -441,6 +446,50 @@ pub async fn set_following(
     }
     let data = pathfinder::mutate(api, operation, variables).await?;
     Ok(parse_follow_reply(&data, uris, follow))
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct Contains {
+    #[prost(bool, tag = "1")]
+    pub contains_result: bool,
+}
+
+pub fn blocking_path(me: &str, target: &str) -> Result<String> {
+    let Some(target) = username(target) else {
+        bail!("Only Spotify profiles can be blocked.");
+    };
+    if me.is_empty() || me == target {
+        bail!("You can’t block yourself.");
+    }
+    Ok(format!(
+        "/socialgraph/v4/{}/is-blocking/{}",
+        segment(me),
+        segment(&target)
+    ))
+}
+
+pub fn parse_blocking(bytes: &[u8]) -> Result<bool> {
+    let reply = Contains::decode(bytes).context("Unreadable block state from Spotify.")?;
+    Ok(reply.contains_result)
+}
+
+pub async fn is_blocking(api: &Api, me: &str, target: &str) -> Result<bool> {
+    let bytes = api
+        .request(
+            Method::GET,
+            &blocking_path(me, target)?,
+            Body::Empty,
+            PROTOBUF,
+        )
+        .await?;
+    parse_blocking(&bytes)
+}
+
+pub async fn set_blocking(api: &Api, me: &str, target: &str, block: bool) -> Result<()> {
+    let method = if block { Method::POST } else { Method::DELETE };
+    api.request(method, &blocking_path(me, target)?, Body::Empty, "*/*")
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -717,6 +766,30 @@ mod tests {
             parse_follow_reply(&data, &uris[..1], false),
             vec![("spotify:user:friend".to_owned(), Some(false))]
         );
+    }
+
+    #[test]
+    fn builds_block_paths() {
+        assert_eq!(
+            blocking_path("someone", "spotify:user:friend").unwrap(),
+            "/socialgraph/v4/someone/is-blocking/friend"
+        );
+        assert_eq!(
+            blocking_path("a b", "spotify:user:c%2Fd").unwrap(),
+            "/socialgraph/v4/a%20b/is-blocking/c%2Fd"
+        );
+        assert!(blocking_path("someone", "spotify:artist:x").is_err());
+        assert!(blocking_path("someone", "spotify:user:someone").is_err());
+        assert!(blocking_path("", "spotify:user:friend").is_err());
+    }
+
+    #[test]
+    fn reads_block_states() {
+        assert!(!parse_blocking(&[]).unwrap());
+        assert!(parse_blocking(&[0x08, 0x01]).unwrap());
+        assert!(!parse_blocking(&[0x08, 0x00]).unwrap());
+        assert!(parse_blocking(&[0x08, 0x01, 0x12, 0x01, b'x']).unwrap());
+        assert!(parse_blocking(&[0x0a]).is_err());
     }
 
     #[test]

@@ -1,14 +1,15 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    rc::Rc,
 };
 
-use gpui::Context;
+use gpui::{Context, PromptButton, PromptLevel, Window};
 use spotify_client::social::{ProfileRef, RefKind, username};
 
 use super::{
     state::ProfileListKind,
-    worker::{Command, Listing, ProfileView},
+    worker::{Command, Listing, ProfileView, block_message},
 };
 use crate::{
     app::{OpenMusic, Page},
@@ -19,6 +20,16 @@ use crate::{
 };
 
 pub const OWN_ONLY: &str = "Only you can see your top artists and tracks, on your own profile.";
+pub const BLOCKED_NOTE: &str =
+    "Blocked. They can’t see your profile, follow you or see your listening activity.";
+
+type Undo = Rc<dyn Fn(&mut OpenMusic, &mut Context<OpenMusic>)>;
+
+pub fn block_detail(name: &str) -> String {
+    format!(
+        "{name} will no longer be able to see your profile, follow you, or see your listening activity."
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FollowFilter {
@@ -63,6 +74,8 @@ pub struct Profiles {
     pub sentinel: Sentinel,
     pub following: HashMap<String, bool>,
     pub pending: HashMap<String, PendingFollow>,
+    pub blocking: HashMap<String, bool>,
+    pub block_pending: HashSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +220,59 @@ impl Profiles {
             }
         }
     }
+
+    pub fn known_blocking(&self, uri: &str) -> Option<bool> {
+        self.blocking
+            .get(uri)
+            .copied()
+            .or_else(|| self.loaded(uri).and_then(|view| view.blocking))
+    }
+
+    pub fn begin_block(&mut self, uri: &str, own: Option<&str>) -> bool {
+        if self.block_pending.contains(uri) || username(uri).is_none() || own == Some(uri) {
+            return false;
+        }
+        self.block_pending.insert(uri.to_owned())
+    }
+
+    pub fn finish_block(&mut self, uri: &str, block: bool, state: Option<bool>) -> bool {
+        self.block_pending.remove(uri);
+        if let Some(state) = state {
+            self.blocking.insert(uri.to_owned(), state);
+        }
+        state == Some(block)
+    }
+
+    pub fn learn_blocking(&mut self, states: Vec<(String, bool)>) {
+        for (uri, state) in states {
+            if !self.block_pending.contains(&uri) {
+                self.blocking.insert(uri, state);
+            }
+        }
+    }
+
+    pub fn person_name(&self, uri: &str) -> Option<String> {
+        if let Some(view) = self.loaded(uri) {
+            return Some(view.profile.name.clone());
+        }
+        let viewed = self
+            .profile
+            .iter()
+            .filter_map(|(_, result)| result.as_ref().ok())
+            .flat_map(|view| view.followers.iter().chain(&view.following));
+        let listed = self
+            .list
+            .iter()
+            .filter_map(|list| match &list.result {
+                Some(Ok(Listing::People(people))) => Some(people.iter()),
+                _ => None,
+            })
+            .flatten();
+        viewed
+            .chain(listed)
+            .find(|person| person.uri == uri)
+            .map(|person| person.name.clone())
+    }
 }
 
 impl OpenMusic {
@@ -233,6 +299,51 @@ impl OpenMusic {
     fn look_up_following(&mut self, uris: Vec<String>) {
         if !uris.is_empty() {
             self.send(Command::FollowLookup(uris));
+        }
+    }
+
+    pub fn person_name(&self, uri: &str) -> String {
+        self.account
+            .profiles
+            .person_name(uri)
+            .or_else(|| username(uri))
+            .unwrap_or_else(|| uri.to_owned())
+    }
+
+    pub fn set_blocking(&mut self, uri: String, block: bool) {
+        let own = self.account().map(|account| account.uri.clone());
+        if self.account.profiles.begin_block(&uri, own.as_deref()) {
+            self.send(Command::Block { uri, block });
+        }
+    }
+
+    pub fn confirm_block(&mut self, uri: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account.profiles.block_pending.contains(&uri) || self.is_own_profile(&uri) {
+            return;
+        }
+        let name = self.person_name(&uri);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Block {name}?"),
+            Some(&block_detail(&name)),
+            &[PromptButton::ok("Block"), PromptButton::cancel("Cancel")],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |app, cx| {
+                    app.set_blocking(uri, true);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn reload_profile_page(&mut self) {
+        let page = self.page.clone();
+        if matches!(page, Page::Profile(_) | Page::ProfileList(..)) {
+            load(self, &page);
         }
     }
 
@@ -296,6 +407,9 @@ pub fn on_profile(app: &mut OpenMusic, uri: String, result: Result<Box<ProfileVi
         if !view.profile.is_current_user {
             profiles.learn_following(vec![(uri.clone(), view.profile.is_following)]);
         }
+        if let Some(blocking) = view.blocking {
+            profiles.learn_blocking(vec![(uri.clone(), blocking)]);
+        }
         unknown = profiles.unknown_users(view.followers.iter().chain(&view.following));
     }
     profiles.profile = Some((uri, result.map(|view| *view)));
@@ -341,6 +455,20 @@ pub fn on_follow_failed(app: &mut OpenMusic, uris: Vec<String>, message: String)
     app.show_toast(message, None);
 }
 
+pub fn on_blocked(app: &mut OpenMusic, uri: String, block: bool, state: Option<bool>) {
+    let done = app.account.profiles.finish_block(&uri, block, state);
+    let undo = (done && block).then(|| {
+        let uri = uri.clone();
+        Rc::new(move |app: &mut OpenMusic, _: &mut Context<OpenMusic>| {
+            app.set_blocking(uri.clone(), false)
+        }) as Undo
+    });
+    app.show_toast(block_message(block, done), undo);
+    if done {
+        app.reload_profile_page();
+    }
+}
+
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     let Target::User { uri } = target else {
         return Vec::new();
@@ -349,17 +477,29 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
         return Vec::new();
     }
     let profiles = &app.account.profiles;
-    let Some(following) = profiles.known_following(uri) else {
-        return Vec::new();
-    };
-    let closed = profiles
-        .loaded(uri)
-        .is_some_and(|view| !view.profile.allow_follows);
+    let blocked = profiles.known_blocking(uri) == Some(true);
+    let mut items = Vec::new();
+    if let Some(item) = follow_item(uri, profiles, blocked) {
+        items.push((Group::Library, item));
+    }
+    items.push((
+        Group::Feedback,
+        block_item(uri, blocked, profiles.block_pending.contains(uri)),
+    ));
+    items
+}
+
+fn follow_item(uri: &str, profiles: &Profiles, blocked: bool) -> Option<MenuItem> {
+    let following = profiles.known_following(uri)?;
+    let closed = blocked
+        || profiles
+            .loaded(uri)
+            .is_some_and(|view| !view.profile.allow_follows);
     if closed && !following {
-        return Vec::new();
+        return None;
     }
     let pending = profiles.pending.contains_key(uri);
-    let uri = uri.clone();
+    let uri = uri.to_owned();
     let item = if following {
         MenuItem::action("Unfollow", move |app, _, _| {
             app.set_following(vec![uri.clone()], false)
@@ -371,7 +511,42 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
         })
         .symbol("person.badge.plus")
     };
-    vec![(Group::Library, item.enabled(!pending))]
+    Some(item.enabled(!pending))
+}
+
+fn block_item(uri: &str, blocked: bool, pending: bool) -> MenuItem {
+    let uri = uri.to_owned();
+    let item = if blocked {
+        MenuItem::action("Unblock", move |app, _, _| {
+            app.set_blocking(uri.clone(), false)
+        })
+        .symbol("hand.raised.slash")
+    } else {
+        MenuItem::action("Block", move |app, window, cx| {
+            app.confirm_block(uri.clone(), window, cx)
+        })
+        .symbol("hand.raised")
+    };
+    item.enabled(!pending)
+}
+
+pub fn describe_blocking(profiles: &Profiles, uris: &[String]) -> String {
+    uris.iter()
+        .map(|uri| {
+            let state = match profiles.known_blocking(uri) {
+                Some(true) => "blocked",
+                Some(false) => "not-blocked",
+                None => "unknown",
+            };
+            let pending = if profiles.block_pending.contains(uri) {
+                " pending"
+            } else {
+                ""
+            };
+            format!("{uri} {state}{pending}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn describe_following(profiles: &Profiles, uris: &[String]) -> String {
@@ -462,6 +637,11 @@ pub fn describe_profile(view: &ProfileView) -> String {
         format!("followers_shown={}", view.followers.len()),
         format!("following_shown={}", view.following.len()),
         format!(
+            "blocking={}",
+            view.blocking
+                .map_or("unknown".to_owned(), |blocking| blocking.to_string())
+        ),
+        format!(
             "top_artists={}",
             top.map_or("none".to_owned(), |top| format!(
                 "{}/{}",
@@ -519,8 +699,40 @@ pub fn describe_list(list: &ProfileList) -> String {
     lines.join("\n")
 }
 
-pub fn debug(app: &mut OpenMusic, verb: &str, rest: &str, directory: &Path) -> bool {
+pub fn debug(
+    app: &mut OpenMusic,
+    verb: &str,
+    rest: &str,
+    directory: &Path,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> bool {
     match verb {
+        "block" => {
+            let (uri, state) = rest.split_once(' ').unwrap_or((rest, "on"));
+            if !uri.is_empty() {
+                app.set_blocking(uri.to_owned(), state.trim() != "off");
+            }
+            let text = describe_blocking(&app.account.profiles, &[uri.to_owned()]);
+            let _ = std::fs::write(directory.join("block.txt"), text);
+        }
+        "block-ask" => {
+            if !rest.is_empty() {
+                app.confirm_block(rest.trim().to_owned(), window, cx);
+            }
+        }
+        "blocking" => {
+            let uris: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+            let text = describe_blocking(&app.account.profiles, &uris);
+            let _ = std::fs::write(directory.join("blocking.txt"), text);
+            let ready: Vec<String> = uris
+                .into_iter()
+                .filter(|uri| !app.account.profiles.block_pending.contains(uri))
+                .collect();
+            if !ready.is_empty() {
+                app.send(Command::BlockLookup(ready));
+            }
+        }
         "profile" => {
             if !rest.is_empty() {
                 app.navigate(Page::Profile(rest.to_owned()));
@@ -608,6 +820,7 @@ mod tests {
             top: None,
             followers: Vec::new(),
             following: Vec::new(),
+            blocking: None,
         };
         Profiles {
             profile: Some((uri.into(), Ok(view))),
@@ -719,6 +932,77 @@ mod tests {
     }
 
     #[test]
+    fn blocks_and_unblocks_with_the_server_answer() {
+        let own = "spotify:user:someone".to_owned();
+        let friend = "spotify:user:friend".to_owned();
+        let mut profiles = viewing(&friend, false, true, 5);
+        assert_eq!(profiles.known_blocking(&friend), None);
+        if let Some((_, Ok(view))) = profiles.profile.as_mut() {
+            view.blocking = Some(false);
+        }
+        assert_eq!(profiles.known_blocking(&friend), Some(false));
+        assert!(!profiles.begin_block(&own, Some(&own)));
+        assert!(!profiles.begin_block("spotify:artist:x", Some(&own)));
+        assert!(profiles.begin_block(&friend, Some(&own)));
+        assert!(!profiles.begin_block(&friend, Some(&own)));
+        profiles.learn_blocking(vec![(friend.clone(), true)]);
+        assert_eq!(profiles.known_blocking(&friend), Some(false));
+        assert!(profiles.finish_block(&friend, true, Some(true)));
+        assert!(profiles.block_pending.is_empty());
+        assert_eq!(profiles.known_blocking(&friend), Some(true));
+        assert!(describe_blocking(&profiles, std::slice::from_ref(&friend)).ends_with(" blocked"));
+
+        profiles.begin_block(&friend, Some(&own));
+        assert!(!profiles.finish_block(&friend, false, None));
+        assert_eq!(profiles.known_blocking(&friend), Some(true));
+        profiles.begin_block(&friend, Some(&own));
+        assert!(!profiles.finish_block(&friend, false, Some(true)));
+        assert_eq!(profiles.known_blocking(&friend), Some(true));
+        profiles.begin_block(&friend, Some(&own));
+        assert!(profiles.finish_block(&friend, false, Some(false)));
+        assert_eq!(
+            describe_blocking(&profiles, &[friend, "spotify:user:new".into()]),
+            "spotify:user:friend not-blocked\nspotify:user:new unknown"
+        );
+    }
+
+    #[test]
+    fn names_people_from_loaded_lists() {
+        let mut profiles = viewing("spotify:user:friend", false, false, 1);
+        assert_eq!(
+            profiles.person_name("spotify:user:friend").as_deref(),
+            Some("Name")
+        );
+        if let Some((_, Ok(view))) = profiles.profile.as_mut() {
+            view.followers.push(ProfileRef {
+                uri: "spotify:user:fan".into(),
+                name: "A Fan".into(),
+                ..ProfileRef::default()
+            });
+        }
+        profiles.list = Some(ProfileList {
+            uri: "spotify:user:friend".into(),
+            kind: ProfileListKind::Following,
+            result: Some(Ok(Listing::People(vec![ProfileRef {
+                uri: "spotify:user:pal".into(),
+                name: "A Pal".into(),
+                ..ProfileRef::default()
+            }]))),
+            loading_more: false,
+        });
+        assert_eq!(
+            profiles.person_name("spotify:user:fan").as_deref(),
+            Some("A Fan")
+        );
+        assert_eq!(
+            profiles.person_name("spotify:user:pal").as_deref(),
+            Some("A Pal")
+        );
+        assert_eq!(profiles.person_name("spotify:user:nobody"), None);
+        assert!(block_detail("A Pal").starts_with("A Pal will no longer"));
+    }
+
+    #[test]
     fn filters_the_following_list() {
         let artist = person("spotify:artist:0000000000000000000001");
         let user = person("spotify:user:friend");
@@ -742,6 +1026,7 @@ mod tests {
             top: None,
             followers: vec![person("spotify:user:friend")],
             following: Vec::new(),
+            blocking: None,
         };
         let text = describe_profile(&view);
         assert!(text.contains("playlists=1/24"));
