@@ -376,6 +376,8 @@ async fn run(
                 }
                 if let Err(error) = engine.control(control).await {
                     let _ = updates.send(Update::Notice(error.to_string()));
+                    engine.published = None;
+                    engine.published_playback = None;
                 }
                 engine.publish(updates);
             }
