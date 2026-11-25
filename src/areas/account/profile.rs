@@ -226,6 +226,12 @@ impl Profiles {
         }
     }
 
+    pub fn forget_pending(&mut self) {
+        let follows: Vec<String> = self.pending.keys().cloned().collect();
+        self.fail_follow(&follows);
+        self.block_pending.clear();
+    }
+
     pub fn learn_following(&mut self, states: Vec<(String, bool)>, asked: Option<Instant>) {
         for (uri, state) in states {
             let overtaken =
@@ -934,6 +940,28 @@ mod tests {
         profiles.finish_follow(vec![(friend.clone(), false)]);
         assert_eq!(counts(&profiles), (5, 20));
         assert_eq!(profiles.known_following(&friend), Some(false));
+    }
+
+    #[test]
+    fn forgets_answers_that_will_not_come() {
+        let own = "spotify:user:someone".to_owned();
+        let friend = "spotify:user:friend".to_owned();
+        let stranger = "spotify:user:stranger".to_owned();
+        let mut profiles = viewing(&friend, false, false, 5);
+        profiles.begin_follow(&[friend.clone(), stranger.clone()], true, Some(&own));
+        profiles.begin_block(&stranger, Some(&own));
+        assert_eq!(counts(&profiles), (6, 20));
+        profiles.forget_pending();
+        assert!(profiles.pending.is_empty() && profiles.block_pending.is_empty());
+        assert_eq!(counts(&profiles), (5, 20));
+        assert_eq!(profiles.known_following(&friend), Some(false));
+        assert_eq!(profiles.known_following(&stranger), None);
+        assert_eq!(
+            profiles.begin_follow(std::slice::from_ref(&friend), true, Some(&own)),
+            vec![friend.clone()]
+        );
+        profiles.finish_follow(vec![(friend.clone(), true)]);
+        assert_eq!(counts(&profiles), (6, 20));
     }
 
     #[test]

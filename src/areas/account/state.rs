@@ -369,7 +369,8 @@ impl OpenMusic {
 
     pub fn resume_social(&mut self, cx: &mut Context<Self>) {
         self.account.friends.loading = false;
-        self.account.profiles.block_pending.clear();
+        self.account.cache_busy = false;
+        self.account.profiles.forget_pending();
         let privacy = &mut self.account.privacy;
         privacy.loading = false;
         let stale = privacy.value.is_some() || !privacy.pending.is_empty();
