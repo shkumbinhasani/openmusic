@@ -6,13 +6,14 @@ use spotify_client::{
     dealer::Message,
 };
 
-use super::state::AccountPrefs;
+use super::state::{AccountPrefs, chosen_language, system_language};
 use crate::worker::Ctx;
 
 const SECOND_LOOK: Duration = Duration::from_secs(5);
 
 pub enum Command {
     Refresh,
+    Language(Option<String>),
 }
 
 pub enum Event {
@@ -31,6 +32,7 @@ impl Event {
 pub fn handle(command: Command, ctx: &mut Ctx) {
     match command {
         Command::Refresh => refresh(ctx),
+        Command::Language(language) => apply_language(language.as_deref(), ctx),
     }
 }
 
@@ -42,7 +44,16 @@ pub fn on_push(message: &Message, ctx: &mut Ctx) {
     }
 }
 
-pub fn apply_settings(_prefs: &AccountPrefs, _ctx: &mut Ctx) {}
+pub fn apply_settings(prefs: &AccountPrefs, ctx: &mut Ctx) {
+    apply_language(prefs.language.as_deref(), ctx);
+}
+
+fn apply_language(language: Option<&str>, ctx: &mut Ctx) {
+    let language = chosen_language(language, system_language);
+    if ctx.api.language() != language {
+        ctx.api.set_language(language);
+    }
+}
 
 fn refresh(ctx: &mut Ctx) {
     ctx.tasks

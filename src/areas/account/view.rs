@@ -7,10 +7,11 @@ use spotify_client::{
     account::{AccountInfo, Explicit},
 };
 
-use super::state::{CHIP, CHIP_ROW, ProfileListKind};
+use super::state::{CHIP, CHIP_ROW, LANGUAGE_KEY, LANGUAGES, ProfileListKind, language_name};
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
-    icons, overlay,
+    icons,
+    overlay::{self, Label},
     ui::{
         Palette, Panel,
         components::{ROW_RADIUS, bone, icon},
@@ -390,12 +391,62 @@ impl OpenMusic {
         None
     }
 
-    pub fn language_section(
-        &self,
-        _palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        None
+    pub fn language_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chosen = self.settings.account.language.as_deref();
+        let label = match chosen {
+            None => "System Default",
+            Some(tag) => language_name(tag).unwrap_or("Other"),
+        };
+        let effective = self.language();
+        let description = match chosen {
+            None => format!(
+                "Uses {} from macOS. Spotify picks this language for titles, podcasts and search results.",
+                language_name(&effective)
+                    .map(|name| format!("{name} ({effective})"))
+                    .unwrap_or(effective.clone())
+            ),
+            Some(_) => format!(
+                "Spotify picks this language ({effective}) for titles, podcasts and search results. OpenMusic’s own labels stay in English."
+            ),
+        };
+        let picker = self
+            .control(LANGUAGE_KEY, Label::Text(label), false, palette, cx)
+            .h(px(36.))
+            .w(px(label_width(label)))
+            .child(overlay::anchor(LANGUAGE_KEY));
+        let mut rows = vec![setting_row(
+            "Language",
+            Some(description.into()),
+            picker,
+            palette,
+        )];
+        if self.account.languages_open {
+            let choices = std::iter::once((None, "System Default"))
+                .chain(LANGUAGES.iter().map(|(tag, name)| (Some(*tag), *name)));
+            rows.extend(choices.enumerate().map(|(index, (tag, name))| {
+                let selected = chosen == tag;
+                div()
+                    .id(("language-choice", index))
+                    .h(px(36.))
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .px(px(ROW_INSET))
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(rgba(palette.press)))
+                    .text_size(px(13.))
+                    .child(div().w(px(14.)).when(selected, |mark| {
+                        mark.child(icon(icons::CHECK, 14., palette.accent))
+                    }))
+                    .child(name)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_language(tag.map(str::to_owned));
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            }));
+        }
+        Some(settings_section("Language", rows, palette))
     }
 
     pub fn storage_section(
@@ -433,6 +484,14 @@ pub fn row_accessories(
     _cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
     Vec::new()
+}
+
+fn label_width(text: &str) -> f32 {
+    let glyphs: f32 = text
+        .chars()
+        .map(|glyph| if u32::from(glyph) >= 0x2e80 { 14. } else { 7.6 })
+        .sum();
+    (32. + glyphs).max(72.)
 }
 
 pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, _options: &RowOptions) -> bool {

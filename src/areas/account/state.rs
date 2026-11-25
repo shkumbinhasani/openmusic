@@ -8,6 +8,7 @@ use spotify_client::account::{AccountInfo, Explicit};
 use super::worker::{Command, Event};
 use crate::{
     app::{OpenMusic, Page, Session, settings::Settings},
+    areas::{discovery, playlists},
     menus::{self, Handle, OpenSettings, SignOut},
     ui::{
         menu::{MenuItem, Place, Row},
@@ -18,7 +19,125 @@ use crate::{
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AccountPrefs {}
+pub struct AccountPrefs {
+    pub language: Option<String>,
+}
+
+pub const LANGUAGE_KEY: &str = "settings-language";
+pub const FALLBACK_LANGUAGE: &str = "en";
+
+pub const LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("id", "Bahasa Indonesia"),
+    ("ms", "Bahasa Melayu"),
+    ("cs", "Čeština"),
+    ("da", "Dansk"),
+    ("de", "Deutsch"),
+    ("et", "Eesti"),
+    ("es", "Español"),
+    ("es-419", "Español de Latinoamérica"),
+    ("fil", "Filipino"),
+    ("fr", "Français"),
+    ("fr-CA", "Français canadien"),
+    ("hr", "Hrvatski"),
+    ("is", "Íslenska"),
+    ("it", "Italiano"),
+    ("lv", "Latviešu"),
+    ("lt", "Lietuvių"),
+    ("hu", "Magyar"),
+    ("nl", "Nederlands"),
+    ("nb", "Norsk"),
+    ("pl", "Polski"),
+    ("pt-BR", "Português do Brasil"),
+    ("pt-PT", "Português de Portugal"),
+    ("ro", "Română"),
+    ("sq", "Shqip"),
+    ("sk", "Slovenčina"),
+    ("sl", "Slovenščina"),
+    ("sr", "Srpski"),
+    ("fi", "Suomi"),
+    ("sv", "Svenska"),
+    ("vi", "Tiếng Việt"),
+    ("tr", "Türkçe"),
+    ("el", "Ελληνικά"),
+    ("bg", "Български"),
+    ("ru", "Русский"),
+    ("uk", "Українська"),
+    ("he", "עברית"),
+    ("ar", "العربية"),
+    ("fa", "فارسی"),
+    ("hi", "हिन्दी"),
+    ("th", "ไทย"),
+    ("ko", "한국어"),
+    ("ja", "日本語"),
+    ("zh-CN", "简体中文"),
+    ("zh-TW", "繁體中文"),
+];
+
+pub fn valid_language(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 35
+        && !tag.starts_with('-')
+        && !tag.ends_with('-')
+        && tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+pub fn language_name(tag: &str) -> Option<&'static str> {
+    let exact = LANGUAGES
+        .iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(tag));
+    let primary = tag.split('-').next().unwrap_or_default();
+    if exact.is_none() && primary.eq_ignore_ascii_case("zh") {
+        let traditional = tag.split('-').skip(1).any(|part| {
+            ["hant", "tw", "hk", "mo"]
+                .iter()
+                .any(|traditional| part.eq_ignore_ascii_case(traditional))
+        });
+        return Some(if traditional {
+            "繁體中文"
+        } else {
+            "简体中文"
+        });
+    }
+    exact
+        .or_else(|| {
+            LANGUAGES
+                .iter()
+                .find(|(known, _)| known.eq_ignore_ascii_case(primary))
+        })
+        .map(|(_, name)| *name)
+}
+
+#[cfg(target_os = "macos")]
+pub fn system_language() -> String {
+    objc2_foundation::NSLocale::preferredLanguages()
+        .iter()
+        .map(|language| language.to_string())
+        .find(|language| valid_language(language))
+        .unwrap_or_else(|| FALLBACK_LANGUAGE.to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn system_language() -> String {
+    std::env::var("LANG")
+        .ok()
+        .and_then(|lang| {
+            lang.split(['.', '@'])
+                .next()
+                .map(|tag| tag.replace('_', "-"))
+        })
+        .filter(|tag| valid_language(tag) && tag != "C" && tag != "POSIX")
+        .unwrap_or_else(|| FALLBACK_LANGUAGE.to_owned())
+}
+
+pub fn chosen_language(language: Option<&str>, system: impl FnOnce() -> String) -> String {
+    match language {
+        Some(tag) if valid_language(tag) => tag.to_owned(),
+        _ => system(),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProfileListKind {
@@ -60,6 +179,7 @@ pub struct State {
     pub info: Option<AccountInfo>,
     pub loading: bool,
     pub error: Option<String>,
+    pub languages_open: bool,
 }
 
 impl State {
@@ -109,6 +229,58 @@ impl OpenMusic {
         ];
         if !self.show_menu(items, Place::Under(CHIP), Some(CHIP_ROW)) {
             self.navigate(Page::Settings);
+        }
+    }
+
+    pub fn language(&self) -> String {
+        chosen_language(self.settings.account.language.as_deref(), system_language)
+    }
+
+    pub fn set_language(&mut self, language: Option<String>) {
+        let language = language.filter(|tag| valid_language(tag));
+        self.account.languages_open = false;
+        if self.settings.account.language == language {
+            return;
+        }
+        let before = self.language();
+        self.update_settings(|settings| settings.account.language = language);
+        if self.language() != before {
+            self.drop_page_caches();
+        }
+    }
+
+    pub fn open_language_menu(&mut self) {
+        let current = self.settings.account.language.clone();
+        let system = system_language();
+        let mut system_item =
+            MenuItem::action("System Default", |app, _, _| app.set_language(None))
+                .checked(current.is_none());
+        system_item = match language_name(&system) {
+            Some(name) => system_item.subtitle(format!("{name} ({system})")),
+            None => system_item.subtitle(system),
+        };
+        let mut items = vec![system_item, MenuItem::Separator];
+        items.extend(LANGUAGES.iter().map(|(tag, name)| {
+            MenuItem::action(*name, move |app, _, _| {
+                app.set_language(Some((*tag).into()))
+            })
+            .checked(current.as_deref() == Some(*tag))
+        }));
+        if !self.show_menu(items, Place::Under(LANGUAGE_KEY), None) {
+            self.account.languages_open = !self.account.languages_open;
+        }
+    }
+
+    fn drop_page_caches(&mut self) {
+        self.discovery.artist = None;
+        self.playlists.collection = None;
+        self.discovery.discovery_pending = true;
+        self.send(discovery::worker::Command::Discover);
+        let page = self.page.clone();
+        match page {
+            Page::Artist(_) => discovery::state::load(self, &page),
+            Page::Collection(_) => playlists::state::load(self, &page),
+            _ => {}
         }
     }
 }
@@ -181,6 +353,7 @@ pub fn on_event(
 }
 
 pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+    app.send(Command::Language(app.settings.account.language.clone()));
     app.refresh_account();
 }
 
@@ -226,6 +399,22 @@ pub fn debug(
             let _ = std::fs::write(directory.join("account.txt"), text);
         }
         "account-menu" => app.open_account_menu(),
+        "language" => {
+            match rest {
+                "" => {}
+                "system" => app.set_language(None),
+                "menu" => app.open_language_menu(),
+                tag => app.set_language(Some(tag.to_owned())),
+            }
+            let setting = app.settings.account.language.as_deref().unwrap_or("system");
+            let text = format!(
+                "setting={setting} effective={} system={} open={}",
+                app.language(),
+                system_language(),
+                app.account.languages_open
+            );
+            let _ = std::fs::write(directory.join("language.txt"), text);
+        }
         _ => return false,
     }
     true
@@ -246,7 +435,10 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         Some(Explicit::FilteredByManager) => "locked",
         None => "unknown",
     };
-    format!("plan={plan} user={user} explicit={explicit}")
+    format!(
+        "plan={plan} user={user} explicit={explicit} language={}",
+        app.language()
+    )
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
@@ -270,6 +462,7 @@ pub fn on_press(
         "account-sign-out" => app.send(worker::Command::SignOut),
         "account-retry" => app.refresh_account(),
         "account-family" => cx.open_url(FAMILY_URL),
+        LANGUAGE_KEY => app.open_language_menu(),
         _ => return false,
     }
     true
@@ -311,5 +504,47 @@ mod tests {
             Err("unknown setting ".into())
         );
         assert!(with_setting(&settings, "account", "7").is_err());
+    }
+
+    #[test]
+    fn sets_the_language_through_its_path() {
+        let settings = Settings::default();
+        let german = with_setting(&settings, "account.language", "\"de\"").unwrap();
+        assert_eq!(german.account.language.as_deref(), Some("de"));
+        let bare = with_setting(&settings, "account.language", "pt-BR").unwrap();
+        assert_eq!(bare.account.language.as_deref(), Some("pt-BR"));
+        let system = with_setting(&german, "account.language", "null").unwrap();
+        assert_eq!(system.account.language, None);
+        assert!(with_setting(&settings, "account.language", "3").is_err());
+    }
+
+    #[test]
+    fn names_languages_by_tag() {
+        assert_eq!(language_name("de"), Some("Deutsch"));
+        assert_eq!(language_name("pt-br"), Some("Português do Brasil"));
+        assert_eq!(language_name("en-US"), Some("English"));
+        assert_eq!(language_name("sq-XK"), Some("Shqip"));
+        assert_eq!(language_name("zh-Hant-TW"), Some("繁體中文"));
+        assert_eq!(language_name("zh-HK"), Some("繁體中文"));
+        assert_eq!(language_name("zh-Hans-CN"), Some("简体中文"));
+        assert_eq!(language_name("zh"), Some("简体中文"));
+        assert_eq!(language_name("xx"), None);
+        for (tag, _) in LANGUAGES {
+            assert!(valid_language(tag), "{tag}");
+        }
+    }
+
+    #[test]
+    fn falls_back_to_the_system_language() {
+        let system = || "sq-XK".to_owned();
+        assert_eq!(chosen_language(None, system), "sq-XK");
+        assert_eq!(chosen_language(Some("de"), system), "de");
+        assert_eq!(chosen_language(Some(""), system), "sq-XK");
+        assert_eq!(chosen_language(Some("de\r\nX: y"), system), "sq-XK");
+        assert_eq!(chosen_language(Some("-de"), system), "sq-XK");
+        assert!(valid_language("zh-Hans-CN"));
+        assert!(!valid_language("en US"));
+        assert!(!valid_language(&"a".repeat(36)));
+        assert!(valid_language(&system_language()));
     }
 }
