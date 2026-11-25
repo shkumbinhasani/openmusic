@@ -765,7 +765,7 @@ impl Details {
 pub fn create_body(name: &str) -> Value {
     let mut values = Map::new();
     values.insert("name".into(), json!(name));
-    Changes::new().update_list(values, &[]).delta()
+    json!({ "ops": Changes::new().update_list(values, &[]).ops })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2085,8 +2085,7 @@ mod tests {
     fn creates_with_the_name_only() {
         assert_eq!(
             create_body("My Playlist #25"),
-            json!({"ops":[{"kind":"UPDATE_LIST_ATTRIBUTES","updateListAttributes":{"newAttributes":{"values":{"name":"My Playlist #25"}}}}],
-                "info":{"source":{"client":"WEBPLAYER"}}})
+            json!({"ops":[{"kind":"UPDATE_LIST_ATTRIBUTES","updateListAttributes":{"newAttributes":{"values":{"name":"My Playlist #25"}}}}]})
         );
     }
 
