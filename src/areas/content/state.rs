@@ -1065,7 +1065,7 @@ pub fn debug(
     match (verb, words.as_slice()) {
         ("show", [uri]) => app.navigate(Page::Show((*uri).to_owned())),
         ("episode", [uri]) => app.navigate(Page::Episode((*uri).to_owned())),
-        ("more", []) => {
+        ("more", []) if matches!(app.page, Page::Show(_)) => {
             app.content.show_error = None;
             app.load_more_episodes();
         }
