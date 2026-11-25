@@ -147,8 +147,13 @@ impl OpenMusic {
     }
 
     pub fn want_saved(&self, uri: &str) {
-        if saves(uri).is_some() && self.is_saved(uri).is_none() {
+        if saves(uri).is_none() {
+            return;
+        }
+        if self.is_saved(uri).is_none() {
             self.library.wanted.borrow_mut().insert(uri.to_owned());
+        } else {
+            self.library.sync.saw(uri);
         }
     }
 

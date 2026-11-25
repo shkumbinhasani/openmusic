@@ -24,6 +24,7 @@ use super::{
     recent::{Played, Recents},
     saves::{self, FOLLOW_KEY, LIKE_CURRENT_KEY, SAVE_KEY, header_uri},
     shelf::Grid,
+    sync::LiveSync,
     view::LIBRARY_ROW,
     worker::{Command, Event},
 };
@@ -90,6 +91,7 @@ pub struct State {
     pub grid: Grid,
     pub recent: Recents,
     pub played: Played,
+    pub sync: LiveSync,
 }
 
 #[derive(Default)]
@@ -647,6 +649,7 @@ pub fn on_event(
         } => app.on_recents(request, offset, result),
         Event::Played { request, result } => app.on_played(request, result),
         Event::PlayedContext { uri, entry } => app.on_played_context(uri, entry),
+        Event::Pushed(push) => app.on_library_push(push),
     }
 }
 
@@ -665,6 +668,12 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
     }
     if app.library.focus.is_none() {
         app.library.focus = Some(cx.focus_handle());
+    }
+    if app.library.sync.activation.is_none() {
+        let activation = cx.observe_window_activation(window, |app, window, _| {
+            app.on_window_activation(window.is_window_active());
+        });
+        app.library.sync.activation = Some(activation);
     }
     if app.library.page.is_none() {
         app.restore_library();
@@ -1053,6 +1062,37 @@ pub fn debug(
             }
             dump_recent(app, directory);
         }
+        "libsync" => {
+            let mut words = rest.split_whitespace();
+            match (words.next(), words.next()) {
+                (Some("push"), Some("rootlist")) => {
+                    app.on_library_push(spotify_client::library::LibraryPush::Rootlist)
+                }
+                (Some("push"), set) => {
+                    let liked_added = set == Some("liked");
+                    let set = set.filter(|set| *set != "liked").unwrap_or("collection");
+                    app.on_library_push(spotify_client::library::LibraryPush::Collection {
+                        set: set.to_owned(),
+                        liked_added,
+                    });
+                }
+                (Some("focus"), _) => app.refresh_on_focus(),
+                _ => {}
+            }
+            let sync = &app.library.sync;
+            let line = format!(
+                "pushes={} last_push={:?} due={} rootlist={} focus_refreshes={} away={} seen={} refreshed_ago={:?}",
+                sync.pushes,
+                sync.last_push,
+                sync.due.is_some(),
+                sync.rootlist,
+                sync.focus_refreshes,
+                sync.inactive_since.is_some(),
+                sync.seen.borrow().len(),
+                sync.refreshed.map(|at| at.elapsed().as_secs())
+            );
+            let _ = std::fs::write(directory.join("libsync.txt"), line);
+        }
         "recents" => {
             if rest.trim() == "reload" {
                 app.load_played();
@@ -1086,7 +1126,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let library = &app.library;
     format!(
-        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={} shelf={}/{} recent={}/{} recent_fallback={} played={}",
+        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={} shelf={}/{} recent={}/{} recent_fallback={} played={} pushes={} last_push={:?} focus_refreshes={}",
         library.items.len(),
         library.page.as_ref().map_or(0, |page| page.total),
         library.query.filters.join("/"),
@@ -1115,7 +1155,10 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         library.recent.entries.len(),
         library.recent.total,
         library.recent.fallback,
-        library.played.entries.len()
+        library.played.entries.len(),
+        library.sync.pushes,
+        library.sync.last_push,
+        library.sync.focus_refreshes
     )
 }
 
@@ -1230,6 +1273,7 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    app.tick_sync();
     if saves::tick(app) | app.tick_liked() | app.tick_recent() {
         cx.notify();
     }

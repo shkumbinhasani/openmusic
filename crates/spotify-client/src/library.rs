@@ -222,6 +222,44 @@ pub fn collection_push(message: &Message) -> Option<Vec<(String, bool)>> {
     )
 }
 
+pub const LIBRARY_SETS: &[&str] = &[
+    "collection",
+    "artist",
+    "show",
+    "listenlater",
+    "author",
+    "ylpin",
+    "concerts",
+    "concert-campaigns",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LibraryPush {
+    Collection { set: String, liked_added: bool },
+    Rootlist,
+}
+
+pub fn library_push(message: &Message) -> Option<LibraryPush> {
+    if let Some(rest) = message.uri.strip_prefix("hm://collection/") {
+        let set = rest.split('/').next()?;
+        if !LIBRARY_SETS.contains(&set) {
+            return None;
+        }
+        let liked_added = set == "collection"
+            && collection_push(message).is_some_and(|changes| {
+                changes
+                    .iter()
+                    .any(|(uri, saved)| *saved && uri.starts_with("spotify:track:"))
+            });
+        return Some(LibraryPush::Collection {
+            set: set.to_owned(),
+            liked_added,
+        });
+    }
+    let rest = message.uri.strip_prefix("hm://playlist/v2/user/")?;
+    (rest.split('/').nth(1) == Some("rootlist")).then_some(LibraryPush::Rootlist)
+}
+
 fn item_uri(kind: &str, id: &str) -> Option<String> {
     if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         let gid = (0..16)
@@ -376,6 +414,53 @@ mod tests {
             PinResult::NotInLibrary
         );
         assert_eq!(result(Value::Null), PinResult::Refused);
+    }
+
+    #[test]
+    fn sorts_out_library_pushes() {
+        let liked = json!({"items": [
+            {"type": "track", "identifier": "4uLU6hMCjMI75M1A2tKUQC", "removed": false}
+        ]});
+        assert_eq!(
+            library_push(&message("hm://collection/collection/someone/json", liked)),
+            Some(LibraryPush::Collection {
+                set: "collection".into(),
+                liked_added: true
+            })
+        );
+        let unliked = json!({"items": [
+            {"type": "track", "identifier": "4uLU6hMCjMI75M1A2tKUQC", "removed": true},
+            {"type": "album", "identifier": "00000000000000000000000000000001", "removed": false}
+        ]});
+        assert_eq!(
+            library_push(&message("hm://collection/collection/someone/json", unliked)),
+            Some(LibraryPush::Collection {
+                set: "collection".into(),
+                liked_added: false
+            })
+        );
+        assert_eq!(
+            library_push(&message("hm://collection/ylpin/someone/json", Value::Null)),
+            Some(LibraryPush::Collection {
+                set: "ylpin".into(),
+                liked_added: false
+            })
+        );
+        assert_eq!(
+            library_push(&message(
+                "hm://playlist/v2/user/someone/rootlist",
+                Value::Null
+            )),
+            Some(LibraryPush::Rootlist)
+        );
+        for uri in [
+            "hm://collection/ignoreinrecs/someone/json",
+            "hm://playlist/v2/playlist/0000000000000000000001",
+            "hm://playlist/v2/user/someone/other",
+            "hm://pusher/v1/connections/x",
+        ] {
+            assert_eq!(library_push(&message(uri, Value::Null)), None, "{uri}");
+        }
     }
 
     #[test]

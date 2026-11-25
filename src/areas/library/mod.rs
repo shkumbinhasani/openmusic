@@ -5,5 +5,6 @@ pub mod saves;
 mod shelf;
 mod sidebar;
 pub mod state;
+mod sync;
 pub mod view;
 pub mod worker;

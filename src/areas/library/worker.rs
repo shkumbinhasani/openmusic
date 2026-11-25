@@ -3,8 +3,8 @@ use spotify_client::{
     catalog::Playlist,
     dealer::Message,
     library::{
-        self, LibraryError, LibraryPage, LibraryQuery, LikedPage, PinResult, PlayedContext,
-        RecentEntry, RecentsPage, Rootlist,
+        self, LibraryError, LibraryPage, LibraryPush, LibraryQuery, LikedPage, PinResult,
+        PlayedContext, RecentEntry, RecentsPage, Rootlist,
     },
 };
 
@@ -94,6 +94,7 @@ pub enum Event {
         uri: String,
         entry: Option<RecentEntry>,
     },
+    Pushed(LibraryPush),
 }
 
 impl Event {
@@ -237,7 +238,11 @@ async fn recents(api: Api, user: User, offset: u32, request: u64) -> worker::Eve
     .into()
 }
 
-pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
+pub fn on_push(message: &Message, ctx: &mut Ctx) {
+    if let Some(push) = library::library_push(message) {
+        ctx.publish(Event::Pushed(push));
+    }
+}
 
 pub fn apply_settings(_prefs: &LibraryPrefs, _ctx: &mut Ctx) {}
 
