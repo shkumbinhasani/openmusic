@@ -75,6 +75,7 @@ pub struct Sets {
     pub last_format: Option<WriteFormat>,
     pub pushes: usize,
     pub revision: u64,
+    skips_sent: Option<u64>,
     writing: HashMap<Entry, Pending>,
     touched: HashMap<Entry, Instant>,
     requested: Option<Instant>,
@@ -109,6 +110,18 @@ impl Sets {
             hidden: self.hidden.clone(),
             artists: self.banned.clone(),
         }
+    }
+
+    pub fn unsent_skips(&mut self) -> Option<Skips> {
+        if !self.ready() || self.skips_sent == Some(self.revision) {
+            return None;
+        }
+        self.skips_sent = Some(self.revision);
+        Some(self.skips())
+    }
+
+    pub fn resend_skips(&mut self) {
+        self.skips_sent = None;
     }
 
     pub fn contains(&self, entry: &Entry) -> bool {
@@ -453,6 +466,7 @@ impl OpenMusic {
             return;
         }
         sets.begin(Entry::Hidden(ban.clone()), hidden);
+        self.send_skips();
         if hidden {
             let name = self.context_name(&ban.context);
             let again = ban.clone();
@@ -482,6 +496,7 @@ impl OpenMusic {
             return;
         }
         sets.begin(Entry::Banned(uri.clone()), banned);
+        self.send_skips();
         if banned {
             self.show_toast(BANNED, None);
             if self.is_saved(&uri) != Some(false) {
@@ -494,6 +509,12 @@ impl OpenMusic {
             }
         }
         self.send(Command::Ban { uri, banned });
+    }
+
+    pub fn send_skips(&mut self) {
+        if let Some(skips) = self.details.sets.unsent_skips() {
+            self.send(Command::Skips(skips));
+        }
     }
 
     pub fn refuses_skipped(
@@ -668,6 +689,28 @@ mod tests {
         sets.begin(Entry::Banned(RADIOHEAD.into()), true);
         assert!(sets.revision > loaded);
         assert!(sets.skips().artists.contains(RADIOHEAD));
+    }
+
+    #[test]
+    fn hands_each_change_to_the_engine_once_and_at_once() {
+        let mut sets = Sets::default();
+        assert!(sets.unsent_skips().is_none());
+        sets.apply(Ok(Snapshot::default()));
+        assert!(sets.unsent_skips().is_some());
+        assert!(sets.unsent_skips().is_none());
+        sets.begin(Entry::Banned(BOWIE.into()), true);
+        let banned = sets
+            .unsent_skips()
+            .expect("a ban is sent before anything else");
+        assert!(banned.artists.contains(BOWIE));
+        assert!(sets.unsent_skips().is_none());
+        sets.begin(Entry::Hidden(ban()), true);
+        let hidden = sets
+            .unsent_skips()
+            .expect("a hide is sent before anything else");
+        assert!(hidden.hidden[RADIO].contains(SONG));
+        sets.resend_skips();
+        assert!(sets.unsent_skips().is_some());
     }
 
     #[test]
