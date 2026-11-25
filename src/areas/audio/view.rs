@@ -377,12 +377,9 @@ pub fn dock_items(
 ) -> Vec<DockItem> {
     let mut items = Vec::new();
     if app.playback.now.episode && app.playback.now.track.is_some() {
-        items.push(DockItem::new(
-            SPEED_KEY,
-            SPEED_WEIGHT,
-            60.,
-            app.speed_control(palette, cx),
-        ));
+        items.push(
+            DockItem::new(SPEED_KEY, SPEED_WEIGHT, 60., app.speed_control(palette, cx)).spare(),
+        );
     }
     if roomy && app.sleep_label().is_some() {
         items.push(DockItem::new(

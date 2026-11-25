@@ -10,12 +10,14 @@ use crate::{
 pub const BAR_WEIGHT: u32 = 500;
 const DOCK_GAP: f32 = 10.;
 const BAR_ROOM: f32 = 280.;
+const MIN_BAR: f32 = 150.;
 
 pub struct DockItem {
     pub key: &'static str,
     pub weight: u32,
     pub width: f32,
     pub element: AnyElement,
+    pub spare: bool,
 }
 
 impl DockItem {
@@ -25,7 +27,13 @@ impl DockItem {
             weight,
             width,
             element: element.into_any_element(),
+            spare: false,
         }
+    }
+
+    pub fn spare(mut self) -> Self {
+        self.spare = true;
+        self
     }
 }
 
@@ -58,12 +66,25 @@ impl OpenMusic {
         items
     }
 
+    pub fn fitted_dock_items(
+        &self,
+        roomy: bool,
+        dock_width: Pixels,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<DockItem> {
+        let mut items = self.dock_items(roomy, palette, cx);
+        while crowded(f32::from(dock_width), &widths(&items)) {
+            let Some(index) = items.iter().rposition(|item| item.spare) else {
+                break;
+            };
+            items.remove(index);
+        }
+        items
+    }
+
     pub fn dock_roomy(&self, dock_width: Pixels, palette: Palette, cx: &mut Context<Self>) -> bool {
-        let widths: Vec<f32> = self
-            .dock_items(true, palette, cx)
-            .iter()
-            .map(|item| item.width)
-            .collect();
+        let widths = widths(&self.dock_items(true, palette, cx));
         bar_room(f32::from(dock_width), &widths) >= BAR_ROOM
     }
 
@@ -120,7 +141,13 @@ impl OpenMusic {
         })
     }
 
-    pub fn dock(&self, roomy: bool, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn dock(
+        &self,
+        roomy: bool,
+        dock_width: Pixels,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let slot = |item: DockItem| {
             div()
                 .w(px(item.width))
@@ -132,7 +159,7 @@ impl OpenMusic {
                 .child(item.element)
         };
         let (leading, trailing): (Vec<DockItem>, Vec<DockItem>) = self
-            .dock_items(roomy, palette, cx)
+            .fitted_dock_items(roomy, dock_width, palette, cx)
             .into_iter()
             .partition(|item| item.weight < BAR_WEIGHT);
 
@@ -151,6 +178,14 @@ impl OpenMusic {
             .child(self.now_playing_bar(palette))
             .children(trailing.into_iter().map(slot))
     }
+}
+
+fn widths(items: &[DockItem]) -> Vec<f32> {
+    items.iter().map(|item| item.width).collect()
+}
+
+fn crowded(dock_width: f32, item_widths: &[f32]) -> bool {
+    bar_room(dock_width, item_widths) < MIN_BAR
 }
 
 fn bar_room(dock_width: f32, item_widths: &[f32]) -> f32 {
@@ -180,5 +215,14 @@ mod tests {
         assert!(roomy_at(1280.));
         assert!(roomy_at(1600.));
         assert!(bar_room(1120. - 248., &ALWAYS) > 400.);
+    }
+
+    #[test]
+    fn drops_the_speed_button_before_the_bar_gets_too_narrow() {
+        let with_speed: Vec<f32> = ALWAYS.iter().copied().chain([60.]).collect();
+        assert!(!crowded(800. - 248., &ALWAYS));
+        assert!(crowded(800. - 248., &with_speed));
+        assert!(!crowded(900. - 248., &with_speed));
+        assert!(!crowded(1120. - 248., &with_speed));
     }
 }

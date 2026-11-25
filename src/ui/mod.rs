@@ -150,6 +150,7 @@ pub struct Panel {
 struct Layout {
     roomy: bool,
     dock_roomy: bool,
+    dock_width: Pixels,
     card_side: Pixels,
     panel: Option<Panel>,
 }
@@ -182,7 +183,7 @@ pub fn debug(
                 ));
             }
             let mut bar = false;
-            for item in app.dock_items(layout.dock_roomy, palette, cx) {
+            for item in app.fitted_dock_items(layout.dock_roomy, layout.dock_width, palette, cx) {
                 if !bar && item.weight >= BAR_WEIGHT {
                     lines.push(format!("bar {BAR_WEIGHT}"));
                     bar = true;
@@ -304,6 +305,7 @@ impl OpenMusic {
         Layout {
             roomy,
             dock_roomy: self.dock_roomy(content_width, palette, cx),
+            dock_width: content_width,
             card_side,
             panel,
         }
@@ -401,6 +403,7 @@ impl Render for OpenMusic {
         let palette = Palette::for_window(window.appearance());
         let Layout {
             dock_roomy,
+            dock_width,
             card_side,
             panel,
             ..
@@ -479,7 +482,7 @@ impl Render for OpenMusic {
                                         ),
                                     )),
                             )
-                            .child(self.dock(dock_roomy, palette, cx))
+                            .child(self.dock(dock_roomy, dock_width, palette, cx))
                             .children(self.toast_layer(palette, cx))
                     }),
             )
