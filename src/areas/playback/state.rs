@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     path::Path,
     time::{Duration, Instant},
@@ -10,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use spotify_client::{
     Track,
     connect::{
-        self, Allowed, ContextOptions, PlayOptions, Playback, QueueItem, QueueKey, Repeat, Shuffle,
+        self, Allowed, ConnectDevice, ContextOptions, DeviceKind, PlayOptions, Playback, QueueItem,
+        QueueKey, Repeat, Shuffle,
     },
     engine::NowPlaying,
     entity,
@@ -19,15 +21,23 @@ use spotify_client::{
 use super::worker::{Command, Event, PlaybackView, RECENT_LIMIT, lookup_uri};
 use crate::{
     app::{OpenMusic, Page, intent::Intent},
-    menus::{self, CycleRepeat, Handle, ShowQueue, ToggleShuffle},
+    menus::{self, CycleRepeat, Handle, PlayOnThisMac, ShowDevices, ShowQueue, ToggleShuffle},
     ui::{
-        menu::Row,
+        menu::{self, Place, Row, Target},
         tracks::{RowDrag, RowDrop},
     },
 };
 
 pub const OPTIMISTIC: Duration = Duration::from_secs(3);
 const REFRESH_SPACING: Duration = Duration::from_secs(2);
+pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(10);
+const QUEUE_TOAST: Duration = Duration::from_secs(4);
+pub const ADDED_TO_QUEUE: &str = "Added to queue";
+pub const CONNECTING: &str = "Connecting…";
+pub const DEVICES_BUTTON: &str = "devices";
+pub const DEVICE_PANEL: &str = "device-panel";
+const LIKED_SONGS: &str = "spotify:collection:tracks";
+const LOCAL_VOLUME_STEPS: u32 = 64;
 
 pub const QUEUE_CURRENT: &str = "queue-current";
 pub const QUEUE_QUEUED: &str = "queue-queued";
@@ -92,6 +102,34 @@ pub struct ContextShuffle {
     requested: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingTransfer {
+    pub id: String,
+    pub name: String,
+    since: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PickerRow {
+    Header(&'static str),
+    Device {
+        id: String,
+        title: String,
+        symbol: &'static str,
+        current: bool,
+        enabled: bool,
+        subtitle: Option<String>,
+    },
+    Volume(f32),
+    Note(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueSource {
+    Items(Vec<String>),
+    Context(String),
+}
+
 #[derive(Default)]
 pub struct State {
     pub now: NowPlaying,
@@ -102,12 +140,15 @@ pub struct State {
     pub queue: QueueView,
     pub contexts: HashMap<String, ContextShuffle>,
     pub refreshes: u32,
+    pub transfer: Option<PendingTransfer>,
+    pub dock_devices: Cell<bool>,
     missing: HashSet<String>,
     requested: HashSet<String>,
     pending_shuffle: Option<(Shuffle, Instant)>,
     pending_repeat: Option<(Repeat, Instant)>,
     pending_queue: Option<PendingQueue>,
     last_refresh: Option<Instant>,
+    queue_toast: Option<Instant>,
 }
 
 impl State {
@@ -183,6 +224,89 @@ fn uid(item: &QueueItem) -> Option<String> {
 
 fn hidden(key: &QueueKey, pending: Option<&PendingQueue>) -> bool {
     pending.is_some_and(|pending| pending.hidden.contains(key))
+}
+
+pub fn device_label(device: &ConnectDevice) -> String {
+    if device.this_mac {
+        "This Mac".to_owned()
+    } else {
+        device.name.clone()
+    }
+}
+
+fn picker_device(device: &ConnectDevice, current: bool, pending: Option<&str>) -> PickerRow {
+    let subtitle = if pending == Some(device.id.as_str()) {
+        Some(CONNECTING.to_owned())
+    } else if current {
+        None
+    } else {
+        device.blocked.clone()
+    };
+    PickerRow::Device {
+        id: device.id.clone(),
+        title: device_label(device),
+        symbol: device.kind.symbol(),
+        current,
+        enabled: current || device.blocked.is_none(),
+        subtitle,
+    }
+}
+
+pub fn picker_rows(model: Option<&Playback>, pending: Option<&str>, volume: u16) -> Vec<PickerRow> {
+    let devices = model.map_or(&[][..], |model| model.devices.as_slice());
+    let current = devices
+        .iter()
+        .find(|device| device.active)
+        .or_else(|| devices.iter().find(|device| device.this_mac))
+        .cloned()
+        .unwrap_or_else(|| ConnectDevice {
+            id: model
+                .map(|model| model.own_device_id.clone())
+                .unwrap_or_default(),
+            name: "This Mac".to_owned(),
+            kind: DeviceKind::Computer,
+            this_mac: true,
+            volume: Some(volume),
+            ..ConnectDevice::default()
+        });
+    let mut rows = vec![
+        PickerRow::Header("Current device"),
+        picker_device(&current, true, pending),
+    ];
+    if current.this_mac || current.volume.is_some() {
+        rows.push(PickerRow::Volume(f32::from(volume) / f32::from(u16::MAX)));
+    }
+    rows.push(PickerRow::Header("Select another device"));
+    let others: Vec<PickerRow> = devices
+        .iter()
+        .filter(|device| device.id != current.id)
+        .map(|device| picker_device(device, false, pending))
+        .collect();
+    if others.is_empty() {
+        rows.push(PickerRow::Note("No other devices found"));
+    }
+    rows.extend(others);
+    rows
+}
+
+fn transferred(model: &Playback, id: &str) -> bool {
+    model.active_device().is_some_and(|device| device.id == id)
+        || model.active_device_id.as_deref() == Some(connect::device_target(id).0)
+}
+
+pub fn queue_source(target: &Target) -> Option<QueueSource> {
+    match target {
+        Target::Track(track) if lookup_uri(&track.track.uri) => {
+            Some(QueueSource::Items(vec![track.track.uri.clone()]))
+        }
+        Target::Episode { uri } if lookup_uri(uri) => Some(QueueSource::Items(vec![uri.clone()])),
+        Target::Album { uri } => Some(QueueSource::Context(uri.clone())),
+        Target::Playlist { uri } if entity::is_liked_songs(uri) => {
+            Some(QueueSource::Context(LIKED_SONGS.to_owned()))
+        }
+        Target::Playlist { uri } => Some(QueueSource::Context(uri.clone())),
+        _ => None,
+    }
 }
 
 impl OpenMusic {
@@ -614,6 +738,14 @@ impl OpenMusic {
             self.playback.refreshes += 1;
             self.send(Command::RefreshCluster);
         }
+        if self
+            .playback
+            .transfer
+            .as_ref()
+            .is_some_and(|pending| transferred(&playback, &pending.id))
+        {
+            self.playback.transfer = None;
+        }
         self.playback.model = Some(Box::new(playback));
         self.request_queue_tracks();
         self.refresh_queue();
@@ -763,6 +895,148 @@ impl OpenMusic {
         }
         entity::is_liked_songs(uri).then(|| "Liked Songs".to_owned())
     }
+
+    pub fn active_device(&self) -> Option<&ConnectDevice> {
+        self.playback_model()?.active_device()
+    }
+
+    pub fn remote_device(&self) -> Option<&ConnectDevice> {
+        self.active_device().filter(|device| !device.this_mac)
+    }
+
+    pub fn picker_rows(&self) -> Vec<PickerRow> {
+        picker_rows(
+            self.playback_model(),
+            self.playback
+                .transfer
+                .as_ref()
+                .map(|pending| pending.id.as_str()),
+            self.playback.now.volume,
+        )
+    }
+
+    pub fn show_devices(&mut self, anchor: Option<&'static str>) -> bool {
+        let anchor = anchor.unwrap_or(if self.playback.dock_devices.get() {
+            DEVICES_BUTTON
+        } else {
+            DEVICE_PANEL
+        });
+        let items = self.device_menu();
+        self.show_menu(items, Place::Above(anchor), None)
+    }
+
+    pub fn transfer_to(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(model) = self.playback_model() else {
+            return;
+        };
+        let Some(device) = model.devices.iter().find(|device| device.id == id) else {
+            return;
+        };
+        let idle_here = device.this_mac && model.active_device_id.is_none();
+        if device.active || device.blocked.is_some() || idle_here {
+            return;
+        }
+        self.playback.transfer = Some(PendingTransfer {
+            id: id.to_owned(),
+            name: device_label(device),
+            since: Instant::now(),
+        });
+        self.playback.notice = None;
+        self.send(Command::Transfer(id.to_owned()));
+        cx.notify();
+    }
+
+    pub fn play_here(&mut self, cx: &mut Context<Self>) {
+        if let Some(own) = self
+            .playback_model()
+            .filter(|_| self.remote_device().is_some())
+            .and_then(|model| model.devices.iter().find(|device| device.this_mac))
+        {
+            self.playback.transfer = Some(PendingTransfer {
+                id: own.id.clone(),
+                name: device_label(own),
+                since: Instant::now(),
+            });
+        }
+        self.playback.notice = None;
+        self.send(Command::PlayHere);
+        cx.notify();
+    }
+
+    pub fn volume_state(&self) -> (bool, Option<String>) {
+        match self.remote_device() {
+            Some(device) if device.volume.is_none() => (
+                false,
+                Some(format!("You can’t change the volume on {}", device.name)),
+            ),
+            Some(device) => (true, Some(format!("Changes only apply to {}", device.name))),
+            None => (true, None),
+        }
+    }
+
+    pub fn volume_allowed(&self) -> bool {
+        self.volume_state().0
+    }
+
+    fn volume_steps(&self) -> u32 {
+        self.remote_device()
+            .map_or(LOCAL_VOLUME_STEPS, |device| device.volume_steps)
+    }
+
+    pub fn volume_step(&self) -> u16 {
+        connect::volume_step(self.volume_steps())
+    }
+
+    pub fn set_volume(&mut self, volume: u16, cx: &mut Context<Self>) {
+        if !self.volume_allowed() {
+            return;
+        }
+        self.playback.now.volume = volume;
+        self.send(Command::Volume(volume));
+        cx.notify();
+    }
+
+    pub fn step_volume(&mut self, up: bool, cx: &mut Context<Self>) {
+        let volume = connect::stepped_volume(self.playback.now.volume, up, self.volume_steps());
+        self.set_volume(volume, cx);
+    }
+
+    pub fn queue_allowed(&self, next: bool) -> bool {
+        let allowed = self.playback_allowed();
+        self.playback_model()
+            .is_some_and(|model| model.active_device_id.is_some())
+            && if next {
+                allowed.play_next
+            } else {
+                allowed.add_to_queue
+            }
+    }
+
+    pub fn add_to_queue(&mut self, uris: Vec<String>, next: bool, cx: &mut Context<Self>) {
+        if uris.is_empty() || !self.queue_allowed(next) {
+            return;
+        }
+        self.playback.notice = None;
+        self.send(if next {
+            Command::PlayNext(uris)
+        } else {
+            Command::AddToQueue(uris)
+        });
+        self.show_toast(ADDED_TO_QUEUE, None);
+        self.playback.queue_toast = Some(Instant::now());
+        cx.notify();
+    }
+
+    pub fn queue_from(&mut self, source: QueueSource, next: bool, cx: &mut Context<Self>) {
+        match source {
+            QueueSource::Items(uris) => self.add_to_queue(uris, next, cx),
+            QueueSource::Context(uri) if self.queue_allowed(next) => {
+                self.playback.notice = None;
+                self.send(Command::QueueContext { uri, next });
+            }
+            QueueSource::Context(_) => {}
+        }
+    }
 }
 
 pub fn load(app: &mut OpenMusic, page: &Page) {
@@ -807,6 +1081,11 @@ pub fn on_event(
         Event::ContextOptions { uri, options } => {
             app.playback.contexts.entry(uri).or_default().server = options;
         }
+        Event::Resolved { next, uris } => match uris {
+            Some(uris) if !uris.is_empty() => app.add_to_queue(uris, next, cx),
+            Some(_) => app.show_toast("There’s nothing here to add to the queue.", None),
+            None => app.show_toast("Couldn’t add that to the queue.", None),
+        },
     }
     cx.notify();
 }
@@ -882,6 +1161,44 @@ fn queue_dump(app: &OpenMusic) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn devices_dump(app: &OpenMusic) -> String {
+    let (volume_enabled, volume_tooltip) = app.volume_state();
+    let mut lines = vec![format!(
+        "pending={} dock={} volume={} volume_enabled={volume_enabled} volume_tooltip={volume_tooltip:?} step={}",
+        app.playback
+            .transfer
+            .as_ref()
+            .map_or("-", |pending| pending.id.as_str()),
+        app.playback.dock_devices.get(),
+        app.playback.now.volume,
+        app.volume_step(),
+    )];
+    for device in app.playback_model().map_or(&[][..], |model| &model.devices) {
+        lines.push(format!(
+            "{} name={:?} kind={:?} active={} this_mac={} volume={} steps={} blocked={:?} set_options={}",
+            device.id,
+            device.name,
+            device.kind,
+            device.active,
+            device.this_mac,
+            device
+                .volume
+                .map_or_else(|| "none".to_owned(), |volume| volume.to_string()),
+            device.volume_steps,
+            device.blocked,
+            device.supports_set_options,
+        ));
+    }
+    lines.join("\n")
+}
+
+fn queue_target(uri: &str) -> Option<QueueSource> {
+    if lookup_uri(uri) {
+        return Some(QueueSource::Items(vec![uri.to_owned()]));
+    }
+    Target::for_uri(uri).and_then(|target| queue_source(&target))
 }
 
 fn context_dump(app: &OpenMusic, uri: &str) -> String {
@@ -976,6 +1293,42 @@ pub fn debug(
             let _ = std::fs::write(directory.join("context.txt"), context_dump(app, uri));
         }
         "refreshcluster" => app.send(Command::RefreshCluster),
+        "devices" => {
+            let _ = std::fs::write(directory.join("devices.txt"), devices_dump(app));
+        }
+        "devicemenu" => {
+            let lines = menu::describe_items(app.device_menu());
+            let _ = std::fs::write(directory.join("devices-menu.txt"), lines.join("\n"));
+        }
+        "showdevices" => {
+            let anchor = match rest {
+                "dock" => Some(DEVICES_BUTTON),
+                "panel" => Some(DEVICE_PANEL),
+                _ => None,
+            };
+            app.show_devices(anchor);
+        }
+        "transfer" if !rest.is_empty() => app.transfer_to(rest, cx),
+        "devvolume" => {
+            if let (Some(device), Some(Ok(volume))) =
+                (words.next(), words.next().map(str::parse::<u16>))
+            {
+                app.send(Command::DeviceVolume {
+                    device: device.to_owned(),
+                    volume,
+                });
+            }
+        }
+        "volumestep" => match rest {
+            "up" => app.step_volume(true, cx),
+            "down" => app.step_volume(false, cx),
+            _ => {}
+        },
+        "addqueue" | "addnext" => {
+            if let Some(source) = queue_target(rest) {
+                app.queue_from(source, verb == "addnext", cx);
+            }
+        }
         _ => return false,
     }
     true
@@ -984,7 +1337,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let model = app.playback_model();
     format!(
-        "shuffle={:?} repeat={:?} queued={} next_up={} revision={} active={} refreshes={}",
+        "shuffle={:?} repeat={:?} queued={} next_up={} revision={} active={} refreshes={} transfer={} volume_enabled={}",
         app.shuffle_mode(),
         app.repeat_mode(),
         model.map_or(0, |model| model.queue.queued.len()),
@@ -994,6 +1347,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             .and_then(|model| model.active_device_id.as_deref())
             .unwrap_or("-"),
         app.playback.refreshes,
+        app.playback
+            .transfer
+            .as_ref()
+            .map_or("-", |pending| pending.id.as_str()),
+        app.volume_allowed(),
     )
 }
 
@@ -1008,6 +1366,14 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.toggle_queue_page();
         cx.notify();
     });
+    menus::route(cx, handle, |_: &ShowDevices, app, _, cx| {
+        if app.show_devices(None) {
+            cx.notify();
+        }
+    });
+    menus::route(cx, handle, |_: &PlayOnThisMac, app, _, cx| {
+        app.play_here(cx)
+    });
 }
 
 pub fn on_press(
@@ -1020,7 +1386,10 @@ pub fn on_press(
         "previous" => app.perform(Intent::Previous, window, cx),
         "next" => app.perform(Intent::Next, window, cx),
         "toggle-playback" => app.perform(Intent::PlayPause, window, cx),
-        "play-here" => app.send(Command::PlayHere),
+        "play-here" => app.play_here(cx),
+        DEVICES_BUTTON | DEVICE_PANEL => {
+            app.show_devices(Some(key));
+        }
         "shuffle" => app.perform(Intent::ToggleShuffle, window, cx),
         "repeat" => app.perform(Intent::CycleRepeat, window, cx),
         "queue" => app.toggle_queue_page(),
@@ -1078,6 +1447,30 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
         app.playback.pending_queue = None;
         app.refresh_queue();
         changed = true;
+    }
+    if let Some(pending) = &app.playback.transfer {
+        if failed {
+            app.playback.transfer = None;
+            changed = true;
+        } else if pending.since.elapsed() >= TRANSFER_TIMEOUT {
+            let message = format!("Couldn’t connect to {}.", pending.name);
+            app.playback.transfer = None;
+            app.show_toast(message, None);
+            changed = true;
+        }
+    }
+    if let Some(since) = app.playback.queue_toast {
+        let showing = app
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.text == ADDED_TO_QUEUE);
+        if failed && showing && since.elapsed() < QUEUE_TOAST {
+            app.toast = None;
+            app.playback.queue_toast = None;
+            changed = true;
+        } else if since.elapsed() >= QUEUE_TOAST || !showing {
+            app.playback.queue_toast = None;
+        }
     }
     if let Page::Collection(uri) = &app.page
         && !app
@@ -1169,6 +1562,224 @@ mod tests {
         };
         assert_eq!(metadata_track(&bare, "Loading…").title, "Loading…");
         assert_eq!(metadata_track(&bare, "Loading…").duration_ms, 0);
+    }
+
+    const OWN: &str = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000";
+    const DESKTOP: &str = "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111";
+    const SPEAKER: &str = "cccc2222cccc2222cccc2222cccc2222cccc2222";
+    const TV: &str = "dddd3333dddd3333dddd3333dddd3333dddd3333";
+
+    fn connect_device(id: &str, name: &str, kind: DeviceKind) -> ConnectDevice {
+        ConnectDevice {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            this_mac: id == OWN,
+            volume: Some(30_000),
+            volume_steps: 64,
+            supports_set_options: true,
+            ..ConnectDevice::default()
+        }
+    }
+
+    fn model(devices: Vec<ConnectDevice>) -> Playback {
+        Playback {
+            active_device_id: devices
+                .iter()
+                .find(|device| device.active)
+                .map(|device| device.id.clone()),
+            active_device_name: None,
+            active_volume: None,
+            own_device_id: OWN.into(),
+            devices,
+            context_uri: None,
+            context_title: None,
+            context_metadata: HashMap::new(),
+            session_id: String::new(),
+            track: None,
+            track_metadata: HashMap::new(),
+            provider: None,
+            playing: false,
+            position_ms: 0,
+            playback_speed: 1.,
+            shuffle: Shuffle::Off,
+            repeat: Repeat::Off,
+            allowed: Allowed::default(),
+            queue: connect::Queue::default(),
+            signals: Vec::new(),
+            sleep_timer: connect::SleepState::Off,
+            jam_mode: None,
+        }
+    }
+
+    fn device_row(id: &str, title: &str, symbol: &'static str, current: bool) -> PickerRow {
+        PickerRow::Device {
+            id: id.into(),
+            title: title.into(),
+            symbol,
+            current,
+            enabled: true,
+            subtitle: None,
+        }
+    }
+
+    #[test]
+    fn lists_devices_for_the_picker() {
+        let desktop = ConnectDevice {
+            active: true,
+            ..connect_device(DESKTOP, "Desktop", DeviceKind::Computer)
+        };
+        let speaker = ConnectDevice {
+            blocked: Some("Unavailable".into()),
+            ..connect_device(SPEAKER, "Kitchen", DeviceKind::Speaker)
+        };
+        let tv = ConnectDevice {
+            volume: None,
+            ..connect_device(TV, "Living Room", DeviceKind::Tv)
+        };
+        let mac = connect_device(OWN, "OpenMusic", DeviceKind::Computer);
+        let playback = model(vec![desktop, mac, speaker, tv]);
+        assert_eq!(
+            picker_rows(Some(&playback), Some(TV), 32_768),
+            vec![
+                PickerRow::Header("Current device"),
+                device_row(DESKTOP, "Desktop", "laptopcomputer", true),
+                PickerRow::Volume(32_768. / 65_535.),
+                PickerRow::Header("Select another device"),
+                device_row(OWN, "This Mac", "laptopcomputer", false),
+                PickerRow::Device {
+                    id: SPEAKER.into(),
+                    title: "Kitchen".into(),
+                    symbol: "hifispeaker",
+                    current: false,
+                    enabled: false,
+                    subtitle: Some("Unavailable".into()),
+                },
+                PickerRow::Device {
+                    id: TV.into(),
+                    title: "Living Room".into(),
+                    symbol: "tv",
+                    current: false,
+                    enabled: true,
+                    subtitle: Some(CONNECTING.into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn shows_this_mac_when_nothing_plays_and_hides_fixed_volumes() {
+        let mac = connect_device(OWN, "OpenMusic", DeviceKind::Computer);
+        let desktop = connect_device(DESKTOP, "Desktop", DeviceKind::Computer);
+        let idle = model(vec![mac.clone(), desktop]);
+        assert_eq!(
+            picker_rows(Some(&idle), None, 65_535),
+            vec![
+                PickerRow::Header("Current device"),
+                device_row(OWN, "This Mac", "laptopcomputer", true),
+                PickerRow::Volume(1.),
+                PickerRow::Header("Select another device"),
+                device_row(DESKTOP, "Desktop", "laptopcomputer", false),
+            ]
+        );
+        let tv = ConnectDevice {
+            active: true,
+            volume: None,
+            ..connect_device(TV, "Living Room", DeviceKind::Tv)
+        };
+        let fixed = model(vec![tv, mac]);
+        let rows = picker_rows(Some(&fixed), None, 20_000);
+        assert!(!rows.iter().any(|row| matches!(row, PickerRow::Volume(_))));
+        assert_eq!(rows[1], device_row(TV, "Living Room", "tv", true));
+        let alone = model(vec![connect_device(OWN, "OpenMusic", DeviceKind::Computer)]);
+        assert_eq!(
+            picker_rows(Some(&alone), None, 0).last(),
+            Some(&PickerRow::Note("No other devices found"))
+        );
+        assert_eq!(
+            picker_rows(None, None, 0),
+            vec![
+                PickerRow::Header("Current device"),
+                device_row("", "This Mac", "laptopcomputer", true),
+                PickerRow::Volume(0.),
+                PickerRow::Header("Select another device"),
+                PickerRow::Note("No other devices found"),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_transfers_by_entry_or_device() {
+        let alias = ConnectDevice {
+            active: true,
+            alias_id: Some(2),
+            ..connect_device(&format!("{SPEAKER}::a_2"), "Upstairs", DeviceKind::Group)
+        };
+        let mut playback = model(vec![alias]);
+        playback.active_device_id = Some(SPEAKER.into());
+        assert!(transferred(&playback, &format!("{SPEAKER}::a_2")));
+        assert!(transferred(&playback, &format!("{SPEAKER}::a_5")));
+        assert!(transferred(&playback, SPEAKER));
+        assert!(!transferred(&playback, TV));
+        assert!(!transferred(&playback, &format!("{TV}::a_2")));
+    }
+
+    #[test]
+    fn picks_what_to_queue_from_a_menu_target() {
+        let track = Target::track(
+            Track::placeholder("spotify:track:1111111111111111111111"),
+            None,
+            crate::ui::menu::Surface::Row,
+        );
+        assert_eq!(
+            queue_source(&track),
+            Some(QueueSource::Items(vec![
+                "spotify:track:1111111111111111111111".into()
+            ]))
+        );
+        let local = Target::track(
+            Track::placeholder("spotify:local:Artist:Album:Song:180"),
+            None,
+            crate::ui::menu::Surface::Row,
+        );
+        assert_eq!(queue_source(&local), None);
+        let cases = [
+            (
+                "spotify:album:2222222222222222222222",
+                Some(QueueSource::Context(
+                    "spotify:album:2222222222222222222222".into(),
+                )),
+            ),
+            (
+                "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
+                Some(QueueSource::Context(
+                    "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into(),
+                )),
+            ),
+            (
+                "spotify:user:someone:collection",
+                Some(QueueSource::Context(LIKED_SONGS.into())),
+            ),
+            (
+                "spotify:episode:3333333333333333333333",
+                Some(QueueSource::Items(vec![
+                    "spotify:episode:3333333333333333333333".into(),
+                ])),
+            ),
+            ("spotify:artist:4444444444444444444444", None),
+            ("spotify:show:5555555555555555555555", None),
+            ("spotify:user:someone", None),
+        ];
+        for (uri, expected) in cases {
+            let target = Target::for_uri(uri).expect(uri);
+            assert_eq!(queue_source(&target), expected, "{uri}");
+        }
+        assert_eq!(
+            queue_target("spotify:track:1111111111111111111111"),
+            Some(QueueSource::Items(vec![
+                "spotify:track:1111111111111111111111".into()
+            ]))
+        );
     }
 
     #[test]

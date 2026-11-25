@@ -10,8 +10,8 @@ use spotify_client::{
 };
 
 use super::state::{
-    QUEUE_AUTOPLAY, QUEUE_CURRENT, QUEUE_NEXT, QUEUE_QUEUED, QUEUE_RECENT, next_repeat,
-    next_shuffle,
+    DEVICE_PANEL, DEVICES_BUTTON, PickerRow, QUEUE_AUTOPLAY, QUEUE_CURRENT, QUEUE_NEXT,
+    QUEUE_QUEUED, QUEUE_RECENT, QueueSource, device_label, next_repeat, next_shuffle, queue_source,
 };
 use crate::{
     app::{OpenMusic, Page},
@@ -19,7 +19,7 @@ use crate::{
     overlay::{self, ButtonSpec, Label},
     ui::{
         Palette,
-        components::{ROW_RADIUS, icon},
+        components::{ROW_RADIUS, fallback_icon, icon},
         dock::DockItem,
         menu::{Group, MenuItem, Row, Surface, Target},
         sidebar::NavEntry,
@@ -30,26 +30,29 @@ use crate::{
 impl OpenMusic {
     pub fn device_panel(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let remote = self
-            .playback
-            .now
-            .device
-            .clone()
+            .remote_device()
+            .map(device_label)
+            .or_else(|| self.playback.now.device.clone())
             .filter(|_| !self.playback.now.local);
-        let (caption, name) = match (
-            &remote,
-            self.playback.now.local,
-            self.playback.now.track.is_some(),
-        ) {
-            (Some(name), _, _) => ("Playing on", name.clone()),
-            (None, true, _) => ("Playing on", "This Mac".to_owned()),
-            (None, false, _) => ("Spotify Connect", "No device is active".to_owned()),
+        let pending = self.playback.transfer.as_ref();
+        let (caption, name) = match (pending, &remote, self.playback.now.local) {
+            (Some(pending), _, _) => ("Connecting to", pending.name.clone()),
+            (None, Some(name), _) => ("Playing on", name.clone()),
+            (None, None, true) => ("Playing on", "This Mac".to_owned()),
+            (None, None, false) => ("Spotify Connect", "Connect to a device".to_owned()),
         };
-        let color = if remote.is_some() {
+        let highlight = remote.is_some() || pending.is_some();
+        let color = if highlight {
             palette.accent
         } else {
             palette.muted
         };
+        let symbol = self
+            .remote_device()
+            .map_or("laptopcomputer", |device| device.kind.symbol());
         div()
+            .id(DEVICE_PANEL)
+            .relative()
             .flex_shrink_0()
             .flex()
             .flex_col()
@@ -57,12 +60,20 @@ impl OpenMusic {
             .p(px(10.))
             .rounded(px(ROW_RADIUS + 4.))
             .bg(rgba(palette.press))
+            .cursor_pointer()
+            .hover(move |panel| panel.bg(rgba(palette.fill)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.show_devices(Some(DEVICE_PANEL)) {
+                    cx.notify();
+                }
+            }))
+            .child(overlay::anchor(DEVICE_PANEL))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2p5()
-                    .child(icon(icons::DEVICE, 18., color))
+                    .child(icon(fallback_icon(symbol), 18., color))
                     .child(
                         div()
                             .flex_1()
@@ -77,7 +88,7 @@ impl OpenMusic {
                                 div()
                                     .text_size(px(13.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(if remote.is_some() {
+                                    .text_color(rgb(if highlight {
                                         palette.accent
                                     } else {
                                         palette.text
@@ -94,6 +105,38 @@ impl OpenMusic {
                         .w_full(),
                 )
             })
+    }
+
+    pub fn device_menu(&self) -> Vec<MenuItem> {
+        self.picker_rows()
+            .into_iter()
+            .map(|row| match row {
+                PickerRow::Header(text) => MenuItem::header(text),
+                PickerRow::Note(text) => MenuItem::note(text),
+                PickerRow::Volume(value) => MenuItem::Volume(value),
+                PickerRow::Device {
+                    id,
+                    title,
+                    symbol,
+                    current,
+                    enabled,
+                    subtitle,
+                } => {
+                    let item = MenuItem::action(title, move |app, _, cx| {
+                        if !current {
+                            app.transfer_to(&id, cx);
+                        }
+                    })
+                    .symbol(symbol)
+                    .checked(current)
+                    .enabled(enabled);
+                    match subtitle {
+                        Some(text) => item.subtitle(text),
+                        None => item,
+                    }
+                }
+            })
+            .collect()
     }
 }
 
@@ -311,8 +354,45 @@ impl OpenMusic {
     }
 }
 
+fn context_empty(app: &OpenMusic, source: &QueueSource) -> bool {
+    let QueueSource::Context(uri) = source else {
+        return false;
+    };
+    matches!(
+        &app.playlists.collection,
+        Some((loaded, Ok(collection))) if loaded == uri && collection.tracks.is_empty()
+    )
+}
+
+fn queue_actions(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    let Some(source) = queue_source(target) else {
+        return Vec::new();
+    };
+    let empty = context_empty(app, &source);
+    let later = source.clone();
+    vec![
+        (
+            Group::Queue,
+            MenuItem::action("Add to queue", move |app, _, cx| {
+                app.queue_from(later.clone(), false, cx)
+            })
+            .key("q")
+            .symbol("text.line.last.and.arrowtriangle.forward")
+            .enabled(!empty && app.queue_allowed(false)),
+        ),
+        (
+            Group::Queue,
+            MenuItem::action("Play next", move |app, _, cx| {
+                app.queue_from(source.clone(), true, cx)
+            })
+            .symbol("text.line.first.and.arrowtriangle.forward")
+            .enabled(!empty && app.queue_allowed(true)),
+        ),
+    ]
+}
+
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    let mut items = Vec::new();
+    let mut items = queue_actions(target, app);
     let Target::Track(track) = target else {
         return items;
     };
@@ -337,6 +417,7 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
             MenuItem::action("Remove from queue", move |app, _, cx| {
                 app.remove_from_queue(vec![key.clone()], cx)
             })
+            .key("alt-q")
             .symbol("minus.circle"),
         ));
     }
@@ -392,12 +473,29 @@ fn repeat_button(app: &OpenMusic) -> ButtonSpec {
     }
 }
 
+fn devices_button(app: &OpenMusic) -> ButtonSpec {
+    let remote = app.remote_device();
+    let tooltip = match &app.playback.transfer {
+        Some(pending) => format!("Connecting to {}…", pending.name),
+        None => "Connect to a device".to_owned(),
+    };
+    ButtonSpec {
+        label: Label::Symbol(
+            remote.map_or("laptopcomputer.and.iphone", |device| device.kind.symbol()),
+        ),
+        prominent: remote.is_some() || app.playback.transfer.is_some(),
+        enabled: app.playback_model().is_some(),
+        tooltip: Some(tooltip),
+    }
+}
+
 pub fn dock_items(
     app: &OpenMusic,
     roomy: bool,
     palette: Palette,
     cx: &mut Context<OpenMusic>,
 ) -> Vec<DockItem> {
+    app.playback.dock_devices.set(roomy);
     let toggle = if app.playback.now.playing {
         "pause.fill"
     } else {
@@ -460,9 +558,18 @@ pub fn dock_items(
             app.glass_control("queue", queue, true, palette, cx)
                 .size(px(48.)),
         ));
+        items.push(DockItem::new(
+            DEVICES_BUTTON,
+            850,
+            48.,
+            app.glass_control(DEVICES_BUTTON, devices_button(app), true, palette, cx)
+                .size(px(48.))
+                .child(overlay::anchor(DEVICES_BUTTON)),
+        ));
     }
     if overlay::available() && roomy {
         let volume = f32::from(app.playback.now.volume) / f32::from(u16::MAX);
+        let (enabled, tooltip) = app.volume_state();
         items.push(DockItem::new(
             "volume",
             900,
@@ -470,7 +577,7 @@ pub fn dock_items(
             div()
                 .relative()
                 .size_full()
-                .child(overlay::volume(volume, f32::MAX)),
+                .child(overlay::volume(volume, f32::MAX, enabled, tooltip)),
         ));
     }
     items

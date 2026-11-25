@@ -44,7 +44,18 @@ pub enum Command {
     Remember(Vec<Track>),
     SmartShuffleEligibility(String),
     ContextPlayerOptions(String),
+    Transfer(String),
+    DeviceVolume {
+        device: String,
+        volume: u16,
+    },
+    QueueContext {
+        uri: String,
+        next: bool,
+    },
 }
+
+pub const QUEUE_CONTEXT_LIMIT: usize = 200;
 
 pub struct PlaybackView {
     pub playback: Playback,
@@ -81,6 +92,10 @@ pub enum Event {
         uri: String,
         options: Option<ContextOptions>,
     },
+    Resolved {
+        next: bool,
+        uris: Option<Vec<String>>,
+    },
 }
 
 impl Event {
@@ -102,7 +117,9 @@ impl Event {
                 .flatten()
                 .filter_map(|track| track.cover.clone())
                 .collect(),
-            Self::SmartShuffle { .. } | Self::ContextOptions { .. } => Vec::new(),
+            Self::SmartShuffle { .. } | Self::ContextOptions { .. } | Self::Resolved { .. } => {
+                Vec::new()
+            }
         }
     }
 }
@@ -197,6 +214,28 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 .spawn_keyed(format!("context-options {uri}"), async move {
                     let options = connect::context_options(&api, &uri, &device).await.ok();
                     Event::ContextOptions { uri, options }.into()
+                });
+            return;
+        }
+        Command::Transfer(device) => remote(remote::Control::Transfer(device)),
+        Command::DeviceVolume { device, volume } => {
+            remote(remote::Control::DeviceVolume { device, volume })
+        }
+        Command::QueueContext { uri, next } => {
+            let api = ctx.api.clone();
+            ctx.tasks
+                .spawn_keyed(format!("queue-context {uri}"), async move {
+                    let uris = catalog::context_uris(&api, &uri, QUEUE_CONTEXT_LIMIT)
+                        .await
+                        .ok()
+                        .map(|items| {
+                            items
+                                .into_iter()
+                                .map(|item| item.uri)
+                                .filter(|uri| lookup_uri(uri))
+                                .collect()
+                        });
+                    Event::Resolved { next, uris }.into()
                 });
             return;
         }
