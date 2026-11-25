@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt::Write as _,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use spotify_client::{
@@ -9,43 +9,32 @@ use spotify_client::{
     engine::NowPlaying,
 };
 
-use super::{video, worker::Command};
+use super::{ask::Asks, video, worker::Command};
 use crate::app::OpenMusic;
 
 const KEEP: usize = 100;
-const RETRY_AFTER: Duration = Duration::from_secs(60);
-const ANSWER_WITHIN: Duration = Duration::from_secs(20);
 
 #[derive(Default)]
 pub struct Canvases {
     found: HashMap<String, Option<Canvas>>,
     order: VecDeque<String>,
-    failed: Option<(String, Instant)>,
-    pending: Option<(String, Instant)>,
+    asks: Asks,
     pub preview: Option<String>,
     pub reduce_motion: bool,
     pub covered: bool,
 }
 
 impl Canvases {
-    pub fn ask(&mut self, uri: String, at: Instant) {
-        self.pending = Some((uri, at));
+    pub fn ask(&mut self, uri: &str, at: Instant) -> bool {
+        !self.found.contains_key(uri) && self.asks.ask(uri, at)
     }
 
     pub fn asking(&self, uri: &str, now: Instant) -> bool {
-        self.pending.as_ref().is_some_and(|(pending, at)| {
-            pending == uri && now.saturating_duration_since(*at) < ANSWER_WITHIN
-        })
+        self.asks.asking(uri, now)
     }
 
     pub fn answered(&mut self, uri: &str) {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(pending, _)| pending == uri)
-        {
-            self.pending = None;
-        }
+        self.asks.answered(uri);
     }
 
     pub fn known(&self, uri: &str) -> Option<Option<&Canvas>> {
@@ -64,15 +53,11 @@ impl Canvases {
     }
 
     pub fn fail(&mut self, uri: String, at: Instant) {
-        self.failed = Some((uri, at));
+        self.asks.fail(uri, at);
     }
 
     pub fn should_ask(&self, uri: &str, now: Instant) -> bool {
-        !self.found.contains_key(uri)
-            && !self.asking(uri, now)
-            && !self.failed.as_ref().is_some_and(|(failed, at)| {
-                failed == uri && now.saturating_duration_since(*at) < RETRY_AFTER
-            })
+        !self.found.contains_key(uri) && self.asks.due(uri, now)
     }
 
     pub fn len(&self) -> usize {
@@ -154,8 +139,7 @@ impl OpenMusic {
             return;
         };
         let now = Instant::now();
-        if conditions.moving() && self.content.canvas.should_ask(&track, now) {
-            self.content.canvas.ask(track.clone(), now);
+        if conditions.moving() && self.content.canvas.ask(&track, now) {
             self.send(Command::Canvas(track.clone()));
         }
         let canvas = self.content.canvas.known(&track).flatten();
@@ -293,9 +277,14 @@ impl OpenMusic {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use spotify_client::canvas::Kind;
 
-    use super::*;
+    use super::{
+        super::ask::{ANSWER_WITHIN, RETRY_AFTER},
+        *,
+    };
 
     const TRACK: &str = "spotify:track:00000000000000000000t1";
     const URL: &str = "https://canvaz.scdn.co/upload/artist/0000/video/0000.cnvs.mp4";
@@ -398,8 +387,9 @@ mod tests {
         let mut canvases = Canvases::default();
         let now = Instant::now();
         assert!(canvases.should_ask(TRACK, now));
-        canvases.ask(TRACK.into(), now);
+        assert!(canvases.ask(TRACK, now));
         assert!(canvases.asking(TRACK, now));
+        assert!(!canvases.ask(TRACK, now));
         assert!(!canvases.should_ask(TRACK, now));
         assert!(canvases.should_ask(TRACK, now + ANSWER_WITHIN));
         canvases.answered("spotify:track:00000000000000000000t2");
@@ -411,6 +401,7 @@ mod tests {
         assert!(canvases.should_ask(TRACK, now + RETRY_AFTER));
         canvases.store(TRACK.into(), None);
         assert!(!canvases.should_ask(TRACK, now + RETRY_AFTER));
+        assert!(!canvases.ask(TRACK, now + RETRY_AFTER));
         assert_eq!(canvases.known(TRACK), Some(None));
     }
 
