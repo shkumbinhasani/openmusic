@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use spotify_client::{
-    Api, catalog,
+    Api,
+    canvas::{self, Canvas},
+    catalog,
     catalog::Lyrics,
     dealer::Message,
     entity::Card,
@@ -42,6 +44,7 @@ pub enum Command {
         kind: ShowKind,
     },
     Locate(String),
+    Canvas(String),
 }
 
 pub enum Event {
@@ -79,6 +82,10 @@ pub enum Event {
     Located {
         uri: String,
         result: Result<Box<Episode>, String>,
+    },
+    Canvas {
+        uri: String,
+        result: Result<Option<Canvas>, String>,
     },
 }
 
@@ -127,7 +134,8 @@ impl Event {
             | Self::YourEpisodes(_)
             | Self::Decorated { .. }
             | Self::Similar { .. }
-            | Self::Located { .. } => Vec::new(),
+            | Self::Located { .. }
+            | Self::Canvas { .. } => Vec::new(),
         }
     }
 }
@@ -174,6 +182,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Locate(uri) => ctx
             .tasks
             .spawn_keyed("locate", locate(ctx.api.clone(), uri)),
+        Command::Canvas(uri) => ctx
+            .tasks
+            .spawn_keyed("canvas", find_canvas(ctx.api.clone(), uri)),
     }
 }
 
@@ -229,6 +240,13 @@ async fn episode(api: Api, uri: String) -> crate::worker::Event {
         .map(Box::new)
         .map_err(|error| failure(&error, "episode"));
     Event::Episode { uri, result }.into()
+}
+
+async fn find_canvas(api: Api, uri: String) -> crate::worker::Event {
+    let result = canvas::canvas(&api, &uri)
+        .await
+        .map_err(|error| error.to_string());
+    Event::Canvas { uri, result }.into()
 }
 
 async fn locate(api: Api, uri: String) -> crate::worker::Event {

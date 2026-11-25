@@ -19,6 +19,7 @@ use spotify_client::{
 };
 
 use super::{
+    canvas::Canvases,
     transcript::{SYNC_KEY, TranscriptView},
     worker::{Command, Event},
     yours::{SORT_KEY, Yours},
@@ -39,9 +40,17 @@ const PROGRESS_REDRAW: Duration = Duration::from_secs(2);
 const LOOKUP_PATIENCE: Duration = Duration::from_secs(10);
 const LOCATE_PATIENCE: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ContentPrefs {}
+pub struct ContentPrefs {
+    pub canvas: bool,
+}
+
+impl Default for ContentPrefs {
+    fn default() -> Self {
+        Self { canvas: true }
+    }
+}
 
 #[derive(Default)]
 pub struct State {
@@ -66,6 +75,7 @@ pub struct State {
     pub kinds: HashMap<String, ShowKind>,
     pub shows: HashMap<String, String>,
     pub locating: Option<(String, Instant)>,
+    pub canvas: Canvases,
 }
 
 impl State {
@@ -258,6 +268,7 @@ impl OpenMusic {
     }
 
     pub fn request_lyrics(&mut self, now: &NowPlaying) {
+        self.canvas_now(now);
         self.watch_episode(now);
         let Some(track) = &now.track else {
             return;
@@ -753,6 +764,7 @@ pub fn on_event(
             }
         }
         Event::Located { uri, result } => app.located(uri, result),
+        Event::Canvas { uri, result } => app.took_canvas(uri, result),
         Event::YourEpisodes(result) => {
             app.content.yours.take_entries(result);
             app.took_your_episodes();
@@ -954,6 +966,16 @@ pub fn debug(
             app.change_saved(uri, *setting == "on");
         }
         ("gotoshow", [uri]) => app.go_to_show(uri, None),
+        ("canvas", []) => {
+            let mut lines = String::new();
+            app.describe_canvas(&mut lines);
+            let _ = std::fs::write(directory.join("canvas.txt"), lines);
+        }
+        ("canvas", ["setting", setting @ ("on" | "off")]) => app.set_canvas(*setting == "on"),
+        ("canvas", ["stop"]) => app.preview_canvas(None),
+        ("canvas", [uri]) if spotify_client::canvas::is_track(uri) => {
+            app.preview_canvas(Some((*uri).to_owned()));
+        }
         ("yours", []) => {
             let mut lines = String::new();
             app.describe_your_episodes(&mut lines);
@@ -1023,6 +1045,7 @@ pub fn debug(
             }
             describe_words(app, &mut lines);
             app.describe_your_episodes(&mut lines);
+            app.describe_canvas(&mut lines);
             let _ = std::fs::write(directory.join("content.txt"), lines);
         }
         _ => return false,
@@ -1031,6 +1054,15 @@ pub fn debug(
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
+    let page = page_fragment(app);
+    match app.canvas_status() {
+        Some(status) if page.is_empty() => format!("canvas={status}"),
+        Some(status) => format!("{page} canvas={status}"),
+        None => page,
+    }
+}
+
+fn page_fragment(app: &OpenMusic) -> String {
     match &app.page {
         Page::Show(uri) => match &app.content.show {
             Some((loaded, Ok(show))) if loaded == uri => {
@@ -1166,6 +1198,11 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    let reduce_motion = app.content.canvas.reduce_motion;
+    app.canvas_tick();
+    if reduce_motion != app.content.canvas.reduce_motion && app.page == Page::Settings {
+        cx.notify();
+    }
     if app.settle_wanted() {
         cx.notify();
     }
@@ -1357,6 +1394,19 @@ mod tests {
         assert_eq!(save_step(Some(true), false), SaveStep::Write);
         assert_eq!(save_step(None, true), SaveStep::LookUp);
         assert_eq!(save_step(None, false), SaveStep::LookUp);
+    }
+
+    #[test]
+    fn shows_canvas_unless_turned_off() {
+        assert!(ContentPrefs::default().canvas);
+        let empty: ContentPrefs = serde_json::from_str("{}").unwrap();
+        assert!(empty.canvas);
+        let off: ContentPrefs = serde_json::from_str(r#"{"canvas":false}"#).unwrap();
+        assert!(!off.canvas);
+        assert_eq!(
+            serde_json::to_value(&off).unwrap(),
+            serde_json::json!({ "canvas": false })
+        );
     }
 
     #[test]
