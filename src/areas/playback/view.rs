@@ -772,7 +772,7 @@ pub fn row_accessories(
     if let Some(name) = queue_row
         .queued_by
         .as_deref()
-        .filter(|_| row.0 != QUEUE_RECENT)
+        .filter(|_| row.0 != QUEUE_RECENT && app.in_jam())
     {
         items.push(app.added_by_badge(name, palette));
     }

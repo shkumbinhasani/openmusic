@@ -529,6 +529,9 @@ impl OpenMusic {
     }
 
     pub fn request_people(&mut self) {
+        if !self.in_jam() {
+            return;
+        }
         let queue = &self.playback.queue;
         let rows: Vec<&super::state::QueueRow> = queue
             .current
