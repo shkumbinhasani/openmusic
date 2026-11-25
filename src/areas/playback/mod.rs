@@ -1,3 +1,4 @@
+pub mod jam;
 pub mod state;
 pub mod view;
 pub mod worker;

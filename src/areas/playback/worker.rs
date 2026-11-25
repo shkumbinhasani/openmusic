@@ -2,11 +2,13 @@ use spotify_client::{
     Track, catalog,
     connect::{self, ContextOptions, PlayOptions, Playback, QueueKey, Repeat, Shuffle},
     dealer::Message,
+    dj::{self, Dj},
     engine::{Control, remote},
+    jam::{self, JoinMode, Person, Session, SessionUpdate},
 };
 
 use super::state::PlaybackPrefs;
-use crate::worker::Ctx;
+use crate::worker::{Ctx, Mutation};
 
 pub enum Command {
     PlayContext {
@@ -53,7 +55,61 @@ pub enum Command {
         uri: String,
         next: bool,
     },
+    JamRefresh,
+    JamPreview(String),
+    JamWrite(JamAction),
+    JamRedirect(Option<String>),
+    People(Vec<String>),
+    DjCheck {
+        play: bool,
+    },
+    PlayDj(String),
+    DjJump,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JamAction {
+    Start,
+    Join { token: String, mode: JoinMode },
+    Leave(String),
+    End(String),
+    QueueOnly(bool),
+    VolumeControl(bool),
+    Remove { session: String, member: String },
+}
+
+impl JamAction {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Start => "NEW_SESSION",
+            Self::Join { .. } => "YOU_JOINED",
+            Self::Leave(_) => "YOU_LEFT",
+            Self::End(_) => "SESSION_DELETED",
+            Self::QueueOnly(_) => "QUEUE_ONLY_MODE_CONTROL_CHANGED",
+            Self::VolumeControl(_) => "VOLUME_CONTROL_PERMISSIONS_CHANGED",
+            Self::Remove { .. } => "USER_KICKED",
+        }
+    }
+
+    pub fn failure(&self) -> &'static str {
+        match self {
+            Self::Start => "Couldn’t start a Jam. Try again.",
+            Self::Join { .. } => "Couldn’t join the Jam. Try again.",
+            Self::Leave(_) => "Couldn’t leave the Jam. Try again.",
+            Self::End(_) => "Couldn’t end the Jam. Try again.",
+            Self::QueueOnly(_) | Self::VolumeControl(_) => {
+                "Couldn’t change the Jam settings. Try again."
+            }
+            Self::Remove { .. } => "Couldn’t remove that person. Try again.",
+        }
+    }
+
+    pub fn ends(&self) -> bool {
+        matches!(self, Self::Leave(_) | Self::End(_))
+    }
+}
+
+pub type JamResult = Result<Option<Box<Session>>, String>;
 
 pub const QUEUE_CONTEXT_LIMIT: usize = 200;
 
@@ -96,11 +152,53 @@ pub enum Event {
         next: bool,
         uris: Option<Vec<String>>,
     },
+    JamUpdate(Box<SessionUpdate>),
+    JamCurrent(JamResult),
+    JamWritten {
+        action: JamAction,
+        result: JamResult,
+    },
+    JamPreview {
+        token: String,
+        result: JamResult,
+    },
+    People {
+        asked: Vec<String>,
+        found: Option<Vec<Person>>,
+    },
+    Dj {
+        play: bool,
+        dj: Option<Dj>,
+    },
+}
+
+fn member_images(session: &Session) -> impl Iterator<Item = String> + '_ {
+    session
+        .members
+        .iter()
+        .filter_map(|member| member.image.clone())
+}
+
+fn result_images(result: &JamResult) -> Vec<String> {
+    match result {
+        Ok(Some(session)) => member_images(session).collect(),
+        _ => Vec::new(),
+    }
 }
 
 impl Event {
     pub fn covers(&self) -> Vec<String> {
         match self {
+            Self::JamUpdate(update) => update.session.iter().flat_map(member_images).collect(),
+            Self::JamCurrent(result)
+            | Self::JamWritten { result, .. }
+            | Self::JamPreview { result, .. } => result_images(result),
+            Self::People { found, .. } => found
+                .iter()
+                .flatten()
+                .filter_map(|person| person.image.clone())
+                .collect(),
+            Self::Dj { dj, .. } => dj.iter().filter_map(|dj| dj.cover.clone()).collect(),
             Self::Playback(view) => {
                 let queue = &view.playback.queue;
                 queue
@@ -239,8 +337,78 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 });
             return;
         }
+        Command::JamRefresh => {
+            let api = ctx.api.clone();
+            ctx.tasks.spawn_keyed("jam-current", async move {
+                Event::JamCurrent(boxed(jam::current(&api).await)).into()
+            });
+            return;
+        }
+        Command::JamPreview(token) => {
+            let api = ctx.api.clone();
+            ctx.tasks.spawn_keyed("jam-preview", async move {
+                let result = boxed(jam::info(&api, &token).await);
+                Event::JamPreview { token, result }.into()
+            });
+            return;
+        }
+        Command::JamWrite(action) => return write_jam(action, ctx),
+        Command::JamRedirect(session) => remote(remote::Control::Jam(session)),
+        Command::People(usernames) => {
+            let api = ctx.api.clone();
+            ctx.tasks.spawn(async move {
+                let found = jam::people(&api, &usernames).await.ok();
+                Event::People {
+                    asked: usernames,
+                    found,
+                }
+                .into()
+            });
+            return;
+        }
+        Command::DjCheck { play } => {
+            let api = ctx.api.clone();
+            ctx.tasks.spawn_keyed("dj", async move {
+                let dj = dj::lookup(&api).await.ok().flatten();
+                Event::Dj { play, dj }.into()
+            });
+            return;
+        }
+        Command::PlayDj(context_url) => remote(remote::Control::PlayDj { context_url }),
+        Command::DjJump => remote(remote::Control::DjJump),
     };
     ctx.handle.send(control);
+}
+
+fn boxed(result: anyhow::Result<Option<Session>>) -> JamResult {
+    result
+        .map(|session| session.map(Box::new))
+        .map_err(|error| error.to_string())
+}
+
+fn write_jam(action: JamAction, ctx: &mut Ctx) {
+    let api = ctx.api.clone();
+    let device = ctx.handle.device_id.clone();
+    let key = format!("jam {action:?}");
+    ctx.writes.push(Mutation::new(vec![key], async move {
+        let written = match &action {
+            JamAction::Start => jam::start(&api, &device).await.map(Some),
+            JamAction::Join { token, mode } => {
+                jam::join(&api, token, *mode, &device).await.map(Some)
+            }
+            JamAction::Leave(session) => jam::leave(&api, session).await.map(|_| None),
+            JamAction::End(session) => jam::end(&api, session).await.map(|_| None),
+            JamAction::QueueOnly(on) => jam::set_queue_only(&api, *on).await,
+            JamAction::VolumeControl(on) => jam::set_volume_control(&api, *on).await,
+            JamAction::Remove { session, member } => jam::remove(&api, session, member).await,
+        };
+        let result = match written {
+            Ok(None) if !action.ends() => boxed(jam::current(&api).await),
+            Ok(session) => Ok(session.map(Box::new)),
+            Err(_) => Err(action.failure().to_owned()),
+        };
+        Ok(Event::JamWritten { action, result }.into())
+    }));
 }
 
 fn lookup(asked: Vec<String>, ctx: &mut Ctx) {
@@ -274,7 +442,11 @@ fn lookup(asked: Vec<String>, ctx: &mut Ctx) {
     });
 }
 
-pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
+pub fn on_push(message: &Message, ctx: &mut Ctx) {
+    if let Some(update) = jam::update(message) {
+        ctx.publish(Event::JamUpdate(Box::new(update)));
+    }
+}
 
 pub fn on_playback(playback: Box<Playback>, ctx: &mut Ctx) {
     let mut tracks: Vec<Track> = Vec::new();

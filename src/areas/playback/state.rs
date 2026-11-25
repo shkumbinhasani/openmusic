@@ -14,14 +14,21 @@ use spotify_client::{
         self, Allowed, ConnectDevice, ContextOptions, DeviceKind, PlayOptions, Playback, QueueItem,
         QueueKey, Repeat, Shuffle,
     },
+    dj::{self, Dj},
     engine::NowPlaying,
     entity,
+    jam::{JoinMode, VolumeControl},
 };
 
-use super::worker::{Command, Event, PlaybackView, RECENT_LIMIT, lookup_uri};
+use super::{
+    jam::{self as jams, GUEST_WARNING, HOST_VOLUME, JamState, LEAVE_FIRST},
+    worker::{Command, Event, PlaybackView, RECENT_LIMIT, lookup_uri},
+};
 use crate::{
     app::{OpenMusic, Page, intent::Intent},
-    menus::{self, CycleRepeat, Handle, PlayOnThisMac, ShowDevices, ShowQueue, ToggleShuffle},
+    menus::{
+        self, CycleRepeat, Handle, PlayOnThisMac, ShowDevices, ShowQueue, StartJam, ToggleShuffle,
+    },
     ui::{
         menu::{self, Place, Row, Target},
         tracks::{RowDrag, RowDrop},
@@ -45,6 +52,9 @@ pub const QUEUE_NEXT: &str = "queue-next";
 pub const QUEUE_AUTOPLAY: &str = "queue-autoplay";
 pub const QUEUE_RECENT: &str = "queue-recent";
 const MOVABLE: [&str; 2] = [QUEUE_QUEUED, QUEUE_NEXT];
+pub const DJ_JUMP: &str = "dj-jump";
+pub const DJ_UNAVAILABLE: &str = "DJ isn’t available right now.";
+pub const DJ_VOICE: &str = "In beta, the DJ’s voice is unavailable on this speaker";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,6 +65,23 @@ pub struct QueueRow {
     pub key: QueueKey,
     pub provider: String,
     pub track: Track,
+    pub queued_by: Option<String>,
+}
+
+#[derive(Default)]
+pub struct DjState {
+    pub available: Option<Dj>,
+    pub checked: bool,
+    voice_noted: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerAction {
+    StartJam,
+    OpenJam,
+    CopyJamLink,
+    LeaveJam,
+    EndJam,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -122,6 +149,13 @@ pub enum PickerRow {
     },
     Volume(f32),
     Note(&'static str),
+    Separator,
+    Action {
+        action: PickerAction,
+        title: String,
+        subtitle: Option<String>,
+        symbol: &'static str,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +176,8 @@ pub struct State {
     pub refreshes: u32,
     pub transfer: Option<PendingTransfer>,
     pub dock_devices: Cell<bool>,
+    pub jam: JamState,
+    pub dj: DjState,
     missing: HashSet<String>,
     requested: HashSet<String>,
     pending_shuffle: Option<(Shuffle, Instant)>,
@@ -170,6 +206,8 @@ impl State {
                 .chain(&queue.recent)
                 .filter_map(|row| row.track.cover.clone()),
         );
+        self.jam.covers(urls);
+        urls.extend(self.dj.available.iter().filter_map(|dj| dj.cover.clone()));
     }
 }
 
@@ -220,6 +258,14 @@ fn metadata_track(item: &QueueItem, title: &str) -> Track {
 
 fn uid(item: &QueueItem) -> Option<String> {
     (!item.uid.is_empty()).then(|| item.uid.clone())
+}
+
+fn queued_by(item: &QueueItem) -> Option<String> {
+    item.metadata
+        .get("queued_by")
+        .map(|name| name.trim())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 fn hidden(key: &QueueKey, pending: Option<&PendingQueue>) -> bool {
@@ -336,9 +382,38 @@ impl OpenMusic {
     }
 
     pub fn in_jam(&self) -> bool {
-        self.playback_model()
-            .and_then(|model| model.jam_mode.as_deref())
-            .is_some_and(|mode| !mode.is_empty() && mode != "off")
+        self.jam().is_some()
+            || self
+                .playback_model()
+                .and_then(|model| model.jam_mode.as_deref())
+                .is_some_and(|mode| !mode.is_empty() && mode != "off")
+    }
+
+    pub fn dj_context(&self) -> bool {
+        self.playback_model().is_some_and(dj::in_dj)
+    }
+
+    pub fn dj_narrating(&self) -> bool {
+        self.playback_model().is_some_and(dj::narrating)
+    }
+
+    pub fn dj_jump_available(&self) -> bool {
+        self.playback_model().and_then(dj::jump).is_some()
+    }
+
+    pub fn dj_jump(&mut self, cx: &mut Context<Self>) {
+        if !self.dj_jump_available() {
+            return;
+        }
+        self.playback.notice = None;
+        self.send(Command::DjJump);
+        cx.notify();
+    }
+
+    pub fn play_dj(&mut self, cx: &mut Context<Self>) {
+        self.playback.notice = None;
+        self.send(Command::DjCheck { play: true });
+        cx.notify();
     }
 
     pub fn smart_shuffle_allowed(&self) -> bool {
@@ -603,6 +678,7 @@ impl OpenMusic {
             key: item.key(),
             provider: item.provider.clone(),
             track: self.decorate(item),
+            queued_by: queued_by(item),
         }
     }
 
@@ -746,9 +822,22 @@ impl OpenMusic {
         {
             self.playback.transfer = None;
         }
+        let jam_mode =
+            |mode: Option<&str>| mode.is_some_and(|mode| !mode.is_empty() && mode != "off");
+        let jam_changed = jam_mode(playback.jam_mode.as_deref())
+            != jam_mode(
+                self.playback
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.jam_mode.as_deref()),
+            );
         self.playback.model = Some(Box::new(playback));
         self.request_queue_tracks();
         self.refresh_queue();
+        self.request_people();
+        if jam_changed {
+            self.refresh_jam();
+        }
     }
 
     pub fn queue_editable(&self) -> bool {
@@ -926,6 +1015,11 @@ impl OpenMusic {
     }
 
     pub fn transfer_to(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.jam_redirected() {
+            self.show_toast(LEAVE_FIRST, None);
+            cx.notify();
+            return;
+        }
         let Some(model) = self.playback_model() else {
             return;
         };
@@ -947,6 +1041,11 @@ impl OpenMusic {
     }
 
     pub fn play_here(&mut self, cx: &mut Context<Self>) {
+        if self.jam_redirected() {
+            self.show_toast(LEAVE_FIRST, None);
+            cx.notify();
+            return;
+        }
         if let Some(own) = self
             .playback_model()
             .filter(|_| self.remote_device().is_some())
@@ -964,6 +1063,13 @@ impl OpenMusic {
     }
 
     pub fn volume_state(&self) -> (bool, Option<String>) {
+        let host_speaker = self.remote_device().is_some() || self.active_device().is_none();
+        if self.jam().is_some_and(|session| {
+            !session.is_owner && session.volume_control != VolumeControl::Enabled
+        }) && host_speaker
+        {
+            return (false, Some(HOST_VOLUME.to_owned()));
+        }
         match self.remote_device() {
             Some(device) if device.volume.is_none() => (
                 false,
@@ -1002,6 +1108,9 @@ impl OpenMusic {
     }
 
     pub fn queue_allowed(&self, next: bool) -> bool {
+        if self.jam_guest() {
+            return true;
+        }
         let allowed = self.playback_allowed();
         self.playback_model()
             .is_some_and(|model| model.active_device_id.is_some())
@@ -1040,19 +1149,49 @@ impl OpenMusic {
 }
 
 pub fn load(app: &mut OpenMusic, page: &Page) {
-    if *page == Page::Queue {
-        app.request_queue_tracks();
-        app.refresh_queue();
+    match page {
+        Page::Queue => {
+            app.request_queue_tracks();
+            app.refresh_queue();
+        }
+        Page::Jam => {
+            app.request_queue_tracks();
+            app.refresh_queue();
+            app.refresh_jam();
+            app.request_people();
+        }
+        Page::JamInvite(uri) => {
+            if let Some(token) = spotify_client::jam::token_from_uri(uri) {
+                app.playback.jam.mode = JoinMode::default();
+                app.preview_jam(&token);
+            }
+        }
+        _ => {}
     }
 }
 
 pub fn on_event(
     app: &mut OpenMusic,
     event: Event,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) {
     match event {
+        Event::JamUpdate(update) => app.on_jam_update(*update, window, cx),
+        Event::JamCurrent(result) => app.on_jam_current(result, window, cx),
+        Event::JamWritten { action, result } => app.on_jam_written(action, result, window, cx),
+        Event::JamPreview { token, result } => app.on_jam_preview(token, result),
+        Event::People { asked, found } => app.on_people(asked, found),
+        Event::Dj { play, dj } => {
+            app.playback.dj.checked = true;
+            app.playback.dj.available = dj.clone();
+            if play {
+                match dj {
+                    Some(dj) => app.send(Command::PlayDj(dj.context_url)),
+                    None => app.show_toast(DJ_UNAVAILABLE, None),
+                }
+            }
+        }
         Event::Playback(view) => app.on_playback(*view),
         Event::Tracks { asked, found } => {
             match found {
@@ -1090,7 +1229,10 @@ pub fn on_event(
     cx.notify();
 }
 
-pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {}
+pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+    app.refresh_jam();
+    app.send(Command::DjCheck { play: false });
+}
 
 pub fn signed_out(app: &mut OpenMusic) {
     app.playback = State::default();
@@ -1329,15 +1471,85 @@ pub fn debug(
                 app.queue_from(source, verb == "addnext", cx);
             }
         }
+        "jam" => {
+            let _ = std::fs::write(directory.join("jam.txt"), jams::dump(app));
+        }
+        "jamrefresh" => app.refresh_jam(),
+        "jamstart" => app.start_jam(None, cx),
+        "jamleave" if rest == "confirm" => app.confirm_leave_jam(window, cx),
+        "jamleave" => app.leave_jam(cx),
+        "jamend" if rest == "confirm" => app.confirm_end_jam(window, cx),
+        "jamend" => app.end_jam(cx),
+        "jamjoin" => {
+            let link = words.next().unwrap_or_default();
+            let mode = match words.next() {
+                Some("inperson") => JoinMode::InPerson,
+                _ => JoinMode::Remote,
+            };
+            if let Some(token) = spotify_client::jam::token(link) {
+                app.join_jam(token, mode, cx);
+            }
+        }
+        "jampreview" => {
+            if let Some(token) = spotify_client::jam::token(rest) {
+                app.navigate(Page::JamInvite(spotify_client::jam::invite_uri(&token)));
+            }
+        }
+        "jamqueueonly" => app.set_jam_queue_only(rest == "on", cx),
+        "jamvolume" => app.set_jam_volume_control(rest == "on", cx),
+        "jamremove" => {
+            let member = words.next().unwrap_or_default().to_owned();
+            if words.next() == Some("confirm") {
+                app.confirm_remove_from_jam(&member, window, cx);
+            } else {
+                app.remove_from_jam(member, cx);
+            }
+        }
+        "jamlink" => app.copy_jam_link(cx),
+        "jamfixture" => {
+            let session = std::fs::read(rest)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .as_ref()
+                .and_then(spotify_client::jam::parse);
+            app.show_jam_fixture(session);
+        }
+        "dj" => {
+            let _ = std::fs::write(directory.join("dj.txt"), dj_dump(app));
+        }
+        "djcheck" => app.send(Command::DjCheck { play: false }),
+        "djplay" => app.play_dj(cx),
+        "djjump" => app.dj_jump(cx),
         _ => return false,
     }
     true
 }
 
+fn dj_dump(app: &OpenMusic) -> String {
+    let model = app.playback_model();
+    format!(
+        "available={} checked={} name={:?} context={} narrating={} jump={:?} dock={}",
+        app.playback.dj.available.is_some(),
+        app.playback.dj.checked,
+        app.playback
+            .dj
+            .available
+            .as_ref()
+            .map(|dj| dj.name.as_str()),
+        app.dj_context(),
+        app.dj_narrating(),
+        model.and_then(dj::jump).map(|jump| match jump {
+            dj::Jump::Signal => "signal".to_owned(),
+            dj::Jump::SkipTo(track) => format!("skip_to {}", track.uri),
+        }),
+        app.dj_context() && app.dj_jump_available(),
+    )
+}
+
 pub fn state_fragment(app: &OpenMusic) -> String {
     let model = app.playback_model();
     format!(
-        "shuffle={:?} repeat={:?} queued={} next_up={} revision={} active={} refreshes={} transfer={} volume_enabled={}",
+        "shuffle={:?} repeat={:?} queued={} next_up={} revision={} active={} refreshes={} transfer={} volume_enabled={} jam={} jam_members={} jam_redirect={} dj={} dj_context={}",
         app.shuffle_mode(),
         app.repeat_mode(),
         model.map_or(0, |model| model.queue.queued.len()),
@@ -1352,6 +1564,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             .as_ref()
             .map_or("-", |pending| pending.id.as_str()),
         app.volume_allowed(),
+        app.jam().map_or("-", |session| session.id.as_str()),
+        app.jam().map_or(0, |session| session.members.len()),
+        app.playback.jam.redirect().is_some(),
+        app.playback.dj.available.is_some(),
+        app.dj_context(),
     )
 }
 
@@ -1374,7 +1591,13 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     menus::route(cx, handle, |_: &PlayOnThisMac, app, _, cx| {
         app.play_here(cx)
     });
+    menus::route(cx, handle, |_: &StartJam, app, _, cx| {
+        app.start_jam(None, cx);
+        cx.notify();
+    });
 }
+
+const HOST_CONTROLS: [&str; 5] = ["previous", "next", "toggle-playback", "shuffle", "repeat"];
 
 pub fn on_press(
     app: &mut OpenMusic,
@@ -1382,7 +1605,15 @@ pub fn on_press(
     window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) -> bool {
+    if HOST_CONTROLS.contains(&key) && app.jam_controls_locked() {
+        app.show_toast(GUEST_WARNING, None);
+        return true;
+    }
+    if jams::on_press(app, key, window, cx) {
+        return true;
+    }
     match key {
+        DJ_JUMP => app.dj_jump(cx),
         "previous" => app.perform(Intent::Previous, window, cx),
         "next" => app.perform(Intent::Next, window, cx),
         "toggle-playback" => app.perform(Intent::PlayPause, window, cx),
@@ -1482,9 +1713,32 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
         let uri = uri.clone();
         app.request_context_options(&uri);
     }
+    if app.jam_tick() {
+        changed = true;
+    }
+    if note_dj_voice(app) {
+        changed = true;
+    }
     if changed {
         cx.notify();
     }
+}
+
+fn note_dj_voice(app: &mut OpenMusic) -> bool {
+    let here = app.active_device().is_some_and(|device| device.this_mac);
+    let context = app
+        .playback_model()
+        .filter(|_| here && app.dj_context())
+        .and_then(|model| model.context_uri.clone());
+    let Some(context) = context else {
+        return false;
+    };
+    if app.playback.dj.voice_noted.as_ref() == Some(&context) {
+        return false;
+    }
+    app.playback.dj.voice_noted = Some(context);
+    app.show_toast(DJ_VOICE, None);
+    true
 }
 
 #[cfg(test)]
@@ -1562,6 +1816,21 @@ mod tests {
         };
         assert_eq!(metadata_track(&bare, "Loading…").title, "Loading…");
         assert_eq!(metadata_track(&bare, "Loading…").duration_ms, 0);
+        assert_eq!(queued_by(&bare), None);
+        let jam_item = QueueItem {
+            metadata: [("queued_by".to_owned(), " friend ".to_owned())]
+                .into_iter()
+                .collect(),
+            ..bare.clone()
+        };
+        assert_eq!(queued_by(&jam_item).as_deref(), Some("friend"));
+        let blank = QueueItem {
+            metadata: [("queued_by".to_owned(), String::new())]
+                .into_iter()
+                .collect(),
+            ..bare
+        };
+        assert_eq!(queued_by(&blank), None);
     }
 
     const OWN: &str = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000";
@@ -1792,6 +2061,7 @@ mod tests {
             },
             provider: "queue".into(),
             track: Track::placeholder(&format!("spotify:track:{uid}")),
+            queued_by: None,
         };
         let view = QueueView {
             current: Some(row("now")),

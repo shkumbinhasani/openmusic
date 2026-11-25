@@ -9,9 +9,13 @@ use spotify_client::{
     connect::{Repeat, Shuffle},
 };
 
-use super::state::{
-    DEVICE_PANEL, DEVICES_BUTTON, PickerRow, QUEUE_AUTOPLAY, QUEUE_CURRENT, QUEUE_NEXT,
-    QUEUE_QUEUED, QUEUE_RECENT, QueueSource, device_label, next_repeat, next_shuffle, queue_source,
+use super::{
+    jam::{JAM_SYMBOL, PlayAfter, jam_rows},
+    state::{
+        DEVICE_PANEL, DEVICES_BUTTON, DJ_JUMP, PickerAction, PickerRow, QUEUE_AUTOPLAY,
+        QUEUE_CURRENT, QUEUE_NEXT, QUEUE_QUEUED, QUEUE_RECENT, QueueSource, device_label,
+        next_repeat, next_shuffle, queue_source,
+    },
 };
 use crate::{
     app::{OpenMusic, Page},
@@ -34,6 +38,17 @@ impl OpenMusic {
             .map(device_label)
             .or_else(|| self.playback.now.device.clone())
             .filter(|_| !self.playback.now.local);
+        let remote = remote.or_else(|| {
+            self.jam()
+                .filter(|session| session.redirect_commands && !self.playback.now.local)
+                .map(|session| {
+                    if session.host_device_name.is_empty() {
+                        format!("{}’s speaker", session.host_name())
+                    } else {
+                        session.host_device_name.clone()
+                    }
+                })
+        });
         let pending = self.playback.transfer.as_ref();
         let (caption, name) = match (pending, &remote, self.playback.now.local) {
             (Some(pending), _, _) => ("Connecting to", pending.name.clone()),
@@ -98,22 +113,48 @@ impl OpenMusic {
                             ),
                     ),
             )
-            .when(remote.is_some(), |panel| {
-                panel.child(
-                    self.text_control("play-here", "Play on This Mac", true, palette, cx)
-                        .h(px(30.))
-                        .w_full(),
-                )
-            })
+            .when(
+                remote.is_some() && !self.dj_narrating() && !self.jam_redirected(),
+                |panel| {
+                    panel.child(
+                        self.text_control("play-here", "Play on This Mac", true, palette, cx)
+                            .h(px(30.))
+                            .w_full(),
+                    )
+                },
+            )
+            .children(self.jam_panel(palette, cx))
     }
 
     pub fn device_menu(&self) -> Vec<MenuItem> {
-        self.picker_rows()
-            .into_iter()
+        let mut rows = self.picker_rows();
+        rows.extend(jam_rows(self.jam()));
+        rows.into_iter()
             .map(|row| match row {
                 PickerRow::Header(text) => MenuItem::header(text),
                 PickerRow::Note(text) => MenuItem::note(text),
                 PickerRow::Volume(value) => MenuItem::Volume(value),
+                PickerRow::Separator => MenuItem::Separator,
+                PickerRow::Action {
+                    action,
+                    title,
+                    subtitle,
+                    symbol,
+                } => {
+                    let item = MenuItem::action(title, move |app, window, cx| match action {
+                        PickerAction::StartJam => app.start_jam(None, cx),
+                        PickerAction::OpenJam => app.navigate(Page::Jam),
+                        PickerAction::CopyJamLink => app.copy_jam_link(cx),
+                        PickerAction::LeaveJam => app.confirm_leave_jam(window, cx),
+                        PickerAction::EndJam => app.confirm_end_jam(window, cx),
+                    })
+                    .symbol(symbol)
+                    .enabled(!self.jam_busy());
+                    match subtitle {
+                        Some(text) => item.subtitle(text),
+                        None => item,
+                    }
+                }
                 PickerRow::Device {
                     id,
                     title,
@@ -140,7 +181,7 @@ impl OpenMusic {
     }
 }
 
-fn jump(prefix: &'static str) -> RowClick {
+pub(super) fn jump(prefix: &'static str) -> RowClick {
     Rc::new(
         move |app: &mut OpenMusic, _: &[Track], index, _: &mut Window, cx| {
             app.jump_in_queue((prefix, index), cx)
@@ -148,7 +189,7 @@ fn jump(prefix: &'static str) -> RowClick {
     )
 }
 
-fn heading(text: impl Into<SharedString>) -> Div {
+pub(super) fn heading(text: impl Into<SharedString>) -> Div {
     div()
         .flex_1()
         .min_w_0()
@@ -159,7 +200,7 @@ fn heading(text: impl Into<SharedString>) -> Div {
 }
 
 impl OpenMusic {
-    fn queue_section(
+    pub(super) fn queue_section(
         &self,
         title: impl Into<SharedString>,
         prefix: &'static str,
@@ -238,18 +279,25 @@ impl OpenMusic {
                 .font_weight(FontWeight::BOLD)
                 .child("Queue"),
         );
-        let page = page.when(self.in_jam(), |page| {
-            page.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(rgb(palette.muted))
-                    .child("You’re in a Jam, so the queue can’t be rearranged here."),
-            )
-        });
+        let page = match self.jam_queue_note(palette, cx) {
+            Some(note) => page.child(note),
+            None => page.when(self.in_jam(), |page| {
+                page.child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(rgb(palette.muted))
+                        .child("You’re in a Jam, so the queue can’t be rearranged here."),
+                )
+            }),
+        };
+        let dj = self.dj_context();
         if queue.current.is_none() && queue.upcoming() == 0 && queue.recent.is_empty() {
             return page.child(self.queue_empty(palette, cx)).into_any_element();
         }
         if model.is_some_and(|model| model.track.is_some()) && !allowed.view_queue {
+            if dj {
+                return page.child(dj_queue_note(palette)).into_any_element();
+            }
             return page
                 .child(self.page_status("The queue isn’t available for what’s playing.", palette))
                 .into_any_element();
@@ -281,7 +329,10 @@ impl OpenMusic {
                     .into_any_element(),
             );
         }
-        if !queue.next.is_empty() {
+        if dj {
+            sections.push(dj_queue_note(palette).into_any_element());
+        }
+        if !dj && !queue.next.is_empty() {
             let options = RowOptions {
                 on_click: Some(jump(QUEUE_NEXT)),
                 draggable: reorder,
@@ -297,7 +348,7 @@ impl OpenMusic {
                     .into_any_element(),
             );
         }
-        if !queue.autoplay.is_empty() {
+        if !dj && !queue.autoplay.is_empty() {
             let options = RowOptions {
                 on_click: Some(jump(QUEUE_AUTOPLAY)),
                 ..base.clone()
@@ -314,7 +365,7 @@ impl OpenMusic {
                 .into_any_element(),
             );
         }
-        if queue.current.is_some() && queue.upcoming() == 0 {
+        if !dj && queue.current.is_some() && queue.upcoming() == 0 {
             sections.push(
                 self.page_status("Nothing else is coming up.", palette)
                     .px_2()
@@ -338,20 +389,94 @@ impl OpenMusic {
         &self,
         _card_side: Pixels,
         palette: Palette,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
+        self.jam_page_body(palette, cx)
     }
 
     pub fn jam_invite_page(
         &self,
-        _uri: &str,
+        uri: &str,
         _card_side: Pixels,
         palette: Palette,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(self.jam_invite_body(uri, palette, cx))
+            .into_any_element()
     }
+}
+
+fn dj_queue_note(palette: Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_2()
+        .child(heading("The DJ doesn’t have a queue"))
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(rgb(palette.muted))
+                .child(
+                    "Your DJ picks each song for you in the moment, so you never know what’s coming next.",
+                ),
+        )
+}
+
+fn play_after(target: &Target) -> Option<PlayAfter> {
+    match target {
+        Target::Track(track) if !track.track.uri.starts_with("spotify:local:") => {
+            Some(PlayAfter::Track(Box::new(track.track.clone())))
+        }
+        Target::Album { uri } | Target::Playlist { uri } => Some(PlayAfter::Context(uri.clone())),
+        _ => None,
+    }
+}
+
+fn jam_actions(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    if let Target::User { uri } = target {
+        let username = uri.rsplit(':').next().unwrap_or_default();
+        let Some(member) = app
+            .jam()
+            .filter(|session| session.can_remove)
+            .and_then(|session| {
+                session
+                    .member(username)
+                    .filter(|member| member.id != session.owner_id && !member.current_user)
+            })
+        else {
+            return Vec::new();
+        };
+        let id = member.id.clone();
+        return vec![(
+            Group::Edit,
+            MenuItem::action("Remove from Jam", move |app, window, cx| {
+                app.confirm_remove_from_jam(&id, window, cx)
+            })
+            .symbol("person.crop.circle.badge.xmark")
+            .enabled(!app.jam_busy()),
+        )];
+    }
+    if app.jam().is_some() || !matches!(app.session, crate::app::Session::Connected) {
+        return Vec::new();
+    }
+    let Some(play) = play_after(target) else {
+        return Vec::new();
+    };
+    vec![(
+        Group::Queue,
+        MenuItem::action("Start a Jam", move |app, _, cx| {
+            app.start_jam(Some(play.clone()), cx)
+        })
+        .key("j")
+        .symbol(JAM_SYMBOL)
+        .enabled(!app.jam_busy()),
+    )]
 }
 
 fn context_empty(app: &OpenMusic, source: &QueueSource) -> bool {
@@ -393,6 +518,7 @@ fn queue_actions(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
 
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     let mut items = queue_actions(target, app);
+    items.extend(jam_actions(target, app));
     let Target::Track(track) = target else {
         return items;
     };
@@ -425,14 +551,35 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
-    vec![NavEntry::new(
+    let mut entries = vec![NavEntry::new(
         "nav-queue",
         400,
         icons::QUEUE,
         "Queue",
         app.page == Page::Queue,
         |app, _, _| app.navigate(Page::Queue),
-    )]
+    )];
+    if app.jam().is_some() {
+        entries.push(NavEntry::new(
+            "nav-jam",
+            410,
+            icons::PERSON,
+            "Jam",
+            app.page == Page::Jam,
+            |app, _, _| app.navigate(Page::Jam),
+        ));
+    }
+    if let Some(dj) = &app.playback.dj.available {
+        entries.push(NavEntry::new(
+            "nav-dj",
+            450,
+            icons::SHUFFLE_SMART,
+            dj.name.clone(),
+            app.dj_context(),
+            |app, _, cx| app.play_dj(cx),
+        ));
+    }
+    entries
 }
 
 fn shuffle_button(app: &OpenMusic) -> ButtonSpec {
@@ -544,6 +691,21 @@ pub fn dock_items(
                 .size(px(36.)),
         ),
     ];
+    if app.dj_context() && app.dj_jump_available() {
+        let jump = ButtonSpec {
+            label: Label::Symbol("waveform"),
+            prominent: false,
+            enabled: true,
+            tooltip: Some("Get some different DJ picks".to_owned()),
+        };
+        items.push(DockItem::new(
+            DJ_JUMP,
+            640,
+            48.,
+            app.glass_control(DJ_JUMP, jump, true, palette, cx)
+                .size(px(48.)),
+        ));
+    }
     if roomy {
         let queue = ButtonSpec {
             label: Label::Symbol("list.bullet"),
@@ -595,6 +757,13 @@ pub fn row_accessories(
         return Vec::new();
     };
     let mut items = Vec::new();
+    if let Some(name) = queue_row
+        .queued_by
+        .as_deref()
+        .filter(|_| row.0 != QUEUE_RECENT)
+    {
+        items.push(app.added_by_badge(name, palette));
+    }
     if queue_row.provider == "enhanced_recommendation" {
         items.push(icon(icons::SHUFFLE_SMART, 15., palette.accent).into_any_element());
     }
