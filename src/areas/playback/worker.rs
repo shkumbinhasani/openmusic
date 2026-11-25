@@ -55,8 +55,8 @@ pub enum Command {
         volume: u16,
     },
     QueueContext {
+        id: u64,
         uri: String,
-        next: bool,
     },
     JamRefresh,
     JamPreview(String),
@@ -152,7 +152,7 @@ pub enum Event {
         options: Option<ContextOptions>,
     },
     Resolved {
-        next: bool,
+        id: u64,
         uris: Option<Vec<String>>,
     },
     JamUpdate(Box<SessionUpdate>),
@@ -322,10 +322,10 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::DeviceVolume { device, volume } => {
             remote(remote::Control::DeviceVolume { device, volume })
         }
-        Command::QueueContext { uri, next } => {
+        Command::QueueContext { id, uri } => {
             let api = ctx.api.clone();
             ctx.tasks
-                .spawn_keyed(format!("queue-context {uri}"), async move {
+                .spawn_keyed(format!("queue-context {id}"), async move {
                     let uris = catalog::context_uris(&api, &uri, QUEUE_CONTEXT_LIMIT)
                         .await
                         .ok()
@@ -336,7 +336,7 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                                 .filter(|uri| lookup_uri(uri))
                                 .collect()
                         });
-                    Event::Resolved { next, uris }.into()
+                    Event::Resolved { id, uris }.into()
                 });
             return;
         }

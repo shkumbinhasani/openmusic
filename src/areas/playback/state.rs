@@ -22,6 +22,7 @@ use spotify_client::{
 
 use super::{
     jam::{self as jams, GUEST_WARNING, HOST_VOLUME, JamState, LEAVE_FIRST},
+    queue_order::{QueueOrder, Ready},
     worker::{Command, Event, PlaybackView, RECENT_LIMIT, lookup_uri},
 };
 use crate::{
@@ -192,6 +193,7 @@ pub struct State {
     pending_queue: Option<PendingQueue>,
     last_refresh: Option<Instant>,
     queue_toast: Option<Instant>,
+    queue_order: QueueOrder,
 }
 
 impl State {
@@ -1262,6 +1264,17 @@ impl OpenMusic {
         if uris.is_empty() || !self.queue_allowed(next) {
             return;
         }
+        if self.playback.queue_order.busy() {
+            self.playback.queue_order.hold(uris, next);
+            return;
+        }
+        self.send_to_queue(uris, next, cx);
+    }
+
+    fn send_to_queue(&mut self, uris: Vec<String>, next: bool, cx: &mut Context<Self>) {
+        if uris.is_empty() || !self.queue_allowed(next) {
+            return;
+        }
         self.playback.notice = None;
         self.send(if next {
             Command::PlayNext(uris)
@@ -1278,9 +1291,31 @@ impl OpenMusic {
             QueueSource::Items(uris) => self.add_to_queue(uris, next, cx),
             QueueSource::Context(uri) if self.queue_allowed(next) => {
                 self.playback.notice = None;
-                self.send(Command::QueueContext { uri, next });
+                let id = self.playback.queue_order.resolving(next, Instant::now());
+                self.send(Command::QueueContext { id, uri });
             }
             QueueSource::Context(_) => {}
+        }
+    }
+
+    fn release_queued(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let revision = self
+                .playback_model()
+                .map(|model| model.queue.revision.clone());
+            let Some(Ready { next, uris }) = self
+                .playback
+                .queue_order
+                .due(Instant::now(), revision.as_deref())
+            else {
+                return;
+            };
+            match uris {
+                Some(uris) if !uris.is_empty() => self.send_to_queue(uris, next, cx),
+                Some(_) => self.show_toast("There’s nothing here to add to the queue.", None),
+                None => self.show_toast("Couldn’t add that to the queue.", None),
+            }
+            cx.notify();
         }
     }
 }
@@ -1357,11 +1392,10 @@ pub fn on_event(
         Event::ContextOptions { uri, options } => {
             app.playback.contexts.entry(uri).or_default().server = options;
         }
-        Event::Resolved { next, uris } => match uris {
-            Some(uris) if !uris.is_empty() => app.add_to_queue(uris, next, cx),
-            Some(_) => app.show_toast("There’s nothing here to add to the queue.", None),
-            None => app.show_toast("Couldn’t add that to the queue.", None),
-        },
+        Event::Resolved { id, uris } => {
+            app.playback.queue_order.resolved(id, uris);
+            app.release_queued(cx);
+        }
     }
     cx.notify();
 }
@@ -1847,6 +1881,9 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     {
         let uri = uri.clone();
         app.request_context_options(&uri);
+    }
+    if app.playback.queue_order.busy() {
+        app.release_queued(cx);
     }
     if app.jam_tick() {
         changed = true;
