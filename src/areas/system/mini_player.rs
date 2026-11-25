@@ -17,6 +17,8 @@ pub const CLOSE: &str = "mini-close";
 pub const EXPAND: &str = "mini-expand";
 pub const KEYS: [&str; 6] = [PREVIOUS, TOGGLE, NEXT, LIKE, CLOSE, EXPAND];
 
+pub const CLICK_SLOP: f64 = 3.;
+
 const CHROME: f64 = 22.;
 const CHROME_INSET: f64 = 8.;
 const GAP: f64 = 4.;
@@ -300,14 +302,22 @@ pub fn symbol_size(button: f64) -> f64 {
     (button * 0.42).clamp(12., 17.)
 }
 
+pub fn drags(moved: bool, dx: f64, dy: f64) -> bool {
+    moved || dx.hypot(dy) >= CLICK_SLOP
+}
+
 #[cfg(target_os = "macos")]
 mod native {
-    use std::{cell::RefCell, ptr::NonNull, sync::Arc};
+    use std::{
+        cell::{Cell, RefCell},
+        ptr::NonNull,
+        sync::Arc,
+    };
 
     use block2::RcBlock;
     use gpui::Image;
     use objc2::{
-        AllocAnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+        AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
         rc::Retained,
         runtime::{AnyClass, AnyObject, NSObject, ProtocolObject},
         sel,
@@ -328,7 +338,7 @@ mod native {
 
     use super::{
         AUTOSAVE, CLOSE, DEFAULT_SIDE, EXPAND, Frames, KEYS, LIKE, Layout, MIN_HEIGHT, MIN_WIDTH,
-        MiniState, NEXT, PREVIOUS, Rect, TOGGLE, frames, symbol_size,
+        MiniState, NEXT, PREVIOUS, Rect, TOGGLE, drags, frames, symbol_size,
     };
     use crate::{
         appkit::{Target, dispatch, label, sized_symbol, string},
@@ -365,6 +375,77 @@ mod native {
         }
     }
 
+    #[derive(Default)]
+    struct Press {
+        start: Cell<Option<(NSPoint, NSPoint)>>,
+        moved: Cell<bool>,
+    }
+
+    define_class!(
+        #[unsafe(super(NSImageView, NSControl, NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "OpenMusicMiniPlayerArt"]
+        #[ivars = Press]
+        struct ArtView;
+
+        unsafe impl NSObjectProtocol for ArtView {}
+
+        impl ArtView {
+            #[unsafe(method(mouseDownCanMoveWindow))]
+            fn mouse_down_can_move_window(&self) -> bool {
+                false
+            }
+
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+                true
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, _event: &NSEvent) {
+                let origin = self.window().map(|window| window.frame().origin);
+                let press = self.ivars();
+                press
+                    .start
+                    .set(origin.map(|origin| (NSEvent::mouseLocation(), origin)));
+                press.moved.set(false);
+            }
+
+            #[unsafe(method(mouseDragged:))]
+            fn mouse_dragged(&self, _event: &NSEvent) {
+                let press = self.ivars();
+                let Some((pointer, origin)) = press.start.get() else {
+                    return;
+                };
+                let now = NSEvent::mouseLocation();
+                let (dx, dy) = (now.x - pointer.x, now.y - pointer.y);
+                if !drags(press.moved.get(), dx, dy) {
+                    return;
+                }
+                press.moved.set(true);
+                if let Some(window) = self.window() {
+                    window.setFrameOrigin(NSPoint::new(origin.x + dx, origin.y + dy));
+                }
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, event: &NSEvent) {
+                let press = self.ivars();
+                let pressed = press.start.take().is_some();
+                if pressed && !press.moved.get() && event.clickCount() <= 1 {
+                    dispatch(Action::Press(EXPAND));
+                }
+            }
+        }
+    );
+
+    impl ArtView {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(Press::default());
+            unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+        }
+    }
+
     struct Button {
         key: &'static str,
         view: Retained<NSButton>,
@@ -373,7 +454,7 @@ mod native {
 
     struct Mini {
         panel: Retained<NSPanel>,
-        art: Retained<NSImageView>,
+        art: Retained<ArtView>,
         card: Retained<NSView>,
         title: Retained<NSTextField>,
         subtitle: Retained<NSTextField>,
@@ -553,7 +634,7 @@ mod native {
         backdrop.setAutoresizingMask(fill);
         root.addSubview(&backdrop);
 
-        let art = NSImageView::imageViewWithImage(&NSImage::new(), mtm);
+        let art = ArtView::new(mtm);
         art.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
         art.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
         round(&art, 8.);
@@ -1194,6 +1275,15 @@ mod tests {
         assert_eq!(state.like_tooltip(), "Remove from Liked Songs");
         state.saved = Some(false);
         assert_eq!(state.like_tooltip(), "Save to Liked Songs");
+    }
+
+    #[test]
+    fn art_tells_a_click_from_a_drag() {
+        assert!(!drags(false, 0., 0.));
+        assert!(!drags(false, 2., -2.));
+        assert!(drags(false, 3., 0.));
+        assert!(drags(false, -2., 2.5));
+        assert!(drags(true, 0., 0.));
     }
 
     #[test]
