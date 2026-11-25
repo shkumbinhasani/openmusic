@@ -473,7 +473,7 @@ impl Engine {
         let mut next = Playing::new(
             playing.machine.clone(),
             target.index,
-            false,
+            target.paused,
             prepared.generation,
             start,
         );

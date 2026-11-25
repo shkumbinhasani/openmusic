@@ -1127,7 +1127,11 @@ impl Engine {
             .take_prepared(transition, how, transition == "advance")
             .await
         {
-            Taken::Joined(generation) => self.player.promote(generation, transition != "advance"),
+            Taken::Joined(generation) => {
+                let play = self.playing.as_ref().is_some_and(|playing| !playing.paused);
+                self.player
+                    .promote(generation, transition != "advance", play);
+            }
             Taken::Superseded => {}
             Taken::Missing => self.advance_cold(transition).await,
         }

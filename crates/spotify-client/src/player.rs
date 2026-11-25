@@ -1191,7 +1191,7 @@ impl MainState {
         }
     }
 
-    fn promote(&mut self, generation: u64, rewind: bool) {
+    fn promote(&mut self, generation: u64, rewind: bool, play: bool) {
         self.finish_ramp();
         let Some((deck, index)) = self.find(generation) else {
             emit(PlayerEvent::Failed {
@@ -1208,6 +1208,7 @@ impl MainState {
         if rewind {
             self.rewind_head(deck);
         }
+        self.playing = play;
         self.switch_to(deck);
         self.ensure_ticking();
     }
@@ -1220,7 +1221,7 @@ impl MainState {
             .first()
             .is_some_and(|item| item.generation == generation);
         if !waiting {
-            self.promote(generation, false);
+            self.promote(generation, false, self.playing);
             return;
         }
         if !self.playing || blend.left_ms() == 0 {
@@ -1548,8 +1549,8 @@ impl Player {
         on_main(move |_, state| state.discard(generation));
     }
 
-    pub fn promote(&self, generation: u64, rewind: bool) {
-        on_main(move |_, state| state.promote(generation, rewind));
+    pub fn promote(&self, generation: u64, rewind: bool, play: bool) {
+        on_main(move |_, state| state.promote(generation, rewind, play));
     }
 
     pub fn crossfade(&self, generation: u64, blend: Blend) {
