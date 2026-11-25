@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use gpui::{
@@ -14,7 +14,6 @@ use spotify_client::{
     Track,
     blend::{self, Invitation, InvitationState},
     catalog::{Capabilities, Collection},
-    connect::{self, PlayOptions, Shuffle},
     playlist::{
         self, Details, EditTarget, Folder, ItemPosition, Level, Permissions, Push, RootEntry,
         RootNode, RootPlace, RootPlaylist, Rootlist, TargetKind,
@@ -306,13 +305,6 @@ pub fn owner_label(owner: &str, name: Option<&str>) -> String {
         _ if owner == "spotify" => "Spotify".to_owned(),
         _ => owner.to_owned(),
     }
-}
-
-fn random_index(length: usize) -> usize {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.subsec_nanos() as usize);
-    nanos % length.max(1)
 }
 
 impl OpenMusic {
@@ -760,13 +752,8 @@ impl OpenMusic {
         if collection.tracks.is_empty() {
             return;
         }
-        let (uri, tracks) = (uri.clone(), collection.tracks.clone());
-        let options = PlayOptions {
-            shuffle_override: Some(Shuffle::On),
-            ..PlayOptions::default()
-        };
-        let index = random_index(tracks.len());
-        self.play_context_from(&uri, &tracks, index, connect::ORIGIN, options, cx);
+        let uri = uri.clone();
+        self.shuffle_play(&uri, cx);
     }
 
     pub fn add_to_playlist(&mut self, uri: &str, sources: Vec<String>, position: ItemPosition) {
@@ -2379,13 +2366,5 @@ mod tests {
             ..Pushes::default()
         };
         assert!(rootlist.waiting());
-    }
-
-    #[test]
-    fn picks_a_shuffle_start_inside_the_list() {
-        for length in [1, 2, 7, 100] {
-            assert!(random_index(length) < length);
-        }
-        assert_eq!(random_index(0), 0);
     }
 }
