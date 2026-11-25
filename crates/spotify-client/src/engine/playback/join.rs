@@ -526,7 +526,7 @@ impl Engine {
         self.advance_cold("advance").await;
     }
 
-    pub(super) async fn crossfade_due(&mut self) {
+    pub(super) async fn crossfade_due(&mut self, measured: Instant) {
         let (Some(playing), Some(prepared)) =
             (self.playing.as_ref(), self.audio.joins.prepared.as_ref())
         else {
@@ -552,6 +552,7 @@ impl Engine {
             None => format!("crossfade {}ms", blend.length_ms),
         };
         if let Taken::Joined(generation) = self.take_prepared("advance", &how, false).await {
+            let blend = blend.later_by(measured.elapsed());
             let left = Duration::from_millis(u64::from(blend.left_ms()));
             self.player.crossfade(generation, blend);
             self.audio.joins.fading_until = Some(Instant::now() + left);

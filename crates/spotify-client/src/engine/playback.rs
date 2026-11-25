@@ -1058,6 +1058,7 @@ impl Engine {
                 generation,
                 position_ms,
                 playing: is_playing,
+                measured,
             } => {
                 let Some(playing) = self
                     .playing
@@ -1103,7 +1104,7 @@ impl Engine {
                     return;
                 }
                 self.prepare_next().await;
-                self.crossfade_due().await;
+                self.crossfade_due(measured).await;
             }
             PlayerEvent::Advanced { from, to } => self.joined(from, to).await,
             PlayerEvent::Stalled { generation } => self.playback_stalled(generation),

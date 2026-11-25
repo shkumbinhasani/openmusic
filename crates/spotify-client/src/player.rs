@@ -144,6 +144,14 @@ impl Blend {
     pub fn left_ms(&self) -> u32 {
         self.length_ms.saturating_sub(self.elapsed_ms)
     }
+
+    pub fn later_by(self, late: Duration) -> Self {
+        let late = u32::try_from(late.as_millis()).unwrap_or(u32::MAX);
+        Self {
+            elapsed_ms: self.elapsed_ms.saturating_add(late).min(self.length_ms),
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -156,6 +164,7 @@ pub enum PlayerEvent {
         generation: u64,
         position_ms: u32,
         playing: bool,
+        measured: Instant,
     },
     Advanced {
         from: u64,
@@ -1470,6 +1479,7 @@ impl MainState {
             generation: head.generation,
             position_ms,
             playing: unsafe { deck.player.rate() } > 0.,
+            measured: Instant::now(),
         });
     }
 
@@ -1659,6 +1669,24 @@ mod tests {
         assert!(ramp.progress() < 0.01);
         assert!(!ramp.held);
         assert_eq!(ramp.describe(), "fade/fade");
+    }
+
+    #[test]
+    fn moves_a_late_blend_on_by_the_delay() {
+        let blend = Blend {
+            length_ms: 2000,
+            lead_in_ms: 500,
+            elapsed_ms: 100,
+            shape: Shape::fade(),
+        };
+        let late = blend.clone().later_by(Duration::from_millis(300));
+        assert_eq!(late.elapsed_ms, 400);
+        assert_eq!(late.left_ms(), 1600);
+        assert_eq!((late.length_ms, late.lead_in_ms), (2000, 500));
+        assert_eq!(blend.clone().later_by(Duration::ZERO), blend);
+        let gone = blend.later_by(Duration::from_secs(9));
+        assert_eq!(gone.elapsed_ms, 2000);
+        assert_eq!(gone.left_ms(), 0);
     }
 
     #[test]

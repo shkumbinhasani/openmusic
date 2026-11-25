@@ -266,6 +266,7 @@ impl Engine {
                 generation,
                 position_ms,
                 playing,
+                ..
             } if *generation == current => {
                 queue.position_ms = *position_ms;
                 let sounding = *playing && !queue.paused;
