@@ -630,13 +630,14 @@ pub fn add_menu(app: &OpenMusic, source: &AddSource) -> Vec<MenuItem> {
             app.create_playlist_from(sources.clone(), name.clone(), None)
         })
         .symbol("plus"),
-        MenuItem::Separator,
     ];
-    match (&app.playlists.rootlist, &app.playlists.user) {
-        (Some(list), Some(user)) => {
-            items.extend(add_targets(list.tree(user), list, source, &checks))
-        }
-        _ => items.push(MenuItem::note("Loading playlists…")),
+    let targets = match (&app.playlists.rootlist, &app.playlists.user) {
+        (Some(list), Some(user)) => add_targets(list.tree(user), list, source, &checks),
+        _ => vec![MenuItem::note("Loading playlists…")],
+    };
+    if !targets.is_empty() {
+        items.push(MenuItem::Separator);
+        items.extend(targets);
     }
     items
 }
@@ -695,16 +696,7 @@ fn folder_moves(app: &OpenMusic, uri: &str) -> Vec<MenuItem> {
     let parent = app.playlists.parent_folder(uri);
     let parent_hash = parent.as_deref().and_then(playlist::folder_hash);
     let moving = app.playlists.folder(uri);
-    let mut entries = Vec::new();
-    if moving.is_none() {
-        let playlists = vec![uri.to_owned()];
-        entries.push(
-            MenuItem::action("Create folder", move |app, _, _| {
-                app.create_folder(None, playlists.clone(), true)
-            })
-            .symbol("folder.badge.plus"),
-        );
-    }
+    let mut folders = Vec::new();
     let mut names: Vec<String> = Vec::new();
     for (depth, folder) in app.playlists.folders() {
         names.truncate(depth);
@@ -727,8 +719,22 @@ fn folder_moves(app: &OpenMusic, uri: &str) -> Vec<MenuItem> {
         if let Some(parent_name) = parent_name {
             item = item.subtitle(format!("In {parent_name}"));
         }
-        entries.push(item);
+        folders.push(item);
     }
+    let mut entries = Vec::new();
+    if moving.is_none() {
+        let playlists = vec![uri.to_owned()];
+        entries.push(
+            MenuItem::action("Create folder", move |app, _, _| {
+                app.create_folder(None, playlists.clone(), true)
+            })
+            .symbol("folder.badge.plus"),
+        );
+        if !folders.is_empty() {
+            entries.push(MenuItem::Separator);
+        }
+    }
+    entries.extend(folders);
     let mut items = Vec::new();
     if !entries.is_empty() {
         let title = if parent.is_some() {
