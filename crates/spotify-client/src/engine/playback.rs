@@ -652,8 +652,31 @@ impl Engine {
             } else if let Err(error) =
                 Box::pin(self.start_state(machine, index, paused, None)).await
             {
-                self.audio.updates.push(Update::Notice(error.to_string()));
+                Box::pin(self.start_failed(error, false)).await;
             }
+        }
+    }
+
+    async fn start_failed(&mut self, error: anyhow::Error, silent: bool) {
+        let replaced = self
+            .playing
+            .as_ref()
+            .is_some_and(|playing| playing.generation == self.generation);
+        if replaced || silent {
+            self.unload();
+        }
+        self.report("error").await;
+        self.audio.updates.push(Update::Notice(error.to_string()));
+    }
+
+    fn unload(&mut self) {
+        if !self.local_active() {
+            self.player.stop();
+        }
+        self.audio.joins.reset();
+        if let Some(playing) = self.playing.as_mut() {
+            playing.paused = true;
+            self.audio.unloaded = true;
         }
     }
 
@@ -1177,8 +1200,7 @@ impl Engine {
             return;
         }
         if let Err(error) = self.start_state(machine, index, paused, None).await {
-            self.report("error").await;
-            self.audio.updates.push(Update::Notice(error.to_string()));
+            self.start_failed(error, transition == "advance").await;
         }
     }
 
