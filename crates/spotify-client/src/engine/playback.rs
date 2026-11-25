@@ -1080,7 +1080,9 @@ impl Engine {
                 generation,
                 message,
             } => {
-                if self.prepared_failed(generation) || self.video_failed(generation, &message).await
+                if self.prepared_failed(generation)
+                    || self.video_failed(generation, &message).await
+                    || self.stream_failed(generation).await
                 {
                     return;
                 }

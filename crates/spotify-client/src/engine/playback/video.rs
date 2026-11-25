@@ -102,6 +102,7 @@ const REFUSED: &str = "This video can’t play right now, so OpenMusic plays its
 pub(super) struct Video {
     pub(super) prefs: VideoPrefs,
     refused: Option<String>,
+    retried: Option<u64>,
 }
 
 impl Video {
@@ -236,22 +237,44 @@ impl Engine {
         let Some(playing) = self.playing.as_ref() else {
             return;
         };
+        let uri = playing.uri().to_owned();
+        if needs_swap(playing.video, self.audio.video.prefs_for(&uri), &uri) {
+            self.reload_here().await;
+        }
+    }
+
+    pub(super) async fn stream_failed(&mut self, generation: u64) -> bool {
+        let Some(playing) = self
+            .playing
+            .as_ref()
+            .filter(|playing| playing.generation == generation)
+        else {
+            return false;
+        };
+        if playing.source != "director" || self.audio.video.retried == Some(generation) {
+            return false;
+        }
+        self.audio.video.retried = Some(generation);
+        self.reload_here().await
+    }
+
+    async fn reload_here(&mut self) -> bool {
+        let Some(playing) = self.playing.as_ref() else {
+            return false;
+        };
         if self.local_active() || self.audio.unloaded {
-            return;
+            return false;
         }
         let uri = playing.uri().to_owned();
-        if !needs_swap(playing.video, self.audio.video.prefs_for(&uri), &uri) {
-            return;
-        }
         let Some(track) = playing.track().cloned() else {
-            return;
+            return false;
         };
         let generation = playing.generation;
         let pick = match self.resolve(&track).await {
             Ok(pick) => pick,
             Err(error) => {
-                self.audio.note(format!("video switch failed: {error}"));
-                return;
+                self.audio.note(format!("reload of {uri} failed: {error}"));
+                return false;
             }
         };
         let opened = self.open(&pick, &uri).await;
@@ -263,8 +286,8 @@ impl Engine {
         } = match opened {
             Ok(opened) => opened,
             Err(error) => {
-                self.audio.note(format!("video switch failed: {error}"));
-                return;
+                self.audio.note(format!("reload of {uri} failed: {error}"));
+                return false;
             }
         };
         let Some(playing) = self
@@ -272,7 +295,7 @@ impl Engine {
             .as_mut()
             .filter(|playing| playing.generation == generation)
         else {
-            return;
+            return false;
         };
         playing.format = pick.format();
         playing.bitrate = if bitrate > 0 { bitrate } else { pick.bitrate() };
@@ -292,10 +315,11 @@ impl Engine {
         self.audio.joins.tried = None;
         self.player.load(generation, media);
         self.audio.note(format!(
-            "switched {uri} to {}",
+            "reloaded {uri} as {}",
             if shown { "video" } else { "audio" }
         ));
         self.report("modify_current_state").await;
+        true
     }
 
     pub(super) async fn video_failed(&mut self, generation: u64, message: &str) -> bool {
