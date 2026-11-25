@@ -45,6 +45,7 @@ const EDITABLE_WAIT: Duration = Duration::from_secs(30);
 const EDITABLE_KEEP: usize = 16;
 const PUSH_DELAY: Duration = Duration::from_millis(500);
 const FOCUS_REFRESH: Duration = Duration::from_secs(60);
+const ROOTLIST_RETRY_LIMIT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlendWork {
@@ -68,6 +69,10 @@ impl Pushes {
 
 pub fn outdated(pushed: Option<&str>, current: Option<&str>) -> bool {
     pushed.is_none() || pushed != current
+}
+
+pub fn rootlist_backoff(failures: u32) -> Duration {
+    Duration::from_secs(2u64.saturating_pow(failures.max(1))).min(ROOTLIST_RETRY_LIMIT)
 }
 
 #[derive(Default)]
@@ -127,6 +132,8 @@ pub struct State {
     pub pushes: Pushes,
     pub activation: Option<Subscription>,
     pub refreshed: Option<Instant>,
+    pub rootlist_failures: u32,
+    pub rootlist_retry: Option<Instant>,
 }
 
 impl State {
@@ -244,6 +251,39 @@ impl State {
 
     fn stale_editable(&mut self) {
         self.editable.values_mut().for_each(Editable::stale);
+    }
+
+    fn rootlist_loaded(&mut self, user: String, rootlist: Rootlist) {
+        self.base_queue = rootlist
+            .playlists()
+            .filter(|entry| {
+                entry.owner.as_deref() == Some(user.as_str())
+                    && entry.capabilities.administrate
+                    && !self.bases.contains_key(&entry.uri)
+            })
+            .map(|entry| entry.uri.clone())
+            .take(BASE_PREFETCH)
+            .collect();
+        self.user = Some(user);
+        self.rootlist = Some(rootlist);
+        self.rootlist_failures = 0;
+        self.rootlist_retry = None;
+    }
+
+    fn rootlist_failed(&mut self) {
+        if self.rootlist.is_some() {
+            return;
+        }
+        self.rootlist_failures = self.rootlist_failures.saturating_add(1);
+        self.rootlist_retry = Some(Instant::now() + rootlist_backoff(self.rootlist_failures));
+    }
+
+    fn rootlist_due(&mut self) -> bool {
+        if self.rootlist.is_some() || self.rootlist_retry.is_none_or(|at| Instant::now() < at) {
+            return false;
+        }
+        self.rootlist_retry = None;
+        true
     }
 
     pub fn curates(&self, uris: &[String]) -> HashMap<String, bool> {
@@ -1365,11 +1405,10 @@ impl OpenMusic {
     }
 
     pub fn refresh_playlists_on_focus(&mut self) {
-        if self.playlists.user.is_none()
-            || self
-                .playlists
-                .refreshed
-                .is_some_and(|at| at.elapsed() < FOCUS_REFRESH)
+        if self
+            .playlists
+            .refreshed
+            .is_some_and(|at| at.elapsed() < FOCUS_REFRESH)
         {
             return;
         }
@@ -1553,22 +1592,8 @@ pub fn on_event(
                 }
             }
         }
-        Event::Rootlist(None) => {}
-        Event::Rootlist(Some((user, rootlist))) => {
-            let known = &app.playlists.bases;
-            app.playlists.base_queue = rootlist
-                .playlists()
-                .filter(|entry| {
-                    entry.owner.as_deref() == Some(user.as_str())
-                        && entry.capabilities.administrate
-                        && !known.contains_key(&entry.uri)
-                })
-                .map(|entry| entry.uri.clone())
-                .take(BASE_PREFETCH)
-                .collect();
-            app.playlists.user = Some(user);
-            app.playlists.rootlist = Some(rootlist);
-        }
+        Event::Rootlist(None) => app.playlists.rootlist_failed(),
+        Event::Rootlist(Some((user, rootlist))) => app.playlists.rootlist_loaded(user, rootlist),
         Event::Permissions { uri, permissions } => {
             if let Some(canonical) = playlist::canonical(&uri) {
                 if let Some(base) = permissions.base {
@@ -2335,6 +2360,9 @@ pub fn row_dropped(
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     app.apply_pushes();
+    if app.playlists.rootlist_due() {
+        app.send(Command::Rootlist);
+    }
     if let Some(source) = app.playlists.wanted.take() {
         app.request_editable(&source.uris);
         app.playlists.menu_source = Some(source);
@@ -2478,6 +2506,34 @@ mod tests {
         assert!(!state.ask_editable(&song));
         state.stale_editable();
         assert!(state.ask_editable(&song));
+    }
+
+    #[test]
+    fn backs_off_between_rootlist_retries() {
+        let seconds: Vec<u64> = (0..=8)
+            .map(|failures| rootlist_backoff(failures).as_secs())
+            .collect();
+        assert_eq!(seconds, [2, 2, 4, 8, 16, 32, 60, 60, 60]);
+    }
+
+    #[test]
+    fn retries_a_missing_rootlist_until_one_loads() {
+        let mut state = State::default();
+        assert!(!state.rootlist_due());
+        state.rootlist_failed();
+        assert_eq!(state.rootlist_failures, 1);
+        assert!(state.rootlist_retry.is_some());
+        assert!(!state.rootlist_due());
+        state.rootlist_retry = Some(Instant::now());
+        assert!(state.rootlist_due());
+        assert!(!state.rootlist_due());
+        state.rootlist_failed();
+        assert_eq!(state.rootlist_failures, 2);
+        state.rootlist_loaded("someone".into(), Rootlist::default());
+        assert_eq!((state.rootlist_failures, state.rootlist_retry), (0, None));
+        assert_eq!(state.user.as_deref(), Some("someone"));
+        state.rootlist_failed();
+        assert_eq!((state.rootlist_failures, state.rootlist_retry), (0, None));
     }
 
     #[test]
