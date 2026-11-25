@@ -1,5 +1,6 @@
 pub mod account;
 pub mod api;
+pub mod automix;
 pub mod blend;
 pub mod browse;
 pub mod canvas;

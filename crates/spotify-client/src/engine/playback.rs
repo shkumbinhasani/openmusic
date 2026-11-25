@@ -21,6 +21,7 @@ pub use device::{MAX_NAME, device_name};
 use gain::{Gains, fetch_loudness, linear, state_options};
 use join::{Joins, Taken};
 use local::LocalQueue;
+use mix::Mix;
 use narration::is_narration;
 use quality::Automatic;
 pub use quality::{Quality, Stream, StreamKind, codec_of};
@@ -34,6 +35,7 @@ mod device;
 mod gain;
 mod join;
 mod local;
+mod mix;
 mod narration;
 mod quality;
 mod sleep;
@@ -83,6 +85,7 @@ pub struct AudioSettings {
     pub level: LoudnessLevel,
     pub quality: Quality,
     pub autoplay: bool,
+    pub automix: bool,
 }
 
 impl Default for AudioSettings {
@@ -95,6 +98,7 @@ impl Default for AudioSettings {
             level: LoudnessLevel::Normal,
             quality: Quality::Automatic,
             autoplay: true,
+            automix: true,
         }
     }
 }
@@ -121,6 +125,7 @@ pub struct ReportPrepared {
     pub join: Join,
     pub ready: bool,
     pub gain_db: Option<f32>,
+    pub mix: Option<String>,
 }
 
 fn reported_speed(speed: f32) -> f64 {
@@ -142,6 +147,7 @@ pub struct AudioReport {
     pub sleep: SleepState,
     pub notes: Vec<String>,
     pub device_name: String,
+    pub automix: Option<String>,
 }
 
 impl fmt::Display for AudioReport {
@@ -149,14 +155,15 @@ impl fmt::Display for AudioReport {
         let settings = &self.settings;
         writeln!(
             f,
-            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} autoplay={}",
+            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} autoplay={} automix={}",
             settings.gapless,
             settings.crossfade,
             settings.crossfade_ms,
             settings.normalize,
             settings.level.name(),
             settings.quality.name(),
-            settings.autoplay
+            settings.autoplay,
+            settings.automix
         )?;
         writeln!(f, "device name=\"{}\"", self.device_name)?;
         match &self.playing {
@@ -180,26 +187,37 @@ impl fmt::Display for AudioReport {
         match &self.prepared {
             Some(prepared) => writeln!(
                 f,
-                "prepared generation={} uri={} join={} ready={} gain={}",
+                "prepared generation={} uri={} join={} ready={} gain={}{}",
                 prepared.generation,
                 prepared.uri,
                 prepared.join.name(),
                 prepared.ready,
-                gain_text(prepared.gain_db)
+                gain_text(prepared.gain_db),
+                prepared
+                    .mix
+                    .as_ref()
+                    .map_or_else(String::new, |mix| format!(" automix {mix}"))
             )?,
             None => writeln!(f, "prepared none")?,
+        }
+        if let Some(automix) = &self.automix {
+            writeln!(f, "{automix}")?;
         }
         let player = &self.player;
         writeln!(
             f,
-            "player active={} master={:.3} quiet={:.3} playing={} ramp={}",
+            "player active={} master={:.3} quiet={:.3} playing={} ramp={}{}",
             player.active,
             player.master,
             player.quiet,
             player.playing,
             player
                 .ramp
-                .map_or_else(|| "none".to_owned(), |progress| format!("{progress:.2}"))
+                .map_or_else(|| "none".to_owned(), |progress| format!("{progress:.2}")),
+            player
+                .blend
+                .as_ref()
+                .map_or_else(String::new, |blend| format!(" blend={blend}"))
         )?;
         for (index, deck) in player.decks.iter().enumerate() {
             writeln!(
@@ -259,6 +277,7 @@ pub(super) struct State {
     notes: Vec<String>,
     narration_run: u32,
     narration_told: bool,
+    mix: Mix,
 }
 
 impl State {
@@ -519,6 +538,7 @@ impl Engine {
             sleep: self.audio.sleep.state(),
             notes: self.audio.notes.clone(),
             device_name: self.device_name.clone(),
+            automix: self.mix_report(),
         }
     }
 
@@ -1082,7 +1102,7 @@ impl Engine {
             .take_prepared(transition, how, transition == "advance")
             .await
         {
-            Taken::Joined(generation) => self.player.promote(generation),
+            Taken::Joined(generation) => self.player.promote(generation, transition != "advance"),
             Taken::Superseded => {}
             Taken::Missing => self.advance_cold(transition).await,
         }
@@ -1187,5 +1207,30 @@ mod tests {
         assert!(text.contains("quiet=0.000"));
         assert!(text.contains("local index=1/2"));
         assert!(text.ends_with("sleep end_of_track\n"));
+        assert!(text.contains("autoplay=true automix=true\n"));
+        assert!(!text.contains("blend="));
+
+        let mixing = AudioReport {
+            prepared: Some(ReportPrepared {
+                generation: 6,
+                uri: "spotify:track:b".into(),
+                join: Join::Crossfade,
+                ready: true,
+                gain_db: None,
+                mix: Some("at=1 length=2 lead_in=0 b_start=3 shape=fade/fade".into()),
+            }),
+            automix: Some("automix context=spotify:playlist:x status=ready".into()),
+            player: Snapshot {
+                ramp: Some(0.5),
+                blend: Some("cut/cut held".into()),
+                ..Snapshot::default()
+            },
+            ..AudioReport::default()
+        };
+        let text = mixing.to_string();
+        assert!(text.contains(
+            "prepared generation=6 uri=spotify:track:b join=crossfade ready=true gain=none automix at=1 length=2 lead_in=0 b_start=3 shape=fade/fade\nautomix context=spotify:playlist:x status=ready\nplayer "
+        ));
+        assert!(text.contains("ramp=0.50 blend=cut/cut held\n"));
     }
 }

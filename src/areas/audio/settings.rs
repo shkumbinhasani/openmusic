@@ -36,6 +36,8 @@ pub const CROSSFADE_TITLE: &str = "Crossfade songs";
 pub const CROSSFADE_TEXT: &str =
     "Fades each song into the next. Episodes and very short songs don’t fade.";
 pub const LENGTH_TITLE: &str = "Crossfade length";
+pub const AUTOMIX_TITLE: &str = "Automix";
+pub const AUTOMIX_TEXT: &str = "Allow seamless transitions between songs on certain playlists. OpenMusic plays each transition’s timing and fades, but not its effects or beatmatching.";
 pub const SHARED_NOTE: &str = "Gapless and crossfade are saved to your Spotify account, so they also change in the Spotify app.";
 pub const SYNC_FAILED_TITLE: &str = "Couldn’t load your playback settings from Spotify";
 pub const SYNC_FAILED_TEXT: &str = "Changes here still apply on this Mac.";
@@ -59,6 +61,7 @@ pub enum Toggle {
     Autoplay,
     Gapless,
     Crossfade,
+    Automix,
     Normalize,
 }
 
@@ -68,6 +71,7 @@ impl Toggle {
             Self::Autoplay => "audio-autoplay",
             Self::Gapless => "audio-gapless",
             Self::Crossfade => "audio-crossfade",
+            Self::Automix => "audio-automix",
             Self::Normalize => "audio-normalize",
         }
     }
@@ -200,6 +204,12 @@ pub fn playback_lines(
     if prefs.crossfade {
         lines.push(Line::Length { ms: length_ms });
     }
+    lines.push(Line::Switch {
+        toggle: Toggle::Automix,
+        title: AUTOMIX_TITLE,
+        text: AUTOMIX_TEXT,
+        on: prefs.automix,
+    });
     lines.push(Line::Note(SHARED_NOTE.to_owned()));
     lines
 }
@@ -356,6 +366,7 @@ impl OpenMusic {
                 };
                 self.set_crossfade(on, ms);
             }
+            Toggle::Automix => self.set_automix(on),
             Toggle::Normalize => self.set_normalize(on),
         }
     }
@@ -628,7 +639,8 @@ mod tests {
             vec![
                 (Toggle::Autoplay, true),
                 (Toggle::Gapless, true),
-                (Toggle::Crossfade, false)
+                (Toggle::Crossfade, false),
+                (Toggle::Automix, true)
             ]
         );
         assert!(!lines.iter().any(|line| matches!(line, Line::Length { .. })));
@@ -638,6 +650,7 @@ mod tests {
             crossfade: true,
             crossfade_ms: 2000,
             autoplay: false,
+            automix: false,
             ..AudioPrefs::default()
         };
         let lines = playback_lines(&prefs, 7000, true, Some("Living Room"));
@@ -654,10 +667,22 @@ mod tests {
             vec![
                 (Toggle::Autoplay, false),
                 (Toggle::Gapless, true),
-                (Toggle::Crossfade, true)
+                (Toggle::Crossfade, true),
+                (Toggle::Automix, false)
             ]
         );
-        assert!(lines.contains(&Line::Length { ms: 7000 }));
+        let length = lines
+            .iter()
+            .position(|line| line == &Line::Length { ms: 7000 })
+            .unwrap();
+        assert!(matches!(
+            lines[length + 1],
+            Line::Switch {
+                toggle: Toggle::Automix,
+                ..
+            }
+        ));
+        assert_eq!(Toggle::Automix.id(), "audio-automix");
     }
 
     #[test]
@@ -829,7 +854,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "section Playback\n  switch audio-autoplay on Autoplay\n  switch audio-gapless on Gapless playback\n  switch audio-crossfade on Crossfade songs\n  length 6 sec\n  note {SHARED_NOTE}\nsection Volume\n  switch audio-normalize off Normalize volume\n  choice audio-level \"Normal\" [x] Volume level — {LEVEL_OFF_TEXT}\nsection Device\n  name field=\"OpenMusic\" renamed=false error=none\n"
+                "section Playback\n  switch audio-autoplay on Autoplay\n  switch audio-gapless on Gapless playback\n  switch audio-crossfade on Crossfade songs\n  length 6 sec\n  switch audio-automix on Automix\n  note {SHARED_NOTE}\nsection Volume\n  switch audio-normalize off Normalize volume\n  choice audio-level \"Normal\" [x] Volume level — {LEVEL_OFF_TEXT}\nsection Device\n  name field=\"OpenMusic\" renamed=false error=none\n"
             )
         );
     }

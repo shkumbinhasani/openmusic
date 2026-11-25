@@ -27,6 +27,8 @@ use objc2_foundation::{
 };
 use tokio::{runtime::Handle, sync::mpsc::UnboundedSender};
 
+use crate::automix::Shape;
+
 const SCHEME: &str = "openmusic-hls";
 const TICK: Duration = Duration::from_millis(250);
 const FAST_TICK: Duration = Duration::from_millis(50);
@@ -113,6 +115,29 @@ impl Join {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Blend {
+    pub length_ms: u32,
+    pub lead_in_ms: u32,
+    pub elapsed_ms: u32,
+    pub shape: Shape,
+}
+
+impl Blend {
+    pub fn fade(length_ms: u32) -> Self {
+        Self {
+            length_ms,
+            lead_in_ms: 0,
+            elapsed_ms: 0,
+            shape: Shape::fade(),
+        }
+    }
+
+    pub fn left_ms(&self) -> u32 {
+        self.length_ms.saturating_sub(self.elapsed_ms)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum PlayerEvent {
     Ready {
         generation: u64,
@@ -156,6 +181,7 @@ pub struct Snapshot {
     pub playing: bool,
     pub ramp: Option<f32>,
     pub quiet: f32,
+    pub blend: Option<String>,
 }
 
 pub fn fade_levels(progress: f32) -> (f32, f32) {
@@ -204,6 +230,7 @@ struct Item {
     ready: bool,
     failed: bool,
     pending_seek: Option<u32>,
+    start_ms: u32,
 }
 
 struct Deck {
@@ -217,16 +244,50 @@ struct Ramp {
     duration: Duration,
     elapsed: Duration,
     resumed: Option<Instant>,
+    lead_in: Duration,
+    shape: Shape,
+    held: bool,
 }
 
 impl Ramp {
+    fn new(from: usize, blend: &Blend) -> Self {
+        let millis = |ms: u32| Duration::from_millis(u64::from(ms));
+        let duration = millis(blend.length_ms);
+        let elapsed = millis(blend.elapsed_ms).min(duration);
+        let lead_in = millis(blend.lead_in_ms).min(duration);
+        Self {
+            from,
+            duration,
+            elapsed,
+            resumed: Some(Instant::now()),
+            lead_in,
+            shape: blend.shape.clone(),
+            held: elapsed < lead_in,
+        }
+    }
+
+    fn so_far(&self) -> Duration {
+        self.elapsed + self.resumed.map_or(Duration::ZERO, |at| at.elapsed())
+    }
+
     fn progress(&self) -> f32 {
-        let elapsed = self.elapsed + self.resumed.map_or(Duration::ZERO, |at| at.elapsed());
         if self.duration.is_zero() {
             1.
         } else {
-            (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0., 1.)
+            (self.so_far().as_secs_f32() / self.duration.as_secs_f32()).clamp(0., 1.)
         }
+    }
+
+    fn release_due(&self) -> bool {
+        self.held && self.so_far() >= self.lead_in
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{}{}",
+            self.shape.name(),
+            if self.held { " held" } else { "" }
+        )
     }
 }
 
@@ -808,6 +869,7 @@ impl MainState {
             ready: false,
             failed: false,
             pending_seek: (media.start_ms > 0).then_some(media.start_ms),
+            start_ms: media.start_ms,
         })
     }
 
@@ -906,9 +968,14 @@ impl MainState {
         }
     }
 
+    fn held(&self) -> bool {
+        self.ramp.as_ref().is_some_and(|ramp| ramp.held)
+    }
+
     fn start_active(&self) {
         let deck = &self.decks[self.active];
         if self.playing
+            && !self.held()
             && deck
                 .items
                 .first()
@@ -937,6 +1004,7 @@ impl MainState {
             self.clear_deck(ramp.from);
             self.decks[self.active].fade = 1.;
             self.apply_volumes();
+            self.start_active();
         }
     }
 
@@ -1043,7 +1111,23 @@ impl MainState {
         self.apply_volumes();
     }
 
-    fn promote(&mut self, generation: u64) {
+    fn rewind_head(&mut self, deck: usize) {
+        let player = self.decks[deck].player.clone();
+        let Some(head) = self.decks[deck].items.first_mut() else {
+            return;
+        };
+        if head.start_ms == 0 && head.pending_seek.is_none() {
+            return;
+        }
+        if head.ready && is_current(&player, head) {
+            head.pending_seek = None;
+            seek_player(&player, 0);
+        } else {
+            head.pending_seek = Some(0);
+        }
+    }
+
+    fn promote(&mut self, generation: u64, rewind: bool) {
         self.finish_ramp();
         let Some((deck, index)) = self.find(generation) else {
             emit(PlayerEvent::Failed {
@@ -1057,11 +1141,14 @@ impl MainState {
             unsafe { self.decks[deck].player.advanceToNextItem() };
             self.release(item);
         }
+        if rewind {
+            self.rewind_head(deck);
+        }
         self.switch_to(deck);
         self.ensure_ticking();
     }
 
-    fn crossfade(&mut self, generation: u64, duration: Duration) {
+    fn crossfade(&mut self, generation: u64, blend: Blend) {
         self.finish_ramp();
         let idle = self.idle();
         let waiting = self.decks[idle]
@@ -1069,22 +1156,18 @@ impl MainState {
             .first()
             .is_some_and(|item| item.generation == generation);
         if !waiting {
-            self.promote(generation);
+            self.promote(generation, false);
             return;
         }
-        if !self.playing || duration.is_zero() {
+        if !self.playing || blend.left_ms() == 0 {
             self.switch_to(idle);
             return;
         }
         let from = self.active;
         self.active = idle;
         self.decks[idle].fade = 0.;
-        self.ramp = Some(Ramp {
-            from,
-            duration,
-            elapsed: Duration::ZERO,
-            resumed: Some(Instant::now()),
-        });
+        self.ramp = Some(Ramp::new(from, &blend));
+        self.step_ramp();
         self.apply_volumes();
         self.start_active();
         self.ensure_stepping();
@@ -1092,17 +1175,25 @@ impl MainState {
     }
 
     fn step_ramp(&mut self) -> bool {
-        let Some(ramp) = self.ramp.as_ref() else {
+        let Some(ramp) = self.ramp.as_mut() else {
             return false;
         };
         if ramp.resumed.is_none() {
             return false;
         }
+        let release = ramp.release_due();
+        if release {
+            ramp.held = false;
+        }
         let progress = ramp.progress();
-        let (outgoing, incoming) = fade_levels(progress);
+        let (outgoing, incoming) = ramp.shape.levels(progress);
         let from = ramp.from;
         self.decks[from].fade = outgoing;
         self.decks[self.active].fade = incoming;
+        if release {
+            self.apply_volumes();
+            self.start_active();
+        }
         if progress >= 1. {
             self.finish_ramp();
             return false;
@@ -1260,8 +1351,9 @@ impl MainState {
 
     fn poll(&mut self) -> Option<Duration> {
         let mut waiting = false;
+        let held = self.held();
         for index in 0..self.decks.len() {
-            let active = index == self.active;
+            let active = index == self.active && !held;
             let deck = &mut self.decks[index];
             for item in &mut deck.items {
                 let status = unsafe { item.item.status() };
@@ -1347,6 +1439,7 @@ impl MainState {
             playing: self.playing,
             ramp: self.ramp.as_ref().map(Ramp::progress),
             quiet: self.quiet,
+            blend: self.ramp.as_ref().map(Ramp::describe),
         };
         if let Ok(mut slot) = SNAPSHOT.lock() {
             *slot = Some(snapshot);
@@ -1391,13 +1484,12 @@ impl Player {
         on_main(move |_, state| state.discard(generation));
     }
 
-    pub fn promote(&self, generation: u64) {
-        on_main(move |_, state| state.promote(generation));
+    pub fn promote(&self, generation: u64, rewind: bool) {
+        on_main(move |_, state| state.promote(generation, rewind));
     }
 
-    pub fn crossfade(&self, generation: u64, duration_ms: u32) {
-        let duration = Duration::from_millis(u64::from(duration_ms));
-        on_main(move |_, state| state.crossfade(generation, duration));
+    pub fn crossfade(&self, generation: u64, blend: Blend) {
+        on_main(move |_, state| state.crossfade(generation, blend));
     }
 
     pub fn fade_out(&self, duration_ms: u32) {
@@ -1499,12 +1591,9 @@ mod tests {
 
     #[test]
     fn ramps_pause_and_resume() {
-        let mut ramp = Ramp {
-            from: 0,
-            duration: Duration::from_secs(4),
-            elapsed: Duration::from_secs(1),
-            resumed: None,
-        };
+        let mut ramp = Ramp::new(0, &Blend::fade(4000));
+        ramp.resumed = None;
+        ramp.elapsed = Duration::from_secs(1);
         assert_eq!(ramp.progress(), 0.25);
         ramp.elapsed = Duration::from_secs(9);
         assert_eq!(ramp.progress(), 1.);
@@ -1514,6 +1603,49 @@ mod tests {
         ramp.elapsed = Duration::ZERO;
         ramp.resumed = Some(Instant::now());
         assert!(ramp.progress() < 0.01);
+        assert!(!ramp.held);
+        assert_eq!(ramp.describe(), "fade/fade");
+    }
+
+    #[test]
+    fn holds_the_incoming_song_through_its_lead_in() {
+        let blend = Blend {
+            length_ms: 8000,
+            lead_in_ms: 2000,
+            elapsed_ms: 500,
+            shape: Shape::cut(),
+        };
+        assert_eq!(blend.left_ms(), 7500);
+        let mut ramp = Ramp::new(1, &blend);
+        assert!(ramp.held);
+        assert_eq!(ramp.describe(), "cut/cut held");
+        ramp.resumed = None;
+        assert!(!ramp.release_due());
+        assert!((ramp.progress() - 0.0625).abs() < 1e-6);
+        ramp.elapsed = Duration::from_millis(2000);
+        assert!(ramp.release_due());
+        ramp.held = false;
+        assert!(!ramp.release_due());
+
+        let late = Ramp::new(
+            0,
+            &Blend {
+                elapsed_ms: 3000,
+                ..blend.clone()
+            },
+        );
+        assert!(!late.held);
+        let clamped = Ramp::new(
+            0,
+            &Blend {
+                lead_in_ms: 90_000,
+                elapsed_ms: 90_000,
+                ..blend
+            },
+        );
+        assert_eq!(clamped.elapsed, Duration::from_secs(8));
+        assert_eq!(clamped.lead_in, Duration::from_secs(8));
+        assert_eq!(Blend::fade(6000).shape, Shape::fade());
     }
 
     #[test]

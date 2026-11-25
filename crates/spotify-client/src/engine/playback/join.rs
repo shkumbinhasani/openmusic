@@ -5,14 +5,16 @@ use serde_json::Value;
 use super::{
     AudioSettings, Ending, Playing, ReportPrepared,
     gain::{fetch_loudness, linear},
+    mix::blend_at,
     narration::is_narration,
     quality::{choose, reported_quality},
     source::Pick,
     speed::{show_of, starting_speed, state_speed},
 };
 use crate::{
+    automix::Plan,
     engine::Engine,
-    player::{Join, Media},
+    player::{Blend, Join, Media},
 };
 
 pub(super) const PREPARE_LEAD_MS: u32 = 30_000;
@@ -93,6 +95,44 @@ pub(super) fn crossfade_length(overlap_ms: u32, remaining_ms: u32) -> Option<u32
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(super) struct Wanted {
+    pub(super) target: Target,
+    pub(super) join: Join,
+    pub(super) mix: Option<Plan>,
+}
+
+impl Wanted {
+    pub(super) fn due_ms(&self, settings: &AudioSettings, duration_ms: u32) -> u32 {
+        match &self.mix {
+            Some(plan) => plan.at_ms,
+            None => duration_ms.saturating_sub(if settings.crossfade {
+                settings.crossfade_ms
+            } else {
+                0
+            }),
+        }
+    }
+
+    pub(super) fn start_ms(&self) -> u32 {
+        self.mix.as_ref().map_or(0, |plan| plan.start_b_ms)
+    }
+}
+
+pub(super) fn blend_for(
+    mix: Option<&Plan>,
+    overlap_ms: u32,
+    position_ms: u32,
+    duration_ms: u32,
+) -> Option<Blend> {
+    match mix {
+        Some(plan) => blend_at(plan, position_ms),
+        None => {
+            crossfade_length(overlap_ms, duration_ms.saturating_sub(position_ms)).map(Blend::fade)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct File {
     pub(super) id: String,
     pub(super) format: Value,
@@ -127,11 +167,17 @@ pub(super) struct Prepared {
     pub(super) ready: bool,
     pub(super) gain_db: Option<f32>,
     speed: f32,
+    pub(super) mix: Option<Plan>,
+    start_ms: u32,
 }
 
 impl Prepared {
     pub(super) fn matches(&self, target: &Target) -> bool {
         !target.paused && self.target.state_id == target.state_id && self.target.uri == target.uri
+    }
+
+    fn wanted(&self, wanted: &Wanted) -> bool {
+        self.matches(&wanted.target) && self.join == wanted.join && self.mix == wanted.mix
     }
 
     pub(super) fn index(&self) -> usize {
@@ -145,6 +191,7 @@ impl Prepared {
             join: self.join,
             ready: self.ready,
             gain_db: self.gain_db,
+            mix: self.mix.as_ref().map(Plan::describe),
         }
     }
 }
@@ -190,7 +237,7 @@ impl Engine {
         }
     }
 
-    pub(super) fn wanted_join(&self) -> Option<(Target, Join)> {
+    pub(super) fn wanted_join(&self) -> Option<Wanted> {
         if self.audio.sleep.ends_track() || self.ending("advance") != Ending::Continue {
             return None;
         }
@@ -202,12 +249,23 @@ impl Engine {
         let next_ms = track_at(&playing.machine, target.index)?["metadata"]["duration"]
             .as_u64()
             .unwrap_or_default() as u32;
+        if let Some(plan) = self.mix_plan(playing, &target, next_ms) {
+            return Some(Wanted {
+                target,
+                join: Join::Crossfade,
+                mix: Some(plan),
+            });
+        }
         let join = join_for(
             &self.audio.settings,
             (playing.uri(), playing.duration_ms),
             (&target.uri, next_ms),
         )?;
-        Some((target, join))
+        Some(Wanted {
+            target,
+            join,
+            mix: None,
+        })
     }
 
     fn prepared_file_current(&self, prepared: &Prepared) -> bool {
@@ -227,7 +285,7 @@ impl Engine {
         };
         let keep = self
             .wanted_join()
-            .is_some_and(|(target, join)| prepared.matches(&target) && prepared.join == join)
+            .is_some_and(|wanted| prepared.wanted(&wanted))
             && self.prepared_file_current(prepared);
         if !keep {
             self.discard_prepared();
@@ -236,6 +294,7 @@ impl Engine {
     }
 
     pub(super) async fn prepare_next(&mut self) {
+        self.follow_mix();
         let Some(playing) = self.playing.as_ref() else {
             return;
         };
@@ -249,20 +308,16 @@ impl Engine {
         {
             return;
         }
-        let settings = &self.audio.settings;
-        let lead = PREPARE_LEAD_MS
-            + if settings.crossfade {
-                settings.crossfade_ms
-            } else {
-                0
-            };
-        if playing.duration_ms.saturating_sub(playing.position_ms) > lead {
-            return;
-        }
         let source = playing.generation;
-        let Some((target, join)) = self.wanted_join() else {
+        let Some(wanted) = self.wanted_join() else {
             return;
         };
+        let due = wanted.due_ms(&self.audio.settings, playing.duration_ms);
+        if due.saturating_sub(playing.position_ms) > PREPARE_LEAD_MS {
+            return;
+        }
+        let start_ms = wanted.start_ms();
+        let Wanted { target, join, mix } = wanted;
         let Some(track) = track_at(&playing.machine, target.index).cloned() else {
             self.audio.joins.tried = Some(source);
             return;
@@ -307,6 +362,7 @@ impl Engine {
             Media {
                 gain: linear(gain_db),
                 speed,
+                start_ms,
                 ..media
             },
             join,
@@ -321,6 +377,8 @@ impl Engine {
             ready: false,
             gain_db,
             speed,
+            mix,
+            start_ms,
         });
     }
 
@@ -396,12 +454,17 @@ impl Engine {
         else {
             return Taken::Missing;
         };
+        let start = if transition == "advance" {
+            prepared.start_ms
+        } else {
+            0
+        };
         let mut next = Playing::new(
             playing.machine.clone(),
             target.index,
             false,
             prepared.generation,
-            0,
+            start,
         );
         next.format = prepared.pick.format();
         next.bitrate = prepared.bitrate;
@@ -453,20 +516,29 @@ impl Engine {
         else {
             return;
         };
-        if prepared.join != Join::Crossfade || !prepared.ready || playing.paused {
+        if prepared.join != Join::Crossfade
+            || !prepared.ready
+            || playing.paused
+            || playing.duration_ms == 0
+        {
             return;
         }
-        let remaining = playing.duration_ms.saturating_sub(playing.position_ms);
-        let Some(length) = crossfade_length(self.audio.settings.crossfade_ms, remaining)
-            .filter(|_| playing.duration_ms > 0)
-        else {
+        let Some(blend) = blend_for(
+            prepared.mix.as_ref(),
+            self.audio.settings.crossfade_ms,
+            playing.position_ms,
+            playing.duration_ms,
+        ) else {
             return;
         };
-        let how = format!("crossfade {length}ms");
+        let how = match &prepared.mix {
+            Some(plan) => format!("automix {}ms {}", blend.left_ms(), plan.shape.name()),
+            None => format!("crossfade {}ms", blend.length_ms),
+        };
         if let Taken::Joined(generation) = self.take_prepared("advance", &how, false).await {
-            self.player.crossfade(generation, length);
-            self.audio.joins.fading_until =
-                Some(Instant::now() + Duration::from_millis(u64::from(length)));
+            let left = Duration::from_millis(u64::from(blend.left_ms()));
+            self.player.crossfade(generation, blend);
+            self.audio.joins.fading_until = Some(Instant::now() + left);
         }
     }
 }
@@ -523,7 +595,95 @@ mod tests {
             ready: false,
             gain_db: None,
             speed: 1.,
+            mix: None,
+            start_ms: 0,
         }
+    }
+
+    fn plan() -> Plan {
+        Plan {
+            at_ms: 150_000,
+            length_ms: 10_000,
+            lead_in_ms: 0,
+            start_b_ms: 8_000,
+            shape: crate::automix::Shape::fade(),
+            shortened: false,
+        }
+    }
+
+    #[test]
+    fn keeps_a_prepared_mix_only_while_its_plan_holds() {
+        let machine = machine();
+        let next = target(&machine, 0, "advance").unwrap();
+        let mut item = prepared(next.clone());
+        let plain = Wanted {
+            target: next.clone(),
+            join: Join::Gapless,
+            mix: None,
+        };
+        assert!(item.wanted(&plain));
+        let mixed = Wanted {
+            target: next,
+            join: Join::Crossfade,
+            mix: Some(plan()),
+        };
+        assert!(!item.wanted(&mixed));
+        item.join = Join::Crossfade;
+        item.mix = Some(plan());
+        assert!(item.wanted(&mixed));
+        let moved = Wanted {
+            mix: Some(Plan {
+                at_ms: 151_000,
+                ..plan()
+            }),
+            ..mixed.clone()
+        };
+        assert!(!item.wanted(&moved));
+        assert_eq!(
+            item.report().mix.as_deref(),
+            Some("at=150000 length=10000 lead_in=0 b_start=8000 shape=fade/fade")
+        );
+    }
+
+    #[test]
+    fn readies_the_next_song_before_the_mix_point() {
+        let machine = machine();
+        let next = target(&machine, 0, "advance").unwrap();
+        let settings = AudioSettings {
+            crossfade: true,
+            crossfade_ms: 6000,
+            ..AudioSettings::default()
+        };
+        let plain = Wanted {
+            target: next.clone(),
+            join: Join::Crossfade,
+            mix: None,
+        };
+        assert_eq!(plain.due_ms(&settings, 200_000), 194_000);
+        assert_eq!(plain.due_ms(&AudioSettings::default(), 200_000), 200_000);
+        assert_eq!(plain.start_ms(), 0);
+        let mixed = Wanted {
+            target: next,
+            join: Join::Crossfade,
+            mix: Some(plan()),
+        };
+        assert_eq!(mixed.due_ms(&settings, 200_000), 150_000);
+        assert_eq!(mixed.start_ms(), 8_000);
+    }
+
+    #[test]
+    fn blends_at_the_mix_point_or_near_the_end() {
+        assert_eq!(blend_for(None, 6000, 193_000, 200_000), None);
+        assert_eq!(
+            blend_for(None, 6000, 194_200, 200_000),
+            Some(Blend::fade(5800))
+        );
+        assert_eq!(blend_for(None, 0, 199_000, 200_000), None);
+        let plan = plan();
+        assert_eq!(blend_for(Some(&plan), 6000, 149_000, 200_000), None);
+        let blend = blend_for(Some(&plan), 6000, 150_300, 200_000).unwrap();
+        assert_eq!((blend.length_ms, blend.elapsed_ms), (10_000, 300));
+        assert_eq!(blend_for(Some(&plan), 6000, 156_000, 200_000), None);
     }
 
     #[test]
