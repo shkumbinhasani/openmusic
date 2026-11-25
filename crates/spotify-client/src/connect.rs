@@ -152,6 +152,8 @@ impl QueueKey {
     }
 }
 
+pub const RECOMMENDED: &str = "enhanced_recommendation";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueueItem {
     pub uri: String,
@@ -177,7 +179,9 @@ impl QueueItem {
             uri: track.uri.clone(),
             uid: track.uid.clone(),
             iteration: field("iteration").unwrap_or_default(),
-            provider: track.provider.clone(),
+            provider: field("provider")
+                .filter(|provider| provider == RECOMMENDED)
+                .unwrap_or_else(|| track.provider.clone()),
             title: field("title"),
             artist: field("artist_name"),
             cover: field("image_url").map(|image| image_url(&image)),
@@ -2295,6 +2299,21 @@ mod tests {
         );
         let empty = queue_with_added(&[], &["spotify:track:a".into()]);
         assert_eq!(uids(&empty), vec!["spotify:track:a"]);
+    }
+
+    #[test]
+    fn marks_smart_shuffle_picks_from_their_metadata() {
+        let pick = item(
+            "spotify:track:a",
+            "u1",
+            "context",
+            &[("provider", RECOMMENDED)],
+        );
+        assert_eq!(QueueItem::of(&pick).provider, RECOMMENDED);
+        let plain = item("spotify:track:b", "u2", "context", &[("provider", "")]);
+        assert_eq!(QueueItem::of(&plain).provider, "context");
+        let queued = item("spotify:track:c", "q1", "queue", &[("provider", "queue")]);
+        assert_eq!(QueueItem::of(&queued).provider, "queue");
     }
 
     #[test]

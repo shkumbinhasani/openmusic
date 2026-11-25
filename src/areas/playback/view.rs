@@ -6,7 +6,7 @@ use gpui::{
 };
 use spotify_client::{
     Track,
-    connect::{Repeat, Shuffle},
+    connect::{RECOMMENDED, Repeat, Shuffle},
 };
 
 use super::{
@@ -775,7 +775,7 @@ pub fn row_accessories(
     {
         items.push(app.added_by_badge(name, palette));
     }
-    if queue_row.provider == "enhanced_recommendation" {
+    if queue_row.provider == RECOMMENDED {
         items.push(icon(icons::SHUFFLE_SMART, 15., palette.accent).into_any_element());
     }
     if row.0 == QUEUE_QUEUED && app.queue_editable() && app.playback_allowed().remove_from_queue {
