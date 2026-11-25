@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use spotify_client::{
     Api, Track,
@@ -132,6 +136,7 @@ pub enum Event {
     Profile {
         uri: String,
         result: Result<Box<ProfileView>, String>,
+        asked: Instant,
     },
     ProfileList {
         uri: String,
@@ -147,7 +152,10 @@ pub enum Event {
         uris: Vec<String>,
         message: String,
     },
-    FollowState(Vec<(String, bool)>),
+    FollowState {
+        states: Vec<(String, bool)>,
+        asked: Instant,
+    },
     Blocked {
         uri: String,
         block: bool,
@@ -195,7 +203,7 @@ impl Event {
             | Self::ProfileList { .. }
             | Self::Followed { .. }
             | Self::FollowFailed { .. }
-            | Self::FollowState(_)
+            | Self::FollowState { .. }
             | Self::Blocked { .. }
             | Self::BlockState(_)
             | Self::Privacy(_)
@@ -215,7 +223,7 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::ClearCache => ctx.tasks.spawn(cache_size(true)),
         Command::Profile(uri) => ctx.tasks.spawn_keyed(
             "profile",
-            profile_view(ctx.api.clone(), ctx.user.clone(), uri),
+            profile_view(ctx.api.clone(), ctx.user.clone(), uri, Instant::now()),
         ),
         Command::ProfileList { uri, kind, offset } => ctx.tasks.spawn_keyed(
             "profile-list",
@@ -228,7 +236,10 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 Ok(follow_users(api, uris, follow).await)
             }));
         }
-        Command::FollowLookup(uris) => ctx.tasks.spawn(follow_lookup(ctx.api.clone(), uris)),
+        Command::FollowLookup(uris) => {
+            ctx.tasks
+                .spawn(follow_lookup(ctx.api.clone(), uris, Instant::now()))
+        }
         Command::Block { uri, block } => {
             let keys = vec![format!("block:{uri}")];
             let (api, user) = (ctx.api.clone(), ctx.user.clone());
@@ -413,7 +424,7 @@ fn missing(error: &anyhow::Error) -> bool {
     status(error) == Some(reqwest::StatusCode::NOT_FOUND)
 }
 
-async fn profile_view(api: Api, user: User, uri: String) -> crate::worker::Event {
+async fn profile_view(api: Api, user: User, uri: String, asked: Instant) -> crate::worker::Event {
     let result = load_profile(&api, &user, &uri)
         .await
         .map(Box::new)
@@ -424,7 +435,7 @@ async fn profile_view(api: Api, user: User, uri: String) -> crate::worker::Event
                 "Couldn’t load this profile.".to_owned()
             }
         });
-    Event::Profile { uri, result }.into()
+    Event::Profile { uri, result, asked }.into()
 }
 
 async fn load_profile(api: &Api, user: &User, uri: &str) -> anyhow::Result<ProfileView> {
@@ -653,14 +664,14 @@ pub fn settle(
         .collect()
 }
 
-async fn follow_lookup(api: Api, uris: Vec<String>) -> crate::worker::Event {
+async fn follow_lookup(api: Api, uris: Vec<String>, asked: Instant) -> crate::worker::Event {
     let mut states = Vec::new();
     for batch in uris.chunks(LOOKUP_BATCH) {
         if let Ok(found) = social::is_following(&api, batch).await {
             states.extend(found);
         }
     }
-    Event::FollowState(states).into()
+    Event::FollowState { states, asked }.into()
 }
 
 #[cfg(test)]

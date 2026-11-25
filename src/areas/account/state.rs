@@ -545,7 +545,7 @@ pub fn on_event(
                 Err(message) => app.account.error = Some(message),
             }
         }
-        Event::Profile { uri, result } => profile::on_profile(app, uri, result),
+        Event::Profile { uri, result, asked } => profile::on_profile(app, uri, result, asked),
         Event::ProfileList {
             uri,
             kind,
@@ -554,7 +554,9 @@ pub fn on_event(
         } => profile::on_list(app, uri, kind, offset, result),
         Event::Followed { states, message } => profile::on_followed(app, states, message),
         Event::FollowFailed { uris, message } => profile::on_follow_failed(app, uris, message),
-        Event::FollowState(states) => app.account.profiles.learn_following(states),
+        Event::FollowState { states, asked } => {
+            app.account.profiles.learn_following(states, Some(asked))
+        }
         Event::Blocked { uri, block, state } => profile::on_blocked(app, uri, block, state),
         Event::BlockState(states) => app.account.profiles.learn_blocking(states),
         Event::Privacy(result) => privacy::on_privacy(app, result),

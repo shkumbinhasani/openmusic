@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     rc::Rc,
+    time::Instant,
 };
 
 use gpui::{Context, PromptButton, PromptLevel, Window};
@@ -74,6 +75,7 @@ pub struct Profiles {
     pub sentinel: Sentinel,
     pub following: HashMap<String, bool>,
     pub pending: HashMap<String, PendingFollow>,
+    settled: HashMap<String, Instant>,
     pub blocking: HashMap<String, bool>,
     pub block_pending: HashSet<String>,
 }
@@ -191,6 +193,7 @@ impl Profiles {
     pub fn finish_follow(&mut self, states: Vec<(String, bool)>) {
         for (uri, state) in states {
             let pending = self.pending.remove(&uri);
+            self.settled.insert(uri.clone(), Instant::now());
             let shown = self.following.insert(uri.clone(), state);
             if pending.is_some_and(|pending| pending.counted) && shown != Some(state) {
                 self.adjust(&uri, shown, state);
@@ -213,9 +216,11 @@ impl Profiles {
         }
     }
 
-    pub fn learn_following(&mut self, states: Vec<(String, bool)>) {
+    pub fn learn_following(&mut self, states: Vec<(String, bool)>, asked: Option<Instant>) {
         for (uri, state) in states {
-            if !self.pending.contains_key(&uri) {
+            let overtaken =
+                asked.is_some_and(|asked| self.settled.get(&uri).is_some_and(|at| *at > asked));
+            if !overtaken && !self.pending.contains_key(&uri) {
                 self.following.insert(uri, state);
             }
         }
@@ -405,7 +410,12 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
     }
 }
 
-pub fn on_profile(app: &mut OpenMusic, uri: String, result: Result<Box<ProfileView>, String>) {
+pub fn on_profile(
+    app: &mut OpenMusic,
+    uri: String,
+    result: Result<Box<ProfileView>, String>,
+    asked: Instant,
+) {
     let profiles = &mut app.account.profiles;
     if result.is_err() && profiles.loaded(&uri).is_some() {
         return;
@@ -413,7 +423,7 @@ pub fn on_profile(app: &mut OpenMusic, uri: String, result: Result<Box<ProfileVi
     let mut unknown = Vec::new();
     if let Ok(view) = &result {
         if !view.profile.is_current_user {
-            profiles.learn_following(vec![(uri.clone(), view.profile.is_following)]);
+            profiles.learn_following(vec![(uri.clone(), view.profile.is_following)], Some(asked));
         }
         if let Some(blocking) = view.blocking {
             profiles.learn_blocking(vec![(uri.clone(), blocking)]);
@@ -904,7 +914,7 @@ mod tests {
                 .begin_follow(std::slice::from_ref(&own), true, Some(&own))
                 .is_empty()
         );
-        profiles.learn_following(vec![(friend.clone(), true)]);
+        profiles.learn_following(vec![(friend.clone(), true)], None);
         profiles.begin_follow(std::slice::from_ref(&friend), false, Some(&own));
         assert_eq!(counts(&profiles), (1, 19));
         profiles.begin_follow(std::slice::from_ref(&stranger), true, Some(&own));
@@ -924,12 +934,26 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_read_before_a_follow_settled_does_not_undo_it() {
+        let friend = "spotify:user:friend".to_owned();
+        let mut profiles = Profiles::default();
+        let before_follow = Instant::now() - std::time::Duration::from_millis(5);
+        profiles.begin_follow(std::slice::from_ref(&friend), true, None);
+        profiles.finish_follow(vec![(friend.clone(), true)]);
+        profiles.learn_following(vec![(friend.clone(), false)], Some(before_follow));
+        assert_eq!(profiles.known_following(&friend), Some(true));
+        let later = Instant::now() + std::time::Duration::from_millis(5);
+        profiles.learn_following(vec![(friend.clone(), false)], Some(later));
+        assert_eq!(profiles.known_following(&friend), Some(false));
+    }
+
+    #[test]
     fn learns_follow_states_without_touching_pending_ones() {
         let friend = "spotify:user:friend".to_owned();
         let other = "spotify:user:other".to_owned();
         let mut profiles = Profiles::default();
         profiles.begin_follow(std::slice::from_ref(&friend), true, None);
-        profiles.learn_following(vec![(friend.clone(), false), (other.clone(), false)]);
+        profiles.learn_following(vec![(friend.clone(), false), (other.clone(), false)], None);
         assert_eq!(profiles.known_following(&friend), Some(true));
         assert_eq!(profiles.known_following(&other), Some(false));
         let people = vec![
