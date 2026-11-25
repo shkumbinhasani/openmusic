@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::Path};
 
-use gpui::{App, Context, Window};
+use gpui::{App, Context, PromptButton, PromptLevel, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spotify_client::account::{AccountInfo, Explicit};
@@ -170,6 +170,9 @@ impl ProfileListKind {
 }
 
 pub const CHIP: &str = "account-chip";
+pub const CLEAR_CACHE_KEY: &str = "settings-clear-cache";
+pub const CACHE_DETAIL: &str =
+    "Removes saved artwork and the offline copy of your playlists. Your account is not affected.";
 pub const CHIP_ROW: Row = (CHIP, 0);
 pub const ACCOUNT_URL: &str = "https://www.spotify.com/account/overview/";
 pub const FAMILY_URL: &str = "https://www.spotify.com/account/family/";
@@ -180,6 +183,8 @@ pub struct State {
     pub loading: bool,
     pub error: Option<String>,
     pub languages_open: bool,
+    pub cache: Option<u64>,
+    pub cache_busy: bool,
 }
 
 impl State {
@@ -271,6 +276,45 @@ impl OpenMusic {
         }
     }
 
+    pub fn refresh_cache_size(&mut self) {
+        if !self.account.cache_busy {
+            self.send(Command::CacheSize);
+        }
+    }
+
+    pub fn clear_cache(&mut self) {
+        if self.account.cache_busy {
+            return;
+        }
+        self.account.cache_busy = true;
+        self.send(Command::ClearCache);
+    }
+
+    pub fn confirm_clear_cache(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account.cache_busy {
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Clear the cache?",
+            Some(CACHE_DETAIL),
+            &[
+                PromptButton::ok("Clear Cache"),
+                PromptButton::cancel("Cancel"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |app, cx| {
+                    app.clear_cache();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn drop_page_caches(&mut self) {
         self.discovery.artist = None;
         self.playlists.collection = None;
@@ -330,7 +374,30 @@ pub fn with_setting(settings: &Settings, path: &str, value: &str) -> Result<Sett
     Ok(changed)
 }
 
-pub fn load(_app: &mut OpenMusic, _page: &Page) {}
+pub fn cache_label(bytes: u64) -> String {
+    const KB: f64 = 1_000.;
+    const MB: f64 = 1_000_000.;
+    const GB: f64 = 1_000_000_000.;
+    if bytes == 0 {
+        return "Empty".to_owned();
+    }
+    let size = bytes as f64;
+    let kilobytes = (size / KB).round().max(1.);
+    if kilobytes < 1000. {
+        return format!("{kilobytes} KB");
+    }
+    let megabytes = size / MB;
+    if megabytes < 999.95 {
+        return format!("{megabytes:.1} MB");
+    }
+    format!("{:.2} GB", size / GB)
+}
+
+pub fn load(app: &mut OpenMusic, page: &Page) {
+    if *page == Page::Settings {
+        app.refresh_cache_size();
+    }
+}
 
 pub fn on_event(
     app: &mut OpenMusic,
@@ -347,6 +414,13 @@ pub fn on_event(
                     app.account.error = None;
                 }
                 Err(message) => app.account.error = Some(message),
+            }
+        }
+        Event::Cache { bytes, cleared } => {
+            app.account.cache = Some(bytes);
+            if cleared {
+                app.account.cache_busy = false;
+                app.show_toast("Cache cleared", None);
             }
         }
     }
@@ -399,6 +473,24 @@ pub fn debug(
             let _ = std::fs::write(directory.join("account.txt"), text);
         }
         "account-menu" => app.open_account_menu(),
+        "cache" => {
+            match rest {
+                "refresh" => app.refresh_cache_size(),
+                "clear" => app.clear_cache(),
+                "ask" => app.confirm_clear_cache(window, cx),
+                _ => {}
+            }
+            let bytes = app
+                .account
+                .cache
+                .map_or("unknown".to_owned(), |bytes| bytes.to_string());
+            let label = app.account.cache.map_or("unknown".to_owned(), cache_label);
+            let text = format!(
+                "bytes={bytes} label={label} busy={}",
+                app.account.cache_busy
+            );
+            let _ = std::fs::write(directory.join("cache.txt"), text);
+        }
         "language" => {
             match rest {
                 "" => {}
@@ -454,7 +546,7 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
 pub fn on_press(
     app: &mut OpenMusic,
     key: &'static str,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
@@ -463,6 +555,7 @@ pub fn on_press(
         "account-retry" => app.refresh_account(),
         "account-family" => cx.open_url(FAMILY_URL),
         LANGUAGE_KEY => app.open_language_menu(),
+        CLEAR_CACHE_KEY => app.confirm_clear_cache(window, cx),
         _ => return false,
     }
     true
@@ -532,6 +625,18 @@ mod tests {
         for (tag, _) in LANGUAGES {
             assert!(valid_language(tag), "{tag}");
         }
+    }
+
+    #[test]
+    fn labels_cache_sizes() {
+        assert_eq!(cache_label(0), "Empty");
+        assert_eq!(cache_label(12), "1 KB");
+        assert_eq!(cache_label(1_500), "2 KB");
+        assert_eq!(cache_label(999_999), "1.0 MB");
+        assert_eq!(cache_label(999_960_000), "1.00 GB");
+        assert_eq!(cache_label(9_800_000), "9.8 MB");
+        assert_eq!(cache_label(16_049_000), "16.0 MB");
+        assert_eq!(cache_label(1_234_000_000), "1.23 GB");
     }
 
     #[test]

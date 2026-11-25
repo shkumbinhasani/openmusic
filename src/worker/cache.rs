@@ -65,6 +65,39 @@ pub fn clear() {
     }
 }
 
+pub fn size() -> u64 {
+    directory().map_or(0, |directory| folder_size(&directory))
+}
+
+fn folder_size(folder: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => folder_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |metadata| metadata.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
+pub fn clear_all() {
+    let Some(directory) = directory() else { return };
+    if let Ok(entries) = std::fs::read_dir(&directory) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = std::fs::remove_dir_all(path);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let _ = std::fs::create_dir_all(directory.join("covers"));
+}
+
 fn hash(url: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in url.bytes() {

@@ -7,24 +7,27 @@ use spotify_client::{
 };
 
 use super::state::{AccountPrefs, chosen_language, system_language};
-use crate::worker::Ctx;
+use crate::worker::{Ctx, cache};
 
 const SECOND_LOOK: Duration = Duration::from_secs(5);
 
 pub enum Command {
     Refresh,
     Language(Option<String>),
+    CacheSize,
+    ClearCache,
 }
 
 pub enum Event {
     Account(Result<AccountInfo, String>),
+    Cache { bytes: u64, cleared: bool },
 }
 
 impl Event {
     pub fn covers(&self) -> Vec<String> {
         match self {
             Self::Account(Ok(info)) => info.avatar.iter().cloned().collect(),
-            Self::Account(Err(_)) => Vec::new(),
+            Self::Account(Err(_)) | Self::Cache { .. } => Vec::new(),
         }
     }
 }
@@ -33,6 +36,8 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
     match command {
         Command::Refresh => refresh(ctx),
         Command::Language(language) => apply_language(language.as_deref(), ctx),
+        Command::CacheSize => ctx.tasks.spawn_keyed("cache-size", cache_size(false)),
+        Command::ClearCache => ctx.tasks.spawn(cache_size(true)),
     }
 }
 
@@ -68,4 +73,20 @@ async fn fetch(api: Api, delay: Option<Duration>) -> crate::worker::Event {
         .await
         .map_err(|_| "Couldn’t load your account.".to_owned());
     Event::Account(result).into()
+}
+
+async fn cache_size(clear: bool) -> crate::worker::Event {
+    let bytes = tokio::task::spawn_blocking(move || {
+        if clear {
+            cache::clear_all();
+        }
+        cache::size()
+    })
+    .await
+    .unwrap_or_default();
+    Event::Cache {
+        bytes,
+        cleared: clear,
+    }
+    .into()
 }

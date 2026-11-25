@@ -7,7 +7,10 @@ use spotify_client::{
     account::{AccountInfo, Explicit},
 };
 
-use super::state::{CHIP, CHIP_ROW, LANGUAGE_KEY, LANGUAGES, ProfileListKind, language_name};
+use super::state::{
+    CHIP, CHIP_ROW, CLEAR_CACHE_KEY, LANGUAGE_KEY, LANGUAGES, ProfileListKind, cache_label,
+    language_name,
+};
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
     icons,
@@ -449,12 +452,36 @@ impl OpenMusic {
         Some(settings_section("Language", rows, palette))
     }
 
-    pub fn storage_section(
-        &self,
-        _palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        None
+    pub fn storage_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let size = match (self.account.cache, self.account.cache_busy) {
+            (_, true) => "Clearing…".to_owned(),
+            (Some(bytes), false) => cache_label(bytes),
+            (None, false) => "Checking…".to_owned(),
+        };
+        let control = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(palette.muted))
+                    .child(size),
+            )
+            .child(self.text_control(CLEAR_CACHE_KEY, "Clear Cache", false, palette, cx));
+        Some(settings_section(
+            "Storage",
+            vec![setting_row(
+                "Cache",
+                Some(
+                    "Artwork and the offline copy of your playlists, kept so pages open quickly. Clearing it doesn’t affect your account."
+                        .into(),
+                ),
+                control,
+                palette,
+            )],
+            palette,
+        ))
     }
 }
 
