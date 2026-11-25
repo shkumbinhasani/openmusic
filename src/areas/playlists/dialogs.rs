@@ -1032,9 +1032,13 @@ fn dialog_top(window: &Window) -> f32 {
     (f32::from(window.viewport_size().height) * 0.1).clamp(36., 96.)
 }
 
+const SLIDE_DOWN: f32 = 30.;
+const DOCK_CLEARANCE: f32 = 84.;
+const SHEET_CHROME: f32 = 222.;
+
 fn sheet_list_height(window: &Window) -> f32 {
     let height = f32::from(window.viewport_size().height);
-    (height - dialog_top(window) - 296.).clamp(120., 360.)
+    (height - dialog_top(window) - SLIDE_DOWN - DOCK_CLEARANCE - SHEET_CHROME).clamp(120., 360.)
 }
 
 impl Render for SaveTo {
