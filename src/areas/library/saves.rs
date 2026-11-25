@@ -135,6 +135,34 @@ fn drop_toast(added: usize) -> String {
     }
 }
 
+fn settle_unknown(
+    waiting: &mut HashMap<String, (bool, Instant)>,
+    known: impl Fn(&str) -> bool,
+    now: Instant,
+) -> (Vec<(String, bool)>, Vec<bool>) {
+    let mut ready = Vec::new();
+    let mut lost = Vec::new();
+    waiting.retain(|uri, (saved, at)| {
+        if known(uri) {
+            ready.push((uri.clone(), *saved));
+        } else if now.duration_since(*at) >= TOGGLE_WAIT {
+            lost.push(*saved);
+        } else {
+            return true;
+        }
+        false
+    });
+    (ready, lost)
+}
+
+fn lost_toast(saved: bool) -> &'static str {
+    if saved {
+        "Couldn’t add this to your library. Try again."
+    } else {
+        "Couldn’t remove this from your library. Try again."
+    }
+}
+
 fn settle_likes(
     writes: &mut HashMap<String, bool>,
     pending: &HashMap<String, Option<bool>>,
@@ -163,7 +191,9 @@ impl OpenMusic {
         if self.is_saved(uri).is_some() {
             self.apply_save(uri, saved);
         } else {
-            self.library.when_known = Some((uri.to_owned(), saved, Instant::now()));
+            self.library
+                .when_known
+                .insert(uri.to_owned(), (saved, Instant::now()));
             self.lookup_saved([uri.to_owned()]);
         }
     }
@@ -405,15 +435,17 @@ pub fn tick(app: &mut OpenMusic) -> bool {
         }
         app.lookup_saved(fresh);
     }
-    let mut changed = false;
-    if let Some((uri, saved, at)) = app.library.when_known.clone() {
-        if at.elapsed() >= TOGGLE_WAIT {
-            app.library.when_known = None;
-        } else if app.is_saved(&uri).is_some() {
-            app.library.when_known = None;
-            app.make_saved(&uri, saved);
-            changed = true;
-        }
+    let (ready, lost) = settle_unknown(
+        &mut app.library.when_known,
+        |uri| app.saved.known.contains_key(uri),
+        Instant::now(),
+    );
+    let mut changed = !ready.is_empty() || !lost.is_empty();
+    for (uri, saved) in ready {
+        app.make_saved(&uri, saved);
+    }
+    if let Some(&saved) = lost.last() {
+        app.show_toast(lost_toast(saved), None);
     }
     if let Some((songs, at)) = app.library.dropped.clone() {
         if songs.iter().all(|uri| app.is_saved(uri).is_some()) {
@@ -563,6 +595,33 @@ mod tests {
         writes.insert(like("late"), true);
         known.remove(&like("late"));
         assert!(settle_likes(&mut writes, &pending, &known));
+    }
+
+    #[test]
+    fn every_click_on_an_unknown_item_is_kept_until_spotify_answers() {
+        let start = Instant::now();
+        let mut waiting = HashMap::from([
+            ("spotify:track:a".to_owned(), (true, start)),
+            ("spotify:album:b".to_owned(), (false, start)),
+        ]);
+        let (ready, lost) = settle_unknown(&mut waiting, |_| false, start);
+        assert!(ready.is_empty() && lost.is_empty());
+        assert_eq!(waiting.len(), 2);
+        let (ready, lost) = settle_unknown(
+            &mut waiting,
+            |uri| uri == "spotify:track:a",
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(ready, [("spotify:track:a".to_owned(), true)]);
+        assert!(lost.is_empty());
+        let (ready, lost) = settle_unknown(&mut waiting, |_| false, start + TOGGLE_WAIT);
+        assert!(ready.is_empty());
+        assert_eq!(lost, [false]);
+        assert!(waiting.is_empty());
+        assert_eq!(
+            lost_toast(false),
+            "Couldn’t remove this from your library. Try again."
+        );
     }
 
     #[test]
