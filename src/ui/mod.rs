@@ -421,9 +421,10 @@ impl Render for OpenMusic {
             };
             content.child(
                 div()
-                    .id(gpui::ElementId::Name(scroll_id.into()))
+                    .id(gpui::ElementId::Name(scroll_id.clone().into()))
                     .size_full()
                     .overflow_y_scroll()
+                    .track_scroll(&self.details.content_scroll(&scroll_id))
                     .child(
                         div()
                             .w_full()

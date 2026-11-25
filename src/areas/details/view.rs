@@ -1,7 +1,10 @@
 use gpui::{AnyElement, Context, Pixels, prelude::*};
 use spotify_client::Track;
 
-use super::menu::{self, Facts};
+use super::{
+    go,
+    menu::{self, Facts},
+};
 use crate::{
     app::OpenMusic,
     ui::{
@@ -43,16 +46,28 @@ pub fn dock_items(
 }
 
 pub fn row_accessories(
-    _app: &OpenMusic,
-    _track: &Track,
+    app: &OpenMusic,
+    track: &Track,
     _row: Row,
     _options: &RowOptions,
     _palette: Palette,
     _cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
-    Vec::new()
+    match &app.details.highlight {
+        Some(highlight) if !highlight.scrolled.get() && app.highlights(track) => {
+            vec![
+                go::scroll_anchor(app.details.scroll.handle(), highlight.scrolled.clone())
+                    .into_any_element(),
+            ]
+        }
+        _ => Vec::new(),
+    }
 }
 
 pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
     false
+}
+
+pub fn row_highlighted(app: &OpenMusic, track: &Track) -> bool {
+    app.highlights(track)
 }

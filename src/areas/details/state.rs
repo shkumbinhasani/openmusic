@@ -1,17 +1,21 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
-use gpui::{App, Context, Entity, Window};
+use gpui::{App, Context, Entity, ScrollHandle, Window};
 use gpui_component::WindowExt;
-use spotify_client::share;
+use spotify_client::{catalog::Link, share};
 
 use super::{
     credits::{self, CreditsView},
     embed::EmbedView,
+    go::{ContentScroll, Highlight},
     menu,
-    worker::Event,
+    worker::{Command, Event},
 };
 use crate::{
-    app::{OpenMusic, Page},
+    app::{OpenMusic, Page, Session},
     menus::Handle,
     ui::{
         menu::Surface,
@@ -24,6 +28,10 @@ pub struct State {
     pub credits: credits::Cache,
     pub credits_view: Option<(String, Entity<CreditsView>)>,
     pub embed_view: Option<(String, Entity<EmbedView>)>,
+    pub artists: HashMap<String, Vec<Link>>,
+    pub highlight: Option<Highlight>,
+    pub radio: Option<String>,
+    pub scroll: ContentScroll,
 }
 
 impl State {
@@ -33,6 +41,10 @@ impl State {
         window.close_all_dialogs(cx);
         self.credits_view = None;
         self.embed_view = None;
+    }
+
+    pub fn content_scroll(&self, page: &str) -> ScrollHandle {
+        self.scroll.for_page(page)
     }
 }
 
@@ -45,6 +57,10 @@ pub fn on_event(
     cx: &mut Context<OpenMusic>,
 ) {
     match event {
+        Event::TrackArtists { uri, artists } => {
+            app.details.artists.insert(uri, artists);
+        }
+        Event::Radio { seed, result } => app.radio_ready(&seed, result),
         Event::Credits { uri, result } => {
             if let Ok(credits) = &result {
                 app.details.credits.insert(credits.clone());
@@ -175,23 +191,45 @@ pub fn debug(
                 .unwrap_or_default();
             app.show_credits((*uri).to_owned(), title, window, cx);
         }
+        ("radio", [seed]) => app.start_radio((*seed).to_owned()),
+        ("goalbum", [album, track]) => app.go_to_album((*album).to_owned(), (*track).to_owned()),
+        ("artists", [uri]) => {
+            let lines = match app.details.artists.get(*uri) {
+                Some(artists) if !artists.is_empty() => artists
+                    .iter()
+                    .map(|artist| format!("{} {}", artist.uri, artist.name))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Some(_) => "pending".to_owned(),
+                None => {
+                    app.details.artists.insert((*uri).to_owned(), Vec::new());
+                    app.send(Command::TrackArtists((*uri).to_owned()));
+                    "pending".to_owned()
+                }
+            };
+            write("artists.txt", lines);
+        }
         _ => return false,
     }
     true
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
-    let credits = app
-        .details
+    let details = &app.details;
+    let credits = details
         .credits_view
         .as_ref()
         .map(|(uri, _)| format!("credits={uri}"));
-    let embed = app
-        .details
+    let embed = details
         .embed_view
         .as_ref()
         .map(|(uri, _)| format!("embed={uri}"));
-    [credits, embed]
+    let highlight = details
+        .highlight
+        .as_ref()
+        .map(|highlight| format!("highlight={}", highlight.track));
+    let radio = details.radio.as_ref().map(|seed| format!("radio={seed}"));
+    [credits, embed, highlight, radio]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -219,4 +257,12 @@ pub fn row_dropped(
     false
 }
 
-pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if !matches!(app.session, Session::Connected) {
+        return;
+    }
+    app.lookup_artists();
+    if app.tick_highlight() {
+        cx.notify();
+    }
+}

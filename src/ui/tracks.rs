@@ -328,6 +328,9 @@ impl OpenMusic {
                     .when(selected || self.menu_row(id), |row| {
                         row.bg(rgba(palette.press))
                     })
+                    .when(details::view::row_highlighted(self, track), |row| {
+                        row.bg(rgba(palette.accent << 8 | 0x33))
+                    })
                     .hover(move |row| row.bg(rgba(palette.press)))
                     .on_click(
                         cx.listener(move |this, _, window, cx| match (&click, &context) {

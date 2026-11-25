@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
+use prost::Message;
 use serde_json::{Value, json};
+use spotify_proto::{extendedmetadata::ExtensionKind, metadata};
 
 use crate::{
-    api::Api,
+    api::{Api, HttpStatus},
+    catalog::{self, Link},
     entity,
     pathfinder::{self, Operation},
 };
@@ -12,6 +15,11 @@ use crate::{
 pub const TRACK_CREDITS: Operation = Operation::query(
     "queryTrackCreditsGroupedModal",
     "5c109593bca8ea4cb28104e178820ff035418fb4694d34d10c89cc755fe64694",
+);
+
+pub const TRACK_ARTISTS: Operation = Operation::query(
+    "queryTrackArtists",
+    "ee2b038198f5e62c679c3996584d9249bbee55fe69fc212271c56492a022c798",
 );
 
 const EXTRACTED_COLOR: &str = "b2d6d99fb6237952dfa6638385f9c6085f1b1fb9d0468753ca6ad98ff45adc6f";
@@ -218,6 +226,87 @@ pub fn parse_cover_color(data: &Value) -> Option<u32> {
     entity::color(image["extractedColors"]["colorDark"]["hex"].as_str()?)
 }
 
+pub fn track_artists_variables(uri: &str) -> Value {
+    json!({ "trackUri": uri })
+}
+
+pub async fn track_artists(api: &Api, uri: &str) -> Result<Vec<Link>> {
+    let data = pathfinder::query(api, TRACK_ARTISTS, track_artists_variables(uri)).await?;
+    Ok(parse_track_artists(&data))
+}
+
+pub fn parse_track_artists(data: &Value) -> Vec<Link> {
+    data["trackUnion"]["artists"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|artist| {
+            Some(Link {
+                uri: text(&artist["uri"])?,
+                name: text(&artist["profile"]["name"])?,
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct NoRadio;
+
+impl std::fmt::Display for NoRadio {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Radio is not available because personalized recommendations are turned off"
+        )
+    }
+}
+
+impl std::error::Error for NoRadio {}
+
+pub fn radio_path(seed: &str) -> String {
+    format!("/inspiredby-mix/v2/seed_to_playlist/{seed}?response-format=json")
+}
+
+pub fn parse_radio(reply: &Value) -> Option<String> {
+    reply["mediaItems"]
+        .as_array()?
+        .iter()
+        .find_map(|item| text(&item["uri"]))
+}
+
+pub async fn album_artist(api: &Api, album: &str) -> Result<Option<String>> {
+    let data = catalog::extended(api, &[(album.to_owned(), ExtensionKind::AlbumV4)]).await?;
+    Ok(data
+        .into_iter()
+        .next()
+        .and_then(|(_, value)| metadata::Album::decode(value.as_slice()).ok())
+        .and_then(|album| {
+            let gid = album.artist.first()?.gid.clone()?;
+            catalog::uri_from_gid("artist", &gid)
+        }))
+}
+
+pub async fn radio(api: &Api, seed: &str) -> Result<String> {
+    let seed = if seed.starts_with("spotify:album:") {
+        album_artist(api, seed).await?.ok_or(NoRadio)?
+    } else {
+        seed.to_owned()
+    };
+    match api.get_json::<Value>(&radio_path(&seed)).await {
+        Ok(reply) => parse_radio(&reply).ok_or_else(|| NoRadio.into()),
+        Err(error) if refused(&error) => Err(NoRadio.into()),
+        Err(error) => Err(error),
+    }
+}
+
+fn refused(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<HttpStatus>()
+        .is_some_and(|HttpStatus(status)| {
+            status.is_client_error() && status.as_u16() != 401 && status.as_u16() != 429
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +494,62 @@ mod tests {
         );
         assert_eq!(color(json!({"albumUnion": {"coverArt": {}}})), None);
         assert_eq!(color(json!({})), None);
+    }
+
+    const SONG: &str = "spotify:track:70LcF31zb1H0PyJoS1Sx1r";
+    const RADIO: &str = "spotify:playlist:37i9dQZF1E8Redacted001";
+
+    #[test]
+    fn reads_every_artist_of_a_track() {
+        assert_eq!(
+            track_artists_variables("spotify:track:2nrG5UtAcqXbYttu7MXP1p"),
+            json!({"trackUri": "spotify:track:2nrG5UtAcqXbYttu7MXP1p"})
+        );
+        let data = json!({"trackUnion": {"__typename": "Track", "artists": {"items": [
+            {"profile": {"name": "Queen"}, "uri": "spotify:artist:1dfeR4HaWDbWqFHLkxsg1d"},
+            {"profile": {"name": "David Bowie"}, "uri": "spotify:artist:0oSGxfWSnnOXhD2fKuz2Gy"},
+            {"profile": {"name": ""}, "uri": "spotify:artist:nameless"},
+            {"profile": {"name": "No link"}}
+        ]}, "uri": "spotify:track:2nrG5UtAcqXbYttu7MXP1p"}});
+        assert_eq!(
+            parse_track_artists(&data),
+            [
+                Link {
+                    uri: "spotify:artist:1dfeR4HaWDbWqFHLkxsg1d".into(),
+                    name: "Queen".into(),
+                },
+                Link {
+                    uri: "spotify:artist:0oSGxfWSnnOXhD2fKuz2Gy".into(),
+                    name: "David Bowie".into(),
+                },
+            ]
+        );
+        assert!(parse_track_artists(&json!({"trackUnion": {"__typename": "NotFound"}})).is_empty());
+    }
+
+    #[test]
+    fn finds_the_radio_playlist_for_a_seed() {
+        assert_eq!(
+            radio_path(SONG),
+            "/inspiredby-mix/v2/seed_to_playlist/spotify:track:70LcF31zb1H0PyJoS1Sx1r?response-format=json"
+        );
+        assert_eq!(
+            parse_radio(&json!({"total": 1, "mediaItems": [{"uri": RADIO}]})).as_deref(),
+            Some(RADIO)
+        );
+        assert_eq!(parse_radio(&json!({"total": 0, "mediaItems": []})), None);
+        assert_eq!(parse_radio(&json!({})), None);
+        let status = |code: u16| {
+            anyhow::Error::new(HttpStatus(reqwest::StatusCode::from_u16(code).unwrap()))
+        };
+        assert!(refused(&status(403)));
+        assert!(refused(&status(404)));
+        assert!(!refused(&status(401)));
+        assert!(!refused(&status(429)));
+        assert!(!refused(&status(502)));
+        assert_eq!(
+            NoRadio.to_string(),
+            "Radio is not available because personalized recommendations are turned off"
+        );
     }
 }
