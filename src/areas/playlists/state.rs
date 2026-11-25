@@ -1645,6 +1645,7 @@ pub fn on_event(
             if rows && let Some(uri) = &uri {
                 app.settle_rows(uri, false);
             }
+            let uri = uri.filter(|uri| !(rows && app.playlists.snapshots.contains_key(uri)));
             after_write(app, uri, rootlist);
             if let Some(done) = done {
                 app.show_toast(done, None);
