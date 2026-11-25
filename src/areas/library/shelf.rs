@@ -118,6 +118,7 @@ impl OpenMusic {
         let grid = &mut self.library.grid;
         grid.request += 1;
         grid.loading = true;
+        grid.error = None;
         let command = Command::Grid {
             query: grid.query.clone(),
             offset: 0,
@@ -401,8 +402,20 @@ impl OpenMusic {
                 .gap_4()
                 .child(self.library_grid(&grid.items, "library-card", card_side, palette, cx))
                 .child(scroll_sentinel(&grid.sentinel))
-                .when(grid.has_more(), |body| {
-                    body.child(self.grid_skeleton(4, card_side, palette))
+                .map(|body| {
+                    if grid.error.is_some() {
+                        body.child(self.library_message(
+                            "Something went wrong".into(),
+                            "Try reloading Your Library",
+                            true,
+                            palette,
+                            cx,
+                        ))
+                    } else if grid.has_more() {
+                        body.child(self.grid_skeleton(4, card_side, palette))
+                    } else {
+                        body
+                    }
                 })
         };
         div()

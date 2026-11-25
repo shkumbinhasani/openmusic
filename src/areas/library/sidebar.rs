@@ -643,8 +643,20 @@ impl OpenMusic {
                 .map(|(index, item)| self.library_row(index, item, show_kind, palette, cx)),
         )
         .child(scroll_sentinel(&library.sentinel))
-        .when(library.has_more(), |list| {
-            list.child(self.library_skeleton(2, palette))
+        .map(|list| {
+            if library.error.is_some() {
+                list.child(self.library_message(
+                    "Something went wrong".into(),
+                    "Try reloading Your Library",
+                    true,
+                    palette,
+                    cx,
+                ))
+            } else if library.has_more() {
+                list.child(self.library_skeleton(2, palette))
+            } else {
+                list
+            }
         })
     }
 

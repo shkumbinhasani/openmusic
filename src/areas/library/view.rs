@@ -293,8 +293,20 @@ impl OpenMusic {
                 .gap_4()
                 .child(self.library_grid(&folder.items, "folder-item", card_side, palette, cx))
                 .child(scroll_sentinel(&folder.sentinel))
-                .when(folder.has_more(), |body| {
-                    body.child(self.grid_skeleton(4, card_side, palette))
+                .map(|body| {
+                    if folder.error.is_some() {
+                        body.child(self.library_message(
+                            "Something went wrong".into(),
+                            "Try reloading Your Library",
+                            true,
+                            palette,
+                            cx,
+                        ))
+                    } else if folder.has_more() {
+                        body.child(self.grid_skeleton(4, card_side, palette))
+                    } else {
+                        body
+                    }
                 }),
         };
         div()

@@ -299,6 +299,7 @@ impl OpenMusic {
     pub fn reload_library(&mut self) {
         self.library.request += 1;
         self.library.loading = true;
+        self.library.error = None;
         self.send(Command::Library {
             query: self.library.query.clone(),
             offset: 0,
@@ -327,7 +328,7 @@ impl OpenMusic {
     }
 
     fn more_library(&mut self) {
-        if self.library.loading || !self.library.has_more() {
+        if self.library.loading || self.library.error.is_some() || !self.library.has_more() {
             return;
         }
         self.library.request += 1;
@@ -489,7 +490,7 @@ impl OpenMusic {
             .library
             .folder
             .as_mut()
-            .filter(|folder| !folder.loading && folder.has_more())
+            .filter(|folder| !folder.loading && folder.error.is_none() && folder.has_more())
         else {
             return;
         };
