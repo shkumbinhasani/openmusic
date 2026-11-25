@@ -74,11 +74,7 @@ impl Engine {
             self.audio.skip_run = 0;
             bail!(ALL_SKIPPED);
         }
-        let heading = if backwards && playing.transition("skip_prev").is_some() {
-            "skip_prev"
-        } else {
-            "advance"
-        };
+        let heading = if backwards { "skip_prev" } else { "advance" };
         Box::pin(self.move_past(playing, heading, "skipped")).await
     }
 
@@ -88,19 +84,29 @@ impl Engine {
         heading: &str,
         why: &str,
     ) -> Result<()> {
-        let next = playing.transition(heading);
-        let paused = playing.paused;
-        let machine = playing.machine.clone();
         let generation = playing.generation;
+        let known = playing.transition(heading).is_some();
         self.audio.note(format!("{why} {}", playing.uri()));
         self.playing = Some(playing);
-        self.report("track_data_finalized").await;
-        if self.playing.as_ref().map(|playing| playing.generation) != Some(generation) {
-            return Ok(());
+        if !known {
+            self.report("before_track_load").await;
         }
-        match next {
+        self.report("track_data_finalized").await;
+        let Some(playing) = self
+            .playing
+            .as_ref()
+            .filter(|playing| playing.generation == generation)
+        else {
+            return Ok(());
+        };
+        match playing
+            .transition(heading)
+            .or_else(|| playing.transition("advance"))
+        {
             Some((index, next_paused)) => {
-                Box::pin(self.start_state(machine, index, paused || next_paused, None)).await
+                let machine = playing.machine.clone();
+                let paused = playing.paused || next_paused;
+                Box::pin(self.start_state(machine, index, paused, None)).await
             }
             None => {
                 if !self.local_active() {
