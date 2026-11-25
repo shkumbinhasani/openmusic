@@ -711,32 +711,47 @@ pub fn web_link(uri: &str) -> Option<String> {
     Some(format!("https://open.spotify.com/{kind}/{id}"))
 }
 
-#[cfg(target_os = "macos")]
-fn spotify_installed() -> bool {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSString, NSURL};
+const SPOTIFY_BUNDLE: &str = "com.spotify.client";
 
-    NSURL::URLWithString(&NSString::from_str("spotify:")).is_some_and(|url| {
-        NSWorkspace::sharedWorkspace()
-            .URLForApplicationToOpenURL(&url)
-            .is_some()
-    })
+#[cfg(target_os = "macos")]
+fn spotify_app() -> Option<String> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::NSString;
+
+    NSWorkspace::sharedWorkspace()
+        .URLForApplicationWithBundleIdentifier(&NSString::from_str(SPOTIFY_BUNDLE))
+        .and_then(|url| url.path())
+        .map(|path| path.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn spotify_installed() -> bool {
-    false
+fn spotify_app() -> Option<String> {
+    None
+}
+
+fn open_with_spotify(uri: &str) -> bool {
+    spotify_app().is_some()
+        && std::process::Command::new("/usr/bin/open")
+            .args(["-b", SPOTIFY_BUNDLE, uri])
+            .spawn()
+            .map(|mut child| {
+                std::thread::spawn(move || child.wait());
+            })
+            .is_ok()
 }
 
 pub fn open_in_spotify(uri: &str, cx: &mut App) {
     let Some(web) = web_link(uri) else {
         return;
     };
-    if spotify_installed() {
-        cx.open_url(uri);
-    } else {
+    if !open_with_spotify(uri) {
         cx.open_url(&web);
     }
+}
+
+pub fn open_in_spotify_target(uri: &str) -> Option<String> {
+    web_link(uri)?;
+    Some(spotify_app().unwrap_or_else(|| "web".to_owned()))
 }
 
 pub fn load(app: &mut OpenMusic, page: &Page) {
@@ -1171,6 +1186,11 @@ pub fn debug(
                     let _ = writeln!(lines, "episode {uri} error={error:?}");
                 }
                 None => lines.push_str("episode none\n"),
+            }
+            if let Page::Show(uri) | Page::Episode(uri) = &app.page
+                && let Some(target) = open_in_spotify_target(uri)
+            {
+                let _ = writeln!(lines, "open_in {target}");
             }
             for (uri, mark) in &app.content.marks {
                 let pending = if app.content.marking.contains_key(uri) {
