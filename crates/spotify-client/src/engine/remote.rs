@@ -140,6 +140,10 @@ fn refused(error: &anyhow::Error) -> bool {
     )
 }
 
+fn retry_older(error: &anyhow::Error) -> bool {
+    !gone(error) && !refused(error) && error.downcast_ref::<JamGone>().is_none()
+}
+
 fn device_name(device: &ConnectDevice) -> String {
     if device.this_mac {
         "This Mac".to_owned()
@@ -436,7 +440,7 @@ impl Engine {
         if mode == Shuffle::Smart && !allowed.smart_shuffle {
             bail!("Smart Shuffle isn’t available for this.");
         }
-        let failed = || anyhow!("Couldn’t change shuffle.");
+        let failed = |error| keep_jam(error, "Couldn’t change shuffle.");
         if !self.uses_options() {
             if mode == Shuffle::Smart {
                 bail!("Smart Shuffle isn’t available on this device.");
@@ -444,18 +448,18 @@ impl Engine {
             return self
                 .player_command(connect::shuffle_command(mode, false))
                 .await
-                .map_err(|_| failed());
+                .map_err(failed);
         }
         match self
             .player_command(connect::shuffle_command(mode, true))
             .await
         {
             Ok(()) => Ok(()),
-            Err(error) if mode != Shuffle::Smart && !gone(&error) && !refused(&error) => self
+            Err(error) if mode != Shuffle::Smart && retry_older(&error) => self
                 .player_command(connect::shuffle_command(mode, false))
                 .await
-                .map_err(|_| failed()),
-            Err(_) => Err(failed()),
+                .map_err(failed),
+            Err(error) => Err(failed(error)),
         }
     }
 
@@ -469,7 +473,7 @@ impl Engine {
         if !possible {
             bail!("Repeat isn’t available for this.");
         }
-        let failed = || anyhow!("Couldn’t change repeat.");
+        let failed = |error| keep_jam(error, "Couldn’t change repeat.");
         let use_options = self.uses_options();
         let mut sent = Ok(());
         for command in connect::repeat_commands(mode, &allowed, use_options) {
@@ -480,13 +484,13 @@ impl Engine {
         }
         match sent {
             Ok(()) => Ok(()),
-            Err(error) if use_options && !gone(&error) && !refused(&error) => {
+            Err(error) if use_options && retry_older(&error) => {
                 for command in connect::repeat_commands(mode, &allowed, false) {
-                    self.player_command(command).await.map_err(|_| failed())?;
+                    self.player_command(command).await.map_err(failed)?;
                 }
                 Ok(())
             }
-            Err(_) => Err(failed()),
+            Err(error) => Err(failed(error)),
         }
     }
 
@@ -637,5 +641,29 @@ impl Engine {
                     format!("Spotify didn’t accept that command for {name}."),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn never_retries_older_commands_once_the_jam_is_gone() {
+        assert!(retry_older(&anyhow!("Spotify answered 502")));
+        assert!(!retry_older(&anyhow::Error::new(CommandError::DeviceGone)));
+        assert!(!retry_older(&anyhow::Error::new(CommandError::Refused(
+            String::new()
+        ))));
+        let ended = anyhow::Error::new(JamGone);
+        assert!(!retry_older(&ended));
+        assert_eq!(
+            keep_jam(ended, "Couldn’t change shuffle.").to_string(),
+            JAM_ENDED
+        );
+        assert_eq!(
+            keep_jam(anyhow!("502"), "Couldn’t change shuffle.").to_string(),
+            "Couldn’t change shuffle."
+        );
     }
 }
