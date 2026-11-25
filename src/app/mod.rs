@@ -262,6 +262,13 @@ impl OpenMusic {
                     window.resize(size(px(width), px(height)));
                 }
             }
+            "scroll" => {
+                if let Ok(y) = rest.trim().parse::<f32>() {
+                    let handle = self.details.content_scroll(&self.content_scroll_id());
+                    handle.set_offset(gpui::point(px(0.), px(-y)));
+                    cx.notify();
+                }
+            }
             "nudge" => {
                 let mut parts = rest
                     .split_whitespace()

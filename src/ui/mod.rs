@@ -396,6 +396,18 @@ impl OpenMusic {
     }
 }
 
+impl OpenMusic {
+    pub fn content_scroll_id(&self) -> String {
+        match &self.page {
+            _ if self.gallery.is_some() => "gallery".to_owned(),
+            Page::Home => "home".to_owned(),
+            Page::Search(_) => format!("search-{}", self.discovery.search_query),
+            Page::Artist(uri) | Page::Collection(uri) => format!("page-{uri}"),
+            page => format!("page-{}", page.describe()),
+        }
+    }
+}
+
 impl Render for OpenMusic {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         drawn::next_frame();
@@ -417,13 +429,7 @@ impl Render for OpenMusic {
             if self.page.fills_content() && self.gallery.is_none() {
                 return content.child(self.page_body(card_side, palette, cx));
             }
-            let scroll_id = match &self.page {
-                _ if self.gallery.is_some() => "gallery".to_owned(),
-                Page::Home => "home".to_owned(),
-                Page::Search(_) => format!("search-{}", self.discovery.search_query),
-                Page::Artist(uri) | Page::Collection(uri) => format!("page-{uri}"),
-                page => format!("page-{}", page.describe()),
-            };
+            let scroll_id = self.content_scroll_id();
             content.child(
                 div()
                     .id(gpui::ElementId::Name(scroll_id.clone().into()))
