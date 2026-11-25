@@ -1,3 +1,5 @@
+mod rootlist;
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -7,6 +9,10 @@ use crate::{
     catalog,
     dealer::Message,
     pathfinder::{self, Operation},
+};
+pub use rootlist::{
+    ROOT_HASH, RootEntry, RootFolder, RootItem, RootNode, RootPage, Rootlist, decode_name,
+    folder_hash, folder_uri, rootlist,
 };
 
 pub const ARE_ENTITIES_IN_LIBRARY: Operation = Operation::query(
