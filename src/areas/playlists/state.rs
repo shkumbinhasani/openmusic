@@ -44,6 +44,8 @@ const EDITABLE_FRESH: Duration = Duration::from_secs(60);
 const EDITABLE_WAIT: Duration = Duration::from_secs(30);
 const EDITABLE_KEEP: usize = 16;
 const PUSH_DELAY: Duration = Duration::from_millis(500);
+const BEHIND_RETRY: Duration = Duration::from_secs(1);
+const BEHIND_TRIES: u32 = 5;
 const FOCUS_REFRESH: Duration = Duration::from_secs(60);
 const ROOTLIST_RETRY_LIMIT: Duration = Duration::from_secs(60);
 const PERMISSIONS_WAIT: Duration = Duration::from_secs(60);
@@ -60,11 +62,38 @@ pub struct Pushes {
     pub rootlist: bool,
     pub playlists: HashSet<String>,
     pub seen: usize,
+    pub expected: HashMap<String, (String, u32)>,
 }
 
 impl Pushes {
     fn waiting(&self) -> bool {
         self.rootlist || !self.playlists.is_empty()
+    }
+
+    fn expect(&mut self, uri: &str, revision: &str) {
+        let newer = self
+            .expected
+            .get(uri)
+            .is_none_or(|(known, _)| playlist::older_revision(Some(known), Some(revision)));
+        if newer {
+            self.expected
+                .insert(uri.to_owned(), (revision.to_owned(), 0));
+        }
+    }
+
+    fn retry_if_behind(&mut self, uri: &str, shown: Option<&str>) -> bool {
+        let Some((known, tries)) = self.expected.get_mut(uri) else {
+            return false;
+        };
+        if !playlist::older_revision(shown, Some(known)) || *tries >= BEHIND_TRIES {
+            self.expected.remove(uri);
+            return false;
+        }
+        let wait = BEHIND_RETRY * 2u32.pow(*tries);
+        *tries += 1;
+        self.playlists.insert(uri.to_owned());
+        self.due.get_or_insert_with(|| Instant::now() + wait);
+        true
     }
 }
 
@@ -1445,6 +1474,9 @@ impl OpenMusic {
                     outdated(revision.as_deref(), collection.revision.as_deref())
                 });
                 if stale {
+                    if let Some(revision) = &revision {
+                        self.playlists.pushes.expect(&uri, revision);
+                    }
                     self.playlists.pushes.playlists.insert(uri);
                 }
             }
@@ -1452,6 +1484,16 @@ impl OpenMusic {
         if self.playlists.pushes.waiting() {
             self.playlists.pushes.due = Some(Instant::now() + PUSH_DELAY);
         }
+    }
+
+    fn reload_again_if_behind(&mut self, uri: &str) {
+        let Some(collection) = self.open_playlist(uri) else {
+            return;
+        };
+        let (canonical, shown) = (collection.uri.clone(), collection.revision.clone());
+        self.playlists
+            .pushes
+            .retry_if_behind(&canonical, shown.as_deref());
     }
 
     fn apply_pushes(&mut self) {
@@ -1628,6 +1670,7 @@ pub fn on_event(
                 .receive(uri.clone(), result.map(|collection| *collection), reload)
             {
                 Received::Shown => {
+                    app.reload_again_if_behind(&uri);
                     let edit = loaded
                         && app.playlists.edit_after_load.is_some()
                         && app.playlists.edit_after_load == playlist::canonical(&uri);
@@ -2787,5 +2830,30 @@ mod tests {
             ..Pushes::default()
         };
         assert!(rootlist.waiting());
+    }
+
+    #[test]
+    fn reloads_again_while_a_read_lags_behind_the_push() {
+        let uri = "spotify:playlist:x";
+        let mut pushes = Pushes::default();
+        assert!(!pushes.retry_if_behind(uri, Some("AAAABQ==")));
+        pushes.expect(uri, "AAAABg==");
+        pushes.expect(uri, "AAAABQ==");
+        assert_eq!(pushes.expected[uri].0, "AAAABg==");
+        for tries in 0..BEHIND_TRIES {
+            pushes.playlists.clear();
+            pushes.due = None;
+            let asked = Instant::now();
+            assert!(pushes.retry_if_behind(uri, Some("AAAABQ==")));
+            assert!(pushes.playlists.contains(uri));
+            let wait = pushes.due.unwrap() - asked;
+            assert!(wait >= BEHIND_RETRY * 2u32.pow(tries));
+            assert!(wait < BEHIND_RETRY * 2u32.pow(tries + 1));
+        }
+        assert!(!pushes.retry_if_behind(uri, Some("AAAABQ==")));
+        assert!(!pushes.expected.contains_key(uri));
+        pushes.expect(uri, "AAAABw==");
+        assert!(!pushes.retry_if_behind(uri, Some("AAAABw==")));
+        assert!(!pushes.expected.contains_key(uri));
     }
 }

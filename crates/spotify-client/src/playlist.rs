@@ -1189,6 +1189,22 @@ fn revision_text(bytes: Option<&Vec<u8>>) -> Option<String> {
         .map(|bytes| STANDARD.encode(bytes))
 }
 
+pub fn revision_number(revision: &str) -> Option<u32> {
+    let bytes = STANDARD.decode(revision).ok()?;
+    let counter: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
+    Some(u32::from_be_bytes(counter))
+}
+
+pub fn older_revision(shown: Option<&str>, known: Option<&str>) -> bool {
+    match (
+        shown.and_then(revision_number),
+        known.and_then(revision_number),
+    ) {
+        (Some(shown), Some(known)) => shown < known,
+        _ => false,
+    }
+}
+
 const LISTED: [ListAttributeKind; 3] = [
     ListAttributeKind::ListName,
     ListAttributeKind::ListPicture,
@@ -2079,6 +2095,33 @@ mod tests {
             html.changes().unwrap_err().to_string(),
             "HTML isn't supported in playlist description."
         );
+    }
+
+    #[test]
+    fn orders_revisions_by_their_counter() {
+        assert_eq!(revision_number("AAAABgA+GQdjV1nc/Upp3BTVhX/aNVGv"), Some(6));
+        assert_eq!(
+            revision_number("AAABlm5mN4T3FZ+Z2Chb/VKqnGlBWiRq"),
+            Some(406)
+        );
+        assert_eq!(revision_number("AAA="), None);
+        assert_eq!(revision_number("not base64"), None);
+        assert!(older_revision(
+            Some("AAAABVyzykNCSjC/fcNZ4CzgrkkRIuin"),
+            Some("AAAABgA+GQdjV1nc/Upp3BTVhX/aNVGv")
+        ));
+        assert!(!older_revision(
+            Some("AAAABgA+GQdjV1nc/Upp3BTVhX/aNVGv"),
+            Some("AAAABgA+GQdjV1nc/Upp3BTVhX/aNVGv")
+        ));
+        assert!(!older_revision(
+            None,
+            Some("AAAABgA+GQdjV1nc/Upp3BTVhX/aNVGv")
+        ));
+        assert!(!older_revision(
+            Some("AAAABgA+GQdjV1nc/Upp3BTVhX/aNVGv"),
+            None
+        ));
     }
 
     #[test]
