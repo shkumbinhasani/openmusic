@@ -236,6 +236,9 @@ impl OpenMusic {
             return;
         }
         let tracks: Vec<_> = list.iter().map(|episode| episode.as_track()).collect();
+        if self.refuses_explicit(tracks.get(index), cx) {
+            return;
+        }
         self.play_context(your_episodes::CONTEXT, &tracks, index, cx);
     }
 
@@ -247,7 +250,7 @@ impl OpenMusic {
                 if let Some(index) = self
                     .your_episode_list()
                     .iter()
-                    .position(|episode| episode.playable())
+                    .position(|episode| self.episode_startable(episode))
                 {
                     self.play_your_episode(index, cx);
                 }
@@ -464,7 +467,7 @@ impl OpenMusic {
         let playable = self
             .your_episode_list()
             .iter()
-            .any(|episode| episode.playable());
+            .any(|episode| self.episode_startable(episode));
         let label = if playing {
             "Pause"
         } else if paused {

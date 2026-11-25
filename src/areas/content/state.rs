@@ -29,6 +29,7 @@ use super::{
 };
 use crate::{
     app::{OpenMusic, Page},
+    areas::account::view::filters_explicit,
     menus::{GoLyrics, GoNowPlaying, Handle, route},
     ui::{
         components::Sentinel,
@@ -368,7 +369,14 @@ impl OpenMusic {
         let items: Vec<(Played, Availability)> = show
             .episodes
             .iter()
-            .map(|episode| (self.played(episode), episode.availability))
+            .map(|episode| {
+                let availability = if self.episode_filtered(episode) {
+                    Availability::Other
+                } else {
+                    episode.availability
+                };
+                (self.played(episode), availability)
+            })
             .collect();
         podcast::resume_index(show.order, &items)
     }
@@ -397,6 +405,9 @@ impl OpenMusic {
             return;
         }
         let (uri, tracks) = (uri.clone(), show.tracks());
+        if self.refuses_explicit(tracks.get(index), cx) {
+            return;
+        }
         self.play_context(&uri, &tracks, index, cx);
     }
 
@@ -409,7 +420,18 @@ impl OpenMusic {
             return;
         }
         let track = episode.as_track();
+        if self.refuses_explicit(Some(&track), cx) {
+            return;
+        }
         self.play_context(&episode.uri, &[track], 0, cx);
+    }
+
+    pub fn episode_filtered(&self, episode: &Episode) -> bool {
+        filters_explicit(self.account(), episode.explicit)
+    }
+
+    pub fn episode_startable(&self, episode: &Episode) -> bool {
+        episode.playable() && !self.episode_filtered(episode)
     }
 
     pub fn play_show(&mut self, cx: &mut Context<Self>) {
@@ -1508,6 +1530,39 @@ mod tests {
             left_episode(paused.as_ref(), Some("spotify:track:song"), true),
             Some(a)
         );
+    }
+
+    #[test]
+    fn filters_explicit_episodes_like_explicit_songs() {
+        use spotify_client::account::AccountInfo;
+
+        use crate::areas::account::view::filtered;
+
+        let filtering = AccountInfo {
+            explicit_filtered: true,
+            ..AccountInfo::default()
+        };
+        let explicit = Episode {
+            explicit: true,
+            ..episode(
+                "spotify:episode:e",
+                Played::NotStarted,
+                Availability::Playable,
+            )
+        };
+        let clean = episode(
+            "spotify:episode:c",
+            Played::NotStarted,
+            Availability::Playable,
+        );
+        for episode in [&explicit, &clean] {
+            assert_eq!(
+                filters_explicit(Some(&filtering), episode.explicit),
+                filtered(Some(&filtering), &episode.as_track())
+            );
+        }
+        assert!(filtered(Some(&filtering), &explicit.as_track()));
+        assert!(!filtered(Some(&filtering), &clean.as_track()));
     }
 
     #[test]

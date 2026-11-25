@@ -13,6 +13,7 @@ use spotify_client::{
 use super::state::{open_in_spotify, show_kind_label};
 use crate::{
     app::{OpenMusic, Page, page_for},
+    areas::account::state::EXPLICIT_EPISODE_NOTICE,
     icons,
     overlay::Label,
     ui::{
@@ -1015,7 +1016,8 @@ impl OpenMusic {
             .flex()
             .items_center()
             .justify_center();
-        if !episode.playable() {
+        let filtered = self.episode_filtered(episode) && !self.is_current(&episode.uri);
+        if !episode.playable() || filtered {
             return button
                 .bg(rgba(palette.press))
                 .child(icon(icons::LOCK, 14., palette.muted));
@@ -1115,7 +1117,7 @@ impl OpenMusic {
             .p_3()
             .rounded(px(12.))
             .cursor_pointer()
-            .when(!episode.playable(), |row| row.opacity(0.6))
+            .when(!self.episode_startable(episode), |row| row.opacity(0.6))
             .when(self.menu_row(id), |row| row.bg(rgba(palette.press)))
             .hover(move |row| row.bg(rgba(palette.press)))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1352,6 +1354,7 @@ impl OpenMusic {
         let played = self.played(episode);
         let current = self.is_current(&episode.uri);
         let playing = current && self.playback.now.playing;
+        let filtered = self.episode_filtered(episode);
         let target = Target::Episode {
             uri: episode.uri.clone(),
         };
@@ -1462,7 +1465,7 @@ impl OpenMusic {
                                 ))
                             } else {
                                 actions
-                                    .when(episode.playable(), |actions| {
+                                    .when(episode.playable() && (current || !filtered), |actions| {
                                         actions.child(
                                             self.text_control(
                                                 "episode-play",
@@ -1506,14 +1509,17 @@ impl OpenMusic {
                             ))
                         }),
                 )
-                .when_some(unplayable_note(episode), |section, note| {
-                    section.child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgb(palette.muted))
-                            .child(note),
-                    )
-                }),
+                .when_some(
+                    unplayable_note(episode).or(filtered.then_some(EXPLICIT_EPISODE_NOTICE)),
+                    |section, note| {
+                        section.child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(rgb(palette.muted))
+                                .child(note),
+                        )
+                    },
+                ),
         )
         .when(!episode.description.is_empty(), |page| {
             page.child(

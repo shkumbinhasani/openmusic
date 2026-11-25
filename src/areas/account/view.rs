@@ -576,7 +576,11 @@ pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOption
 }
 
 pub fn filtered(account: Option<&AccountInfo>, track: &Track) -> bool {
-    track.explicit && account.is_some_and(|account| account.explicit_filtered)
+    filters_explicit(account, track.explicit)
+}
+
+pub fn filters_explicit(account: Option<&AccountInfo>, explicit: bool) -> bool {
+    explicit && account.is_some_and(|account| account.explicit_filtered)
 }
 
 #[cfg(test)]
@@ -599,5 +603,8 @@ mod tests {
         assert!(!filtered(Some(&filtering), &clean));
         assert!(!filtered(Some(&open), &explicit));
         assert!(!filtered(None, &explicit));
+        assert!(filters_explicit(Some(&filtering), true));
+        assert!(!filters_explicit(Some(&filtering), false));
+        assert!(!filters_explicit(Some(&open), true));
     }
 }
