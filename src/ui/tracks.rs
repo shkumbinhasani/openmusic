@@ -1,12 +1,15 @@
 use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ops::Range,
     rc::Rc,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{
-    AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Window, div, prelude::*, px,
-    rgb, rgba,
+    AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Window, canvas, div,
+    prelude::*, px, rgb, rgba,
 };
 use spotify_client::{Track, entity};
 
@@ -24,6 +27,78 @@ use crate::{
 
 pub const ROW_GROUP: &str = "track-row";
 pub const DIMMED_OPACITY: f32 = 0.45;
+const ROW_HEIGHT: f32 = 56.;
+const ALWAYS_BUILT: usize = 60;
+const OVERSCAN: f32 = 800.;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Placement {
+    top: f32,
+    seen_top: f32,
+    seen_bottom: f32,
+}
+
+thread_local! {
+    static PLACEMENTS: RefCell<HashMap<&'static str, Placement>> = RefCell::default();
+    static QUEUES: RefCell<HashMap<&'static str, Arc<[Track]>>> = RefCell::default();
+}
+
+fn rows_between(count: usize, top: f32, from: f32, to: f32) -> Range<usize> {
+    let first = (((from - top) / ROW_HEIGHT).floor().max(0.) as usize).min(count);
+    let last = (((to - top) / ROW_HEIGHT).ceil().max(0.) as usize).clamp(first, count);
+    first..last
+}
+
+fn built_rows(count: usize, placement: Option<Placement>) -> Range<usize> {
+    if count <= ALWAYS_BUILT {
+        return 0..count;
+    }
+    match placement {
+        Some(at) => rows_between(
+            count,
+            at.top,
+            at.seen_top - OVERSCAN,
+            at.seen_bottom + OVERSCAN,
+        ),
+        None => 0..ALWAYS_BUILT,
+    }
+}
+
+fn seen_rows(count: usize, at: Placement) -> Range<usize> {
+    rows_between(count, at.top, at.seen_top, at.seen_bottom)
+}
+
+fn placement_probe(prefix: &'static str, count: usize, built: Range<usize>) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let seen = window.content_mask().bounds;
+            let at = Placement {
+                top: f32::from(bounds.origin.y),
+                seen_top: f32::from(seen.top()),
+                seen_bottom: f32::from(seen.bottom()),
+            };
+            PLACEMENTS.with_borrow_mut(|placements| placements.insert(prefix, at));
+            let seen = seen_rows(count, at);
+            if !seen.is_empty() && (seen.start < built.start || seen.end > built.end) {
+                window.on_next_frame(|window, _| window.refresh());
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+fn shared_queue(prefix: &'static str, tracks: &[Track]) -> Arc<[Track]> {
+    QUEUES.with_borrow_mut(|queues| match queues.get(prefix) {
+        Some(queue) if **queue == *tracks => queue.clone(),
+        _ => {
+            let queue: Arc<[Track]> = tracks.into();
+            queues.insert(prefix, queue.clone());
+            queue
+        }
+    })
+}
 
 pub type Accessories =
     fn(&OpenMusic, &Track, Row, &RowOptions, Palette, &mut Context<OpenMusic>) -> Vec<AnyElement>;
@@ -278,223 +353,263 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
-        let queue: Arc<[Track]> = tracks.into();
+        let queue = shared_queue(prefix, tracks);
         let context: Option<Arc<str>> = options.context.as_deref().map(Into::into);
         let now = now_ms();
+        let count = tracks.len().saturating_sub(start);
+        let placement = PLACEMENTS.with_borrow(|placements| placements.get(prefix).copied());
+        let mut built = built_rows(count, placement);
+        if let Some(pinned) = details::view::pinned_row(self, &tracks[start.min(tracks.len())..]) {
+            built = built.start.min(pinned)..built.end.max(pinned + 1);
+        }
+        let (above, below) = (built.start, count - built.end);
         div()
+            .relative()
             .flex()
             .flex_col()
-            .children(tracks.iter().enumerate().skip(start).map(|(index, track)| {
-                let id = (prefix, index);
-                let queue = queue.clone();
-                let context = context.clone();
-                let click = options.on_click.clone();
-                let menu_queue = queue.clone();
-                let menu_context = context.clone();
-                let selected = self.is_current(&track.uri);
-                let local = track.uri.starts_with("spotify:local:");
-                let album_uri = track.album_uri.clone();
-                let artists = artist_links(track);
-                let last_artist = artists.len().saturating_sub(1);
-                let dimmed = self.row_dimmed(track, id, options);
-                div()
-                    .id(id)
-                    .group(ROW_GROUP)
-                    .relative()
-                    .when(dimmed, |row| row.opacity(DIMMED_OPACITY))
-                    .h(px(56.))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_2()
-                    .rounded(px(10.))
-                    .cursor_pointer()
-                    .when(selected || self.menu_row(id), |row| {
-                        row.bg(rgba(palette.press))
-                    })
-                    .when(details::view::row_highlighted(self, track, id), |row| {
-                        row.bg(rgba(palette.accent << 8 | 0x33))
-                    })
-                    .hover(move |row| row.bg(rgba(palette.press)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.refuses_skipped(queue.get(index), context.as_deref(), cx) {
-                            return;
-                        }
-                        match (&click, &context) {
-                            (Some(click), _) => click(this, &queue, index, window, cx),
-                            (None, _) if this.refuses_explicit(queue.get(index), cx) => {}
-                            (None, _) if this.plays_local_row(&queue, index, cx) => {}
-                            (None, Some(context)) => this.play_context(context, &queue, index, cx),
-                            (None, None) => this.play(&queue, index, cx),
-                        }
-                    }))
-                    .when_some(options.menu_surface, |row_element, surface| {
-                        row_element.on_mouse_down(
-                            MouseButton::Right,
-                            self.on_menu(
-                                Some(id),
-                                move |_| {
-                                    let track = menu_queue.get(index)?.clone();
-                                    let context = menu_context.as_deref().map(str::to_owned);
-                                    Some(Target::track(track, context, surface))
-                                },
-                                cx,
-                            ),
-                        )
-                    })
-                    .when(options.draggable, |row_element| {
-                        let drag = RowDrag {
-                            uris: vec![track.uri.clone()],
-                            uids: vec![track.uid.clone()],
-                            source: id,
-                            context: options.context.clone(),
-                        };
-                        let title: SharedString = track.title.clone().into();
-                        row_element.on_drag(drag, move |drag, _, _, cx| {
-                            let title = if drag.uris.len() == 1 {
-                                title.clone()
-                            } else {
-                                format!("{} songs", drag.uris.len()).into()
-                            };
-                            cx.new(|_| RowGhost { title, palette })
-                        })
-                    })
-                    .map(|row| {
-                        if options.numbered {
-                            row.child(
-                                div()
-                                    .w(px(40.))
-                                    .flex_shrink_0()
-                                    .text_center()
-                                    .text_size(px(13.))
-                                    .text_color(rgb(if selected {
-                                        palette.accent
-                                    } else {
-                                        palette.muted
-                                    }))
-                                    .child(if selected {
-                                        "♪".to_owned()
-                                    } else {
-                                        (index + 1).to_string()
-                                    }),
-                            )
-                        } else {
-                            row.child(artwork(self.cover_for(track), px(40.), px(6.), palette))
-                        }
-                    })
-                    .child(
+            .when(count > ALWAYS_BUILT, |list| {
+                list.child(placement_probe(prefix, count, built.clone()))
+            })
+            .when(above > 0, |list| {
+                list.child(div().flex_shrink_0().h(px(above as f32 * ROW_HEIGHT)))
+            })
+            .children(
+                tracks
+                    .iter()
+                    .enumerate()
+                    .skip(start + built.start)
+                    .take(built.len())
+                    .map(|(index, track)| {
+                        let id = (prefix, index);
+                        let queue = queue.clone();
+                        let context = context.clone();
+                        let click = options.on_click.clone();
+                        let menu_queue = queue.clone();
+                        let menu_context = context.clone();
+                        let selected = self.is_current(&track.uri);
+                        let local = track.uri.starts_with("spotify:local:");
+                        let album_uri = track.album_uri.clone();
+                        let artists = artist_links(track);
+                        let last_artist = artists.len().saturating_sub(1);
+                        let dimmed = self.row_dimmed(track, id, options);
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div().flex().min_w_0().child(
-                                    div()
-                                        .id(("title", 0usize))
-                                        .min_w_0()
-                                        .text_size(px(13.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .when(selected, |title| {
-                                            title.text_color(rgb(palette.accent))
-                                        })
-                                        .truncate()
-                                        .child(track.title.clone())
-                                        .when_some(
-                                            details::view::title_page(self, track),
-                                            |title, page| {
-                                                title
-                                                    .cursor_pointer()
-                                                    .hover(|title| title.underline())
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        cx.stop_propagation();
-                                                        this.navigate(page.clone());
-                                                        cx.notify();
-                                                    }))
-                                            },
-                                        ),
-                                ),
-                            )
+                            .id(id)
+                            .group(ROW_GROUP)
+                            .relative()
+                            .when(dimmed, |row| row.opacity(DIMMED_OPACITY))
+                            .flex_shrink_0()
+                            .h(px(ROW_HEIGHT))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px_2()
+                            .rounded(px(10.))
+                            .cursor_pointer()
+                            .when(selected || self.menu_row(id), |row| {
+                                row.bg(rgba(palette.press))
+                            })
+                            .when(details::view::row_highlighted(self, track, id), |row| {
+                                row.bg(rgba(palette.accent << 8 | 0x33))
+                            })
+                            .hover(move |row| row.bg(rgba(palette.press)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.refuses_skipped(queue.get(index), context.as_deref(), cx) {
+                                    return;
+                                }
+                                match (&click, &context) {
+                                    (Some(click), _) => click(this, &queue, index, window, cx),
+                                    (None, _) if this.refuses_explicit(queue.get(index), cx) => {}
+                                    (None, _) if this.plays_local_row(&queue, index, cx) => {}
+                                    (None, Some(context)) => {
+                                        this.play_context(context, &queue, index, cx)
+                                    }
+                                    (None, None) => this.play(&queue, index, cx),
+                                }
+                            }))
+                            .when_some(options.menu_surface, |row_element, surface| {
+                                row_element.on_mouse_down(
+                                    MouseButton::Right,
+                                    self.on_menu(
+                                        Some(id),
+                                        move |_| {
+                                            let track = menu_queue.get(index)?.clone();
+                                            let context =
+                                                menu_context.as_deref().map(str::to_owned);
+                                            Some(Target::track(track, context, surface))
+                                        },
+                                        cx,
+                                    ),
+                                )
+                            })
+                            .when(options.draggable, |row_element| {
+                                let drag = RowDrag {
+                                    uris: vec![track.uri.clone()],
+                                    uids: vec![track.uid.clone()],
+                                    source: id,
+                                    context: options.context.clone(),
+                                };
+                                let title: SharedString = track.title.clone().into();
+                                row_element.on_drag(drag, move |drag, _, _, cx| {
+                                    let title = if drag.uris.len() == 1 {
+                                        title.clone()
+                                    } else {
+                                        format!("{} songs", drag.uris.len()).into()
+                                    };
+                                    cx.new(|_| RowGhost { title, palette })
+                                })
+                            })
+                            .map(|row| {
+                                if options.numbered {
+                                    row.child(
+                                        div()
+                                            .w(px(40.))
+                                            .flex_shrink_0()
+                                            .text_center()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(if selected {
+                                                palette.accent
+                                            } else {
+                                                palette.muted
+                                            }))
+                                            .child(if selected {
+                                                "♪".to_owned()
+                                            } else {
+                                                (index + 1).to_string()
+                                            }),
+                                    )
+                                } else {
+                                    row.child(artwork(
+                                        self.cover_for(track),
+                                        px(40.),
+                                        px(6.),
+                                        palette,
+                                    ))
+                                }
+                            })
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
+                                    .flex_1()
                                     .min_w_0()
-                                    .overflow_hidden()
-                                    .when(track.explicit, |line| {
-                                        line.child(explicit_badge(palette))
-                                    })
-                                    .when(local, |line| {
-                                        line.child(icon(icons::LOCAL, 14., palette.muted))
-                                    })
-                                    .child(div().flex().min_w_0().children(
-                                        artists.into_iter().enumerate().map(
-                                            |(position, (name, page))| {
-                                                div()
-                                                    .flex()
-                                                    .min_w_0()
-                                                    .child(link(
-                                                        ("artist", position),
-                                                        name,
-                                                        page,
-                                                        12.,
-                                                        palette,
-                                                        cx,
-                                                    ))
-                                                    .when(position < last_artist, |artist| {
-                                                        artist.child(
-                                                            div()
-                                                                .flex_shrink_0()
-                                                                .text_size(px(12.))
-                                                                .text_color(rgb(palette.muted))
-                                                                .child(", "),
-                                                        )
-                                                    })
-                                            },
+                                    .child(
+                                        div().flex().min_w_0().child(
+                                            div()
+                                                .id(("title", 0usize))
+                                                .min_w_0()
+                                                .text_size(px(13.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .when(selected, |title| {
+                                                    title.text_color(rgb(palette.accent))
+                                                })
+                                                .truncate()
+                                                .child(track.title.clone())
+                                                .when_some(
+                                                    details::view::title_page(self, track),
+                                                    |title, page| {
+                                                        title
+                                                            .cursor_pointer()
+                                                            .hover(|title| title.underline())
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    this.navigate(page.clone());
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                    },
+                                                ),
                                         ),
-                                    )),
-                            ),
-                    )
-                    .when(options.show_album, |row| {
-                        row.child(div().w_1_4().flex().min_w_0().child(link(
-                            ("album", 0usize),
-                            track.album.clone(),
-                            album_uri.map(Page::Collection),
-                            12.5,
-                            palette,
-                            cx,
-                        )))
-                    })
-                    .when(options.show_added, |row| {
-                        row.child(
-                            div()
-                                .w(px(112.))
-                                .flex_shrink_0()
-                                .truncate()
-                                .text_size(px(12.5))
-                                .text_color(rgb(palette.muted))
-                                .child(
-                                    track
-                                        .added_at
-                                        .map(|added| added_label(added, now))
-                                        .unwrap_or_default(),
-                                ),
-                        )
-                    })
-                    .children(self.row_accessories(track, id, options, palette, cx))
-                    .child(
-                        div()
-                            .w(px(48.))
-                            .text_size(px(12.5))
-                            .text_color(rgb(palette.muted))
-                            .text_right()
-                            .child(timestamp(track.duration_ms)),
-                    )
-                    .when(options.editable, |row_element| {
-                        row_element
-                            .child(self.drop_zone(id, false, palette, cx))
-                            .child(self.drop_zone(id, true, palette, cx))
-                    })
-            }))
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .when(track.explicit, |line| {
+                                                line.child(explicit_badge(palette))
+                                            })
+                                            .when(local, |line| {
+                                                line.child(icon(icons::LOCAL, 14., palette.muted))
+                                            })
+                                            .child(div().flex().min_w_0().children(
+                                                artists.into_iter().enumerate().map(
+                                                    |(position, (name, page))| {
+                                                        div()
+                                                            .flex()
+                                                            .min_w_0()
+                                                            .child(link(
+                                                                ("artist", position),
+                                                                name,
+                                                                page,
+                                                                12.,
+                                                                palette,
+                                                                cx,
+                                                            ))
+                                                            .when(
+                                                                position < last_artist,
+                                                                |artist| {
+                                                                    artist.child(
+                                                                        div()
+                                                                            .flex_shrink_0()
+                                                                            .text_size(px(12.))
+                                                                            .text_color(rgb(
+                                                                                palette.muted,
+                                                                            ))
+                                                                            .child(", "),
+                                                                    )
+                                                                },
+                                                            )
+                                                    },
+                                                ),
+                                            )),
+                                    ),
+                            )
+                            .when(options.show_album, |row| {
+                                row.child(div().w_1_4().flex().min_w_0().child(link(
+                                    ("album", 0usize),
+                                    track.album.clone(),
+                                    album_uri.map(Page::Collection),
+                                    12.5,
+                                    palette,
+                                    cx,
+                                )))
+                            })
+                            .when(options.show_added, |row| {
+                                row.child(
+                                    div()
+                                        .w(px(112.))
+                                        .flex_shrink_0()
+                                        .truncate()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(palette.muted))
+                                        .child(
+                                            track
+                                                .added_at
+                                                .map(|added| added_label(added, now))
+                                                .unwrap_or_default(),
+                                        ),
+                                )
+                            })
+                            .children(self.row_accessories(track, id, options, palette, cx))
+                            .child(
+                                div()
+                                    .w(px(48.))
+                                    .text_size(px(12.5))
+                                    .text_color(rgb(palette.muted))
+                                    .text_right()
+                                    .child(timestamp(track.duration_ms)),
+                            )
+                            .when(options.editable, |row_element| {
+                                row_element
+                                    .child(self.drop_zone(id, false, palette, cx))
+                                    .child(self.drop_zone(id, true, palette, cx))
+                            })
+                    }),
+            )
+            .when(below > 0, |list| {
+                list.child(div().flex_shrink_0().h(px(below as f32 * ROW_HEIGHT)))
+            })
     }
 }
 
@@ -503,6 +618,47 @@ mod tests {
     use super::*;
 
     const NOW: i64 = 1_764_000_000_000;
+
+    #[test]
+    fn builds_only_the_rows_near_the_visible_part_of_a_long_list() {
+        assert_eq!(built_rows(40, None), 0..40);
+        assert_eq!(built_rows(5000, None), 0..ALWAYS_BUILT);
+        let on_screen = Placement {
+            top: 300.,
+            seen_top: 0.,
+            seen_bottom: 900.,
+        };
+        assert_eq!(seen_rows(5000, on_screen), 0..11);
+        assert_eq!(built_rows(5000, Some(on_screen)), 0..25);
+        let scrolled = Placement {
+            top: -56_000.,
+            ..on_screen
+        };
+        assert_eq!(seen_rows(5000, scrolled), 1000..1017);
+        assert_eq!(built_rows(5000, Some(scrolled)), 985..1031);
+        let past = Placement {
+            top: -400_000.,
+            ..on_screen
+        };
+        assert_eq!(seen_rows(5000, past), 5000..5000);
+        assert_eq!(built_rows(5000, Some(past)), 5000..5000);
+        let below = Placement {
+            top: 5_000.,
+            ..on_screen
+        };
+        assert_eq!(built_rows(5000, Some(below)), 0..0);
+    }
+
+    #[test]
+    fn reuses_a_queue_until_the_list_changes() {
+        let tracks = vec![Track::placeholder("spotify:track:a")];
+        let first = shared_queue("test-queue", &tracks);
+        assert!(Arc::ptr_eq(&first, &shared_queue("test-queue", &tracks)));
+        let changed = vec![Track::placeholder("spotify:track:b")];
+        let second = shared_queue("test-queue", &changed);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second[0].uri, "spotify:track:b");
+    }
 
     #[test]
     fn labels_recent_additions_relative_to_now() {

@@ -54,6 +54,14 @@ pub fn row_accessories(
     }
 }
 
+pub fn pinned_row(app: &OpenMusic, tracks: &[Track]) -> Option<usize> {
+    app.details
+        .highlight
+        .as_ref()
+        .filter(|highlight| !highlight.scrolled.get())?;
+    tracks.iter().position(|track| app.highlights(track))
+}
+
 pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, options: &RowOptions) -> bool {
     refusal(&app.details.sets, track, options.context.as_deref()).is_some()
 }
