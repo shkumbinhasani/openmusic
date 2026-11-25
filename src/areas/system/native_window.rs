@@ -12,6 +12,7 @@ pub struct WindowState {
     pub key: bool,
     pub full_screen: bool,
     pub app_active: bool,
+    pub listed: bool,
 }
 
 impl WindowState {
@@ -21,14 +22,15 @@ impl WindowState {
 
     pub fn describe(&self) -> String {
         format!(
-            "installed={} visible={} miniaturized={} key={} full_screen={} app_active={} frontmost={}",
+            "installed={} visible={} miniaturized={} key={} full_screen={} app_active={} frontmost={} listed={}",
             self.installed,
             self.visible,
             self.miniaturized,
             self.key,
             self.full_screen,
             self.app_active,
-            self.frontmost()
+            self.frontmost(),
+            self.listed
         )
     }
 }
@@ -150,6 +152,7 @@ mod native {
         let Some(window) = view.window() else {
             return false;
         };
+        window.setExcludedFromWindowsMenu(true);
         let observers = unsafe {
             vec![
                 observe(&window, NSWindowDidMiniaturizeNotification, || {
@@ -219,6 +222,7 @@ mod native {
                 key: window.isKeyWindow(),
                 full_screen: window.styleMask().contains(NSWindowStyleMask::FullScreen),
                 app_active,
+                listed: !window.isExcludedFromWindowsMenu(),
             },
             None => WindowState {
                 app_active,
