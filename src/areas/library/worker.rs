@@ -219,15 +219,13 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
 
 async fn recents(api: Api, user: User, offset: u32, request: u64) -> worker::Event {
     let result = match library::recents(&api, offset, library::RECENTS_PAGE_SIZE).await {
-        Err(error) if offset == 0 && library::wants_fallback(&error) => {
-            match user.name(&api).await {
-                Ok(name) => library::recently_played(&api, &name)
-                    .await
-                    .map(library::fallback_recents)
-                    .map_err(|_| error),
-                Err(_) => Err(error),
-            }
-        }
+        Err(error) if offset == 0 => match user.name(&api).await {
+            Ok(name) => library::recently_played(&api, &name)
+                .await
+                .map(library::fallback_recents)
+                .map_err(|_| error),
+            Err(_) => Err(error),
+        },
         result => result,
     };
     Event::Recents {

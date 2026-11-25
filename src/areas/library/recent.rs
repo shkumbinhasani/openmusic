@@ -363,6 +363,7 @@ impl OpenMusic {
                     .absolute()
                     .left(offset)
                     .top(offset)
+                    .rounded(radius(RecentKind::Other, tile))
                     .shadow_sm()
                     .child(artwork(
                         cover(images.get(index).copied()),
