@@ -79,6 +79,7 @@ impl OpenMusic {
             }),
             position_ms: self.playback.now.position(),
             duration_ms: self.duration().unwrap_or(0),
+            tooltip: self.stream_text(),
         };
         div().relative().flex_1().min_w_0().h_full().map(|bar| {
             if overlay::available() {

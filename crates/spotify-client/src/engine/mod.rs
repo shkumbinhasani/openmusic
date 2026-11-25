@@ -108,7 +108,7 @@ impl Default for NowPlaying {
 impl NowPlaying {
     pub fn position(&self) -> u32 {
         let elapsed = if self.playing {
-            self.observed.elapsed().as_millis() as u32
+            (self.observed.elapsed().as_millis() as f64 * f64::from(self.speed.max(0.))) as u32
         } else {
             0
         };
@@ -243,6 +243,7 @@ struct Engine {
     published: Option<(PublishedKey, u32, Instant)>,
     published_playback: Option<PlaybackKey>,
     remote: remote::State,
+    audio: playback::State,
 }
 
 #[derive(PartialEq)]
@@ -341,6 +342,7 @@ async fn run(
         published: None,
         published_playback: None,
         remote: remote::State::default(),
+        audio: playback::State::default(),
     };
     let mut refresh_at = tokio::time::Instant::from_std(token.refresh_due());
 
@@ -441,10 +443,11 @@ impl Engine {
                 "disable_connect": false,
                 "audio_podcasts": true,
                 "lossless_playback": false,
-                "manifest_formats": ["file_ids_mp4_cbcs"],
+                "manifest_formats": playback::MANIFEST_FORMATS,
                 "supports_preferred_media_type": true,
                 "supports_playback_offsets": true,
-                "supports_playback_speed": false
+                "supports_playback_speed": true,
+                "supports_external_url_playback_speed": true
             },
             "device_id": self.device_id,
             "device_type": "computer",
@@ -546,6 +549,9 @@ impl Engine {
     }
 
     fn now(&self) -> NowPlaying {
+        if let Some(now) = self.local_now() {
+            return now;
+        }
         if let Some(playing) = self.playing.as_ref().filter(|_| self.is_active_here()) {
             let track = playing.metadata();
             let here = self.playback_here();
@@ -566,9 +572,14 @@ impl Engine {
                 provider,
                 shuffle,
                 repeat,
-                speed: 1.,
+                speed: playing.speed,
                 episode: track.as_ref().is_some_and(is_episode),
-                sleep: here.map_or(SleepState::Off, |playback| playback.sleep_timer),
+                sleep: match self.local_sleep() {
+                    SleepState::Off => {
+                        here.map_or(SleepState::Off, |playback| playback.sleep_timer)
+                    }
+                    local => local,
+                },
                 track,
                 playing: !playing.paused,
                 position_ms: playing.position_ms,
@@ -601,6 +612,9 @@ impl Engine {
     }
 
     fn publish(&mut self, updates: &mpsc::UnboundedSender<Update>) {
+        for update in self.audio_updates() {
+            let _ = updates.send(Update::Audio(update));
+        }
         if let Some(playback) = &self.playback {
             let key = PlaybackKey::of(playback);
             if self.published_playback.as_ref() != Some(&key) {
@@ -652,8 +666,7 @@ impl Engine {
                     && self.playing.is_some();
                 self.playback = Some(playback);
                 if moved_away {
-                    self.player.stop();
-                    self.playing = None;
+                    self.stop_local();
                 }
             }
             return;
@@ -682,8 +695,7 @@ impl Engine {
             }
             Some("ping") => self.report("ping").await,
             Some("log_out") => {
-                self.player.stop();
-                self.playing = None;
+                self.stop_local();
                 self.report("state_clear").await;
             }
             _ => {}
@@ -695,6 +707,9 @@ impl Engine {
             Control::Remote(control) => return self.remote_control(control).await,
             Control::Audio(control) => return self.audio(control).await,
             control => control,
+        };
+        let Some(control) = self.local_control(control).await else {
+            return Ok(());
         };
         if let Some(target) = self.control_target(&control).filter(|_| {
             !matches!(

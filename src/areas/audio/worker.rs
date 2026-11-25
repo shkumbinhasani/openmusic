@@ -1,26 +1,208 @@
-use spotify_client::{dealer::Message, engine::playback::Update};
+use std::sync::Mutex;
 
-use super::state::AudioPrefs;
-use crate::worker::Ctx;
+use spotify_client::{
+    catalog::LocalTrack,
+    dealer::Message,
+    engine::{
+        Control,
+        playback::{self, AudioReport, AudioStatus, SleepChoice, Update},
+    },
+    playback_settings::{self, Change, DeviceDescriptor, Remote, Setting},
+};
 
-pub enum Command {}
+use super::state::{AudioPrefs, base_device_name};
+use crate::worker::{Ctx, Mutation};
 
-pub enum Event {}
+const SYNC: &str = "audio-settings";
+
+static NAME: Mutex<Option<String>> = Mutex::new(None);
+
+pub enum Command {
+    Sync,
+    Write {
+        settings: Vec<Setting>,
+        undo: Vec<Setting>,
+    },
+    Report,
+    PlayLocal {
+        tracks: Vec<LocalTrack>,
+        index: usize,
+    },
+    Speed {
+        speed: f32,
+        show: Option<String>,
+    },
+    Sleep(SleepChoice),
+}
+
+pub enum Event {
+    Synced(Result<Remote, String>),
+    Changed(Vec<Setting>),
+    Content {
+        content_id: String,
+        settings: Vec<Setting>,
+    },
+    Written(Vec<Setting>),
+    WriteFailed {
+        message: String,
+        remote: Option<Remote>,
+        undo: Vec<Setting>,
+    },
+    Report(Box<AudioReport>),
+    Status(AudioStatus),
+}
 
 impl Event {
     pub fn covers(&self) -> Vec<String> {
-        match *self {}
+        Vec::new()
     }
 }
 
-pub fn handle(command: Command, _ctx: &mut Ctx) {
-    match command {}
+fn device_name() -> String {
+    NAME.lock()
+        .ok()
+        .and_then(|name| name.clone())
+        .unwrap_or_else(base_device_name)
 }
 
-pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
-
-pub fn on_update(update: Update, _ctx: &mut Ctx) {
-    match update {}
+fn descriptor(ctx: &Ctx) -> DeviceDescriptor {
+    playback_settings::descriptor(&ctx.handle.device_id, &device_name())
 }
 
-pub fn apply_settings(_prefs: &AudioPrefs, _ctx: &mut Ctx) {}
+fn sync(ctx: &mut Ctx) {
+    let api = ctx.api.clone();
+    let device = descriptor(ctx);
+    ctx.tasks.spawn_keyed(SYNC, async move {
+        let remote = playback_settings::read(&api, Some(&device), &[])
+            .await
+            .map_err(|error| error.to_string());
+        Event::Synced(remote).into()
+    });
+}
+
+pub fn handle(command: Command, ctx: &mut Ctx) {
+    match command {
+        Command::Sync => sync(ctx),
+        Command::Write { settings, undo } => {
+            let api = ctx.api.clone();
+            let device = descriptor(ctx);
+            ctx.writes
+                .push(Mutation::new(vec![SYNC.into()], async move {
+                    let event = match playback_settings::write_all(&api, &device, None, &settings)
+                        .await
+                    {
+                        Ok(()) => Event::Written(settings),
+                        Err(_) => Event::WriteFailed {
+                            message: "Couldn’t save this setting to Spotify. Try again.".into(),
+                            remote: playback_settings::read(&api, Some(&device), &[]).await.ok(),
+                            undo,
+                        },
+                    };
+                    Ok(event.into())
+                }));
+        }
+        Command::Report => ctx.handle.send(Control::Audio(playback::Control::Report)),
+        Command::PlayLocal { tracks, index } => {
+            ctx.handle
+                .send(Control::Audio(playback::Control::PlayLocal {
+                    tracks,
+                    index,
+                }))
+        }
+        Command::Sleep(choice) => ctx
+            .handle
+            .send(Control::Audio(playback::Control::Sleep(choice))),
+        Command::Speed { speed, show } => {
+            ctx.handle
+                .send(Control::Audio(playback::Control::Speed(speed)));
+            if let Some(show) = show {
+                save_show_speed(ctx, show, speed);
+            }
+        }
+    }
+}
+
+fn save_show_speed(ctx: &mut Ctx, show: String, speed: f32) {
+    let api = ctx.api.clone();
+    let device = descriptor(ctx);
+    ctx.writes
+        .push(Mutation::new(vec![format!("speed:{show}")], async move {
+            let settings = vec![Setting::Speed(speed)];
+            let event =
+                match playback_settings::write_all(&api, &device, Some(&show), &settings).await {
+                    Ok(()) => Event::Content {
+                        content_id: show,
+                        settings,
+                    },
+                    Err(_) => Event::WriteFailed {
+                        message: "Couldn’t save this speed for the show. Try again.".into(),
+                        remote: None,
+                        undo: Vec::new(),
+                    },
+                };
+            Ok(event.into())
+        }));
+}
+
+fn share_speeds(ctx: &Ctx, show: &str, settings: &[Setting]) {
+    for setting in settings {
+        if let Setting::Speed(speed) = setting {
+            ctx.handle
+                .send(Control::Audio(playback::Control::ShowSpeed {
+                    show: show.to_owned(),
+                    speed: *speed,
+                }));
+        }
+    }
+}
+
+pub fn on_push(message: &Message, ctx: &mut Ctx) {
+    let Some(change) = playback_settings::change_from(message) else {
+        return;
+    };
+    if !change.concerns_device(&ctx.handle.device_id) {
+        return;
+    }
+    match change {
+        Change::User {
+            settings,
+            complete: true,
+        }
+        | Change::Device {
+            settings,
+            complete: true,
+            ..
+        } => ctx.publish(Event::Changed(settings)),
+        Change::Content {
+            content_id,
+            settings,
+            complete: true,
+        } => {
+            share_speeds(ctx, &content_id, &settings);
+            ctx.publish(Event::Content {
+                content_id,
+                settings,
+            });
+        }
+        _ => sync(ctx),
+    }
+}
+
+pub fn on_update(update: Update, ctx: &mut Ctx) {
+    match update {
+        Update::Report(report) => ctx.publish(Event::Report(report)),
+        Update::Notice(message) => ctx.publish(crate::worker::Event::Notice(message)),
+        Update::Status(status) => ctx.publish(Event::Status(status)),
+    }
+}
+
+pub fn apply_settings(prefs: &AudioPrefs, ctx: &mut Ctx) {
+    let name = prefs.device_name(&base_device_name());
+    if let Ok(mut slot) = NAME.lock() {
+        *slot = Some(name.clone());
+    }
+    ctx.handle
+        .send(Control::Audio(playback::Control::Settings(prefs.engine())));
+    ctx.handle
+        .send(Control::Audio(playback::Control::Rename(name)));
+}
