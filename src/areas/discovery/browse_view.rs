@@ -214,14 +214,20 @@ impl OpenMusic {
             .when(browse.sections.is_empty() && !pending, |page| {
                 page.child(self.page_status("Nothing to show here yet.", palette))
             })
-            .when(browse.next.is_some(), |page| {
+            .when(browse.next.is_some() && error.is_none(), |page| {
                 page.child(scroll_sentinel(&self.discovery.more_sentinel))
             })
             .when(pending, |page| {
                 page.child(self.shelf_bones(card_side, palette))
             })
             .when_some(error, |page, error| {
-                page.child(self.page_status(error, palette))
+                page.child(self.paging_error(
+                    "browse-retry",
+                    error,
+                    OpenMusic::retry_page_results,
+                    palette,
+                    cx,
+                ))
             })
             .into_any_element()
     }
@@ -434,12 +440,18 @@ impl OpenMusic {
             page.child(self.page_status("Nothing to show here yet.", palette))
         })
         .child(grid)
-        .when(paged, |page| {
+        .when(paged && error.is_none(), |page| {
             page.child(scroll_sentinel(&self.discovery.more_sentinel))
         })
         .when(pending, |page| page.child(loading(4)))
         .when_some(error, |page, error| {
-            page.child(self.page_status(error, palette))
+            page.child(self.paging_error(
+                "section-retry",
+                error,
+                OpenMusic::retry_page_results,
+                palette,
+                cx,
+            ))
         })
         .into_any_element()
     }

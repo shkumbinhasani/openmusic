@@ -414,7 +414,7 @@ impl OpenMusic {
             .map(|results| results.total(kind))
             .filter(|total| *total > 0);
         let state = self.discovery.search_tabs.entry(kind).or_default();
-        if state.pending.is_some() {
+        if state.pending.is_some() || (!first && state.error.is_some()) {
             return false;
         }
         let offset = match (&state.items, first) {
@@ -435,6 +435,15 @@ impl OpenMusic {
             limit: page_limit(kind, offset, total),
         });
         true
+    }
+
+    pub fn retry_search_page(&mut self, kind: SearchKind) -> bool {
+        let Some(state) = self.discovery.search_tabs.get_mut(&kind) else {
+            return false;
+        };
+        state.error = None;
+        let first = state.items.is_none();
+        self.request_search_page(kind, first)
     }
 
     pub fn more_search_results(&mut self) -> bool {

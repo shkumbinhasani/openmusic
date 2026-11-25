@@ -240,7 +240,7 @@ impl OpenMusic {
                 let Some(next) = state.page.as_ref().and_then(|page| page.next) else {
                     return false;
                 };
-                if state.pending.is_some() {
+                if state.pending.is_some() || state.error.is_some() {
                     return false;
                 }
                 state.pending = Some(next);
@@ -259,7 +259,7 @@ impl OpenMusic {
                 let Some(next) = state.section.as_ref().and_then(|section| section.next) else {
                     return false;
                 };
-                if state.pending.is_some() {
+                if state.pending.is_some() || state.error.is_some() {
                     return false;
                 }
                 state.pending = Some(next);
@@ -269,6 +269,23 @@ impl OpenMusic {
             }
             _ => false,
         }
+    }
+
+    pub fn retry_page_results(&mut self) -> bool {
+        match self.page.clone() {
+            Page::Browse(uri) => {
+                if let Some(state) = self.discovery.browse_pages.get_mut(&uri, None) {
+                    state.error = None;
+                }
+            }
+            Page::Section { uri, source } => {
+                if let Some(state) = self.discovery.sections.get_mut(&uri, Some(source)) {
+                    state.error = None;
+                }
+            }
+            _ => return false,
+        }
+        self.more_page_results()
     }
 
     pub fn on_browse(&mut self, uri: String, offset: u32, result: Result<Box<BrowsePage>, String>) {

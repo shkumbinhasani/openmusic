@@ -76,6 +76,37 @@ pub fn heading_bone(key: &'static str, palette: Palette) -> Div {
 }
 
 impl OpenMusic {
+    pub fn paging_error(
+        &self,
+        key: &'static str,
+        error: String,
+        retry: impl Fn(&mut OpenMusic) -> bool + 'static,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .py_6()
+            .flex()
+            .items_center()
+            .gap_3()
+            .text_color(rgb(palette.muted))
+            .child(div().min_w_0().child(error))
+            .child(
+                div()
+                    .id(key)
+                    .flex_shrink_0()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .hover(move |link| link.text_color(rgb(palette.text)).underline())
+                    .child("Try again")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        retry(this);
+                        cx.notify();
+                    })),
+            )
+    }
+
     pub fn search_results(
         &self,
         tab: SearchTab,
@@ -418,9 +449,12 @@ impl OpenMusic {
                 return loading(4).into_any_element();
             }
             return self
-                .page_status(
-                    error.unwrap_or_else(|| "Couldn’t load these results. Try again.".into()),
+                .paging_error(
+                    "search-tab-retry",
+                    error.unwrap_or_else(|| "Couldn’t load these results.".into()),
+                    move |app| app.retry_search_page(kind),
                     palette,
+                    cx,
                 )
                 .into_any_element();
         };
@@ -459,10 +493,18 @@ impl OpenMusic {
             .flex_col()
             .gap_4()
             .child(list)
-            .child(scroll_sentinel(&self.discovery.search_sentinel))
+            .when(error.is_none(), |page| {
+                page.child(scroll_sentinel(&self.discovery.search_sentinel))
+            })
             .when(pending, |page| page.child(loading(2)))
             .when_some(error, |page, error| {
-                page.child(self.page_status(error, palette))
+                page.child(self.paging_error(
+                    "search-tab-retry",
+                    error,
+                    move |app| app.retry_search_page(kind),
+                    palette,
+                    cx,
+                ))
             })
             .into_any_element()
     }
