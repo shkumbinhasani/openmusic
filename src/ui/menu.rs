@@ -501,7 +501,7 @@ impl OpenMusic {
     }
 
     pub fn has_menu(&self, target: &Target) -> bool {
-        !self.menu_items(target).is_empty()
+        details::menu::shares(target) || !self.menu_items(target).is_empty()
     }
 
     pub fn show_menu(&mut self, items: Vec<MenuItem>, place: Place, row: Option<Row>) -> bool {

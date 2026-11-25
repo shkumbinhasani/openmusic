@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use spotify_client::{
     catalog::{Collection, Link},
     details::hide_context,
+    share::Kind,
 };
 
 use crate::{
@@ -64,6 +65,10 @@ pub fn items(target: &Target, facts: &Facts) -> Vec<(Group, MenuItem)> {
         Target::Show { uri } | Target::User { uri } => shared(uri),
         Target::Folder { .. } => Vec::new(),
     }
+}
+
+pub fn shares(target: &Target) -> bool {
+    !matches!(target, Target::Folder { .. }) && Kind::of(target.uri()).is_some()
 }
 
 fn with_share(mut items: Vec<(Group, MenuItem)>, uri: &str) -> Vec<(Group, MenuItem)> {
@@ -240,6 +245,48 @@ mod tests {
 
     fn menu(target: &Target, page: &Page) -> Vec<String> {
         World::new().on(page.clone()).menu(target)
+    }
+
+    #[test]
+    fn every_shared_target_has_a_menu() {
+        let shared = [
+            song_target(SONG, Surface::Row),
+            song_target(EPISODE, Surface::Row),
+            Target::Album { uri: ALBUM.into() },
+            Target::Artist {
+                uri: RADIOHEAD.into(),
+            },
+            Target::Playlist { uri: RADIO.into() },
+            Target::Episode {
+                uri: EPISODE.into(),
+            },
+            Target::Show {
+                uri: "spotify:show:0123456789abcdefghijkl".into(),
+            },
+            Target::User {
+                uri: "spotify:user:someone".into(),
+            },
+        ];
+        for target in &shared {
+            assert!(shares(target), "{}", target.describe());
+            assert!(
+                !menu(target, &Page::Home).is_empty(),
+                "{}",
+                target.describe()
+            );
+        }
+        let unshared = [
+            Target::Folder {
+                uri: "spotify:user:someone:folder:0123456789abcdef".into(),
+            },
+            song_target("spotify:local:a:b:c:1", Surface::Row),
+            Target::Playlist {
+                uri: "spotify:collection:tracks".into(),
+            },
+        ];
+        for target in &unshared {
+            assert!(!shares(target), "{}", target.describe());
+        }
     }
 
     fn creep() -> Track {
