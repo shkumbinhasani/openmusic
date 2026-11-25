@@ -44,6 +44,7 @@ pub const SLEEP_MINUTES: [(u32, &str); 6] = [
 pub const SPEEDS: [f32; 10] = [0.5, 0.8, 1., 1.2, 1.5, 1.8, 2., 2.5, 3., 3.5];
 pub const DEFAULT_DEVICE_NAME: &str = "OpenMusic";
 const PENDING: Duration = Duration::from_secs(3);
+const ECHO_WAIT: Duration = Duration::from_secs(5);
 
 pub fn base_device_name() -> String {
     std::env::var("OPENMUSIC_DEVICE_NAME")
@@ -166,7 +167,16 @@ impl State {
 }
 
 #[derive(Debug, Default)]
-pub struct Writing(HashMap<i32, u32>);
+pub struct Writing {
+    open: HashMap<i32, u32>,
+    sent: HashMap<i32, Sent>,
+}
+
+#[derive(Debug)]
+struct Sent {
+    values: Vec<Setting>,
+    at: Instant,
+}
 
 impl Writing {
     fn key(setting: Setting) -> i32 {
@@ -174,32 +184,83 @@ impl Writing {
     }
 
     pub fn start(&mut self, settings: &[Setting]) {
+        self.start_at(settings, Instant::now());
+    }
+
+    fn start_at(&mut self, settings: &[Setting], now: Instant) {
         for setting in settings {
-            *self.0.entry(Self::key(*setting)).or_default() += 1;
+            let key = Self::key(*setting);
+            let busy = self.open.contains_key(&key);
+            *self.open.entry(key).or_default() += 1;
+            let sent = self.sent.entry(key).or_insert(Sent {
+                values: Vec::new(),
+                at: now,
+            });
+            if !busy && now.duration_since(sent.at) >= ECHO_WAIT {
+                sent.values.clear();
+            }
+            sent.values.push(*setting);
+            sent.at = now;
         }
     }
 
     pub fn finish(&mut self, settings: &[Setting]) {
+        self.finish_at(settings, Instant::now());
+    }
+
+    fn finish_at(&mut self, settings: &[Setting], now: Instant) {
         for setting in settings {
             let key = Self::key(*setting);
-            if let Some(count) = self.0.get_mut(&key) {
+            if let Some(count) = self.open.get_mut(&key) {
                 *count = count.saturating_sub(1);
                 if *count == 0 {
-                    self.0.remove(&key);
+                    self.open.remove(&key);
                 }
+            }
+            if let Some(sent) = self.sent.get_mut(&key) {
+                sent.at = now;
             }
         }
     }
 
-    pub fn busy(&self, setting: Setting) -> bool {
-        self.0.contains_key(&Self::key(setting))
+    pub fn forget(&mut self, settings: &[Setting]) {
+        for setting in settings {
+            self.sent.remove(&Self::key(*setting));
+        }
     }
 
-    pub fn settled(&self, settings: Vec<Setting>) -> Vec<Setting> {
+    pub fn busy(&self, setting: Setting) -> bool {
+        self.open.contains_key(&Self::key(setting))
+    }
+
+    pub fn settled(&mut self, settings: Vec<Setting>) -> Vec<Setting> {
+        self.settled_at(settings, Instant::now())
+    }
+
+    fn settled_at(&mut self, settings: Vec<Setting>, now: Instant) -> Vec<Setting> {
         settings
             .into_iter()
-            .filter(|setting| !self.busy(*setting))
+            .filter(|setting| !self.busy(*setting) && !self.stale_echo(*setting, now))
             .collect()
+    }
+
+    fn stale_echo(&mut self, setting: Setting, now: Instant) -> bool {
+        let key = Self::key(setting);
+        let Some(sent) = self.sent.get(&key) else {
+            return false;
+        };
+        if now.duration_since(sent.at) >= ECHO_WAIT {
+            self.sent.remove(&key);
+            return false;
+        }
+        if sent.values.last() == Some(&setting) {
+            return false;
+        }
+        if sent.values.contains(&setting) {
+            return true;
+        }
+        self.sent.remove(&key);
+        false
     }
 
     pub fn merge(&self, prefs: &mut AudioPrefs, remote: &Remote) {
@@ -543,6 +604,7 @@ fn apply_event(app: &mut OpenMusic, event: Event) {
             undo,
         } => {
             app.audio.writing.finish(&undo);
+            app.audio.writing.forget(&undo);
             match remote {
                 Some(remote) => {
                     let mut prefs = app.settings.audio.clone();
@@ -1026,6 +1088,46 @@ mod tests {
         assert_eq!(
             writing.settled(vec![Setting::CrossfadeMs(2000)]),
             vec![Setting::CrossfadeMs(2000)]
+        );
+    }
+
+    #[test]
+    fn ignores_late_echoes_of_earlier_writes() {
+        let ms = Setting::CrossfadeMs;
+        let start = Instant::now();
+        let later = start + Duration::from_millis(500);
+        let sent = |values: &[u32]| {
+            let mut writing = Writing::default();
+            for value in values {
+                writing.start_at(&[ms(*value)], start);
+                writing.finish_at(&[ms(*value)], start);
+            }
+            writing
+        };
+
+        let mut writing = sent(&[3000, 4000, 5000, 6000]);
+        assert!(writing.settled_at(vec![ms(5000)], later).is_empty());
+        assert_eq!(writing.settled_at(vec![ms(6000)], later), vec![ms(6000)]);
+        assert!(writing.settled_at(vec![ms(4000)], later).is_empty());
+        assert_eq!(writing.settled_at(vec![ms(2000)], later), vec![ms(2000)]);
+        assert_eq!(writing.settled_at(vec![ms(5000)], later), vec![ms(5000)]);
+
+        let mut writing = sent(&[3000, 6000]);
+        assert_eq!(
+            writing.settled_at(vec![ms(3000)], start + ECHO_WAIT),
+            vec![ms(3000)]
+        );
+
+        let mut writing = sent(&[3000, 6000]);
+        writing.forget(&[ms(3000)]);
+        assert_eq!(writing.settled_at(vec![ms(3000)], later), vec![ms(3000)]);
+
+        let mut writing = sent(&[3000]);
+        writing.start_at(&[ms(6000)], start + ECHO_WAIT);
+        writing.finish_at(&[ms(6000)], start + ECHO_WAIT);
+        assert_eq!(
+            writing.settled_at(vec![ms(3000)], start + ECHO_WAIT),
+            vec![ms(3000)]
         );
     }
 
