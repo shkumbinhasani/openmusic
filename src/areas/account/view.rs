@@ -9,7 +9,7 @@ use spotify_client::{
 
 use super::state::{
     CHIP, CHIP_ROW, CLEAR_CACHE_KEY, FREE_MESSAGE, FREE_NOTICE, LANGUAGE_KEY, LANGUAGES,
-    PREMIUM_KEY, PREMIUM_URL, ProfileListKind, cache_label, language_name,
+    PREMIUM_KEY, PREMIUM_URL, cache_label, language_name,
 };
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
@@ -135,27 +135,6 @@ impl OpenMusic {
                 }
             })
             .into_any_element()
-    }
-
-    pub fn profile_page(
-        &self,
-        _uri: &str,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-
-    pub fn profile_list_page(
-        &self,
-        _uri: &str,
-        _kind: ProfileListKind,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
     }
 
     pub fn local_files_page(

@@ -5,13 +5,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spotify_client::account::{AccountInfo, Explicit};
 
-use super::worker::{Command, Event};
+use super::{
+    profile::{self, Profiles},
+    profile_view::MORE_PROFILE,
+    worker::{Command, Event},
+};
 use crate::{
     app::{OpenMusic, Page, Session, settings::Settings},
     areas::{discovery, playlists},
     menus::{self, Handle, OpenSettings, SignOut},
     ui::{
-        menu::{MenuItem, Place, Row},
+        menu::{MenuItem, Place, Row, Target},
         tracks::{RowDrag, RowDrop},
     },
     worker,
@@ -145,14 +149,18 @@ pub enum ProfileListKind {
     Following,
     Playlists,
     RecentArtists,
+    TopArtists,
+    TopTracks,
 }
 
 impl ProfileListKind {
-    pub const KINDS: [Self; 4] = [
+    pub const KINDS: [Self; 6] = [
         Self::Followers,
         Self::Following,
         Self::Playlists,
         Self::RecentArtists,
+        Self::TopArtists,
+        Self::TopTracks,
     ];
 
     pub fn name(self) -> &'static str {
@@ -161,7 +169,24 @@ impl ProfileListKind {
             Self::Following => "following",
             Self::Playlists => "playlists",
             Self::RecentArtists => "recentartists",
+            Self::TopArtists => "topartists",
+            Self::TopTracks => "toptracks",
         }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Followers => "Followers",
+            Self::Following => "Following",
+            Self::Playlists => "Public Playlists",
+            Self::RecentArtists => "Recently played artists",
+            Self::TopArtists => "Top artists this month",
+            Self::TopTracks => "Top tracks this month",
+        }
+    }
+
+    pub fn own_only(self) -> bool {
+        matches!(self, Self::TopArtists | Self::TopTracks)
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -189,6 +214,7 @@ pub struct State {
     pub languages_open: bool,
     pub cache: Option<u64>,
     pub cache_busy: bool,
+    pub profiles: Profiles,
 }
 
 impl State {
@@ -196,6 +222,7 @@ impl State {
         if let Some(info) = &self.info {
             urls.extend(info.avatar.clone());
         }
+        self.profiles.covers(urls);
     }
 }
 
@@ -426,6 +453,7 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
     if *page == Page::Settings {
         app.refresh_cache_size();
     }
+    profile::load(app, page);
 }
 
 pub fn on_event(
@@ -445,6 +473,13 @@ pub fn on_event(
                 Err(message) => app.account.error = Some(message),
             }
         }
+        Event::Profile { uri, result } => profile::on_profile(app, uri, result),
+        Event::ProfileList {
+            uri,
+            kind,
+            offset,
+            result,
+        } => profile::on_list(app, uri, kind, offset, result),
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -510,6 +545,7 @@ pub fn debug(
             let _ = std::fs::write(directory.join("account.txt"), text);
         }
         "account-menu" => app.open_account_menu(),
+        "profile" | "profiles" => return profile::debug(app, verb, rest, directory),
         "cache" => {
             match rest {
                 "refresh" => app.refresh_cache_size(),
@@ -564,8 +600,14 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         Some(Explicit::FilteredByManager) => "locked",
         None => "unknown",
     };
+    let profile = app
+        .account
+        .profiles
+        .profile
+        .as_ref()
+        .map_or("none", |(uri, _)| uri.as_str());
     format!(
-        "plan={plan} user={user} explicit={explicit} language={}",
+        "plan={plan} user={user} explicit={explicit} language={} profile={profile}",
         app.language()
     )
 }
@@ -594,6 +636,12 @@ pub fn on_press(
         PREMIUM_KEY => cx.open_url(PREMIUM_URL),
         LANGUAGE_KEY => app.open_language_menu(),
         CLEAR_CACHE_KEY => app.confirm_clear_cache(window, cx),
+        MORE_PROFILE => {
+            if let Page::Profile(uri) = &app.page {
+                let target = Target::User { uri: uri.clone() };
+                app.open_menu_under(target, MORE_PROFILE);
+            }
+        }
         _ => return false,
     }
     true
@@ -609,7 +657,9 @@ pub fn row_dropped(
     false
 }
 
-pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    profile::tick(app, cx);
+}
 
 #[cfg(test)]
 mod tests {
