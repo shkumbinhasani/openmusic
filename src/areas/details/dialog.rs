@@ -10,7 +10,7 @@ use crate::ui::Palette;
 pub type Close = Rc<dyn Fn(&mut Window, &mut App)>;
 
 const DOCK_CLEARANCE: f32 = 84.;
-const CHROME: f32 = 112.;
+const CHROME: f32 = 116.;
 
 pub fn top(window: &Window) -> f32 {
     (f32::from(window.viewport_size().height) * 0.1).clamp(36., 96.)
