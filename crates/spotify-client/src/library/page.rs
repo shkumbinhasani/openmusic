@@ -658,7 +658,11 @@ pub fn fallback_page(rootlist: &Rootlist, query: &LibraryQuery) -> LibraryPage {
     let selected = if playlists_only {
         vec![Chip::new(PLAYLISTS, PLAYLISTS)]
     } else {
-        Vec::new()
+        query
+            .filters
+            .iter()
+            .map(|filter| Chip::new(filter.as_str(), filter.as_str()))
+            .collect()
     };
     let filters = if query.filters.is_empty() {
         vec![Chip::new(PLAYLISTS, PLAYLISTS)]
@@ -1021,7 +1025,14 @@ mod tests {
             filters: vec!["Albums".into()],
             ..LibraryQuery::default()
         };
-        assert!(fallback_page(&list, &albums).items.is_empty());
+        let page = fallback_page(&list, &albums);
+        assert!(page.items.is_empty());
+        assert_eq!(page.selected, vec![Chip::new("Albums", "Albums")]);
+        assert!(page.filters.is_empty());
+        assert_eq!(
+            fallback_page(&list, &LibraryQuery::default()).selected,
+            Vec::new()
+        );
     }
 
     #[test]
