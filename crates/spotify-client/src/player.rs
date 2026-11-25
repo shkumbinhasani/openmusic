@@ -828,6 +828,10 @@ fn seek_player(player: &AVQueuePlayer, position_ms: u32) {
     }
 }
 
+fn keeps_ticking(empty: bool, playing: bool, waiting: bool, seeking: bool) -> bool {
+    !empty && (playing || waiting || seeking)
+}
+
 fn milliseconds(seconds: f64) -> Option<u32> {
     seconds
         .is_finite()
@@ -1337,6 +1341,7 @@ impl MainState {
 
     fn play(&mut self) {
         self.playing = true;
+        self.ensure_ticking();
         self.start_active();
         if let Some(ramp) = self.ramp.as_mut() {
             unsafe { self.decks[ramp.from].player.play() };
@@ -1478,7 +1483,12 @@ impl MainState {
         self.follow_queue();
         self.report_position();
         self.update_snapshot();
-        if self.decks.iter().all(|deck| deck.items.is_empty()) {
+        let seeking = self
+            .decks
+            .iter()
+            .any(|deck| deck.items.iter().any(|item| item.pending_seek.is_some()));
+        let empty = self.decks.iter().all(|deck| deck.items.is_empty());
+        if !keeps_ticking(empty, self.playing, waiting, seeking) {
             self.ticking = false;
             return None;
         }
@@ -1817,6 +1827,15 @@ mod tests {
         );
         licenses.remove("6f5cc32c");
         assert!(licenses.find("6f5cc32c").is_none());
+    }
+
+    #[test]
+    fn polls_only_while_something_can_change() {
+        assert!(keeps_ticking(false, true, false, false));
+        assert!(keeps_ticking(false, false, true, false));
+        assert!(keeps_ticking(false, false, false, true));
+        assert!(!keeps_ticking(false, false, false, false));
+        assert!(!keeps_ticking(true, true, true, true));
     }
 
     #[test]

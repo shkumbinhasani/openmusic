@@ -302,13 +302,15 @@ impl Engine {
     }
 
     pub(super) async fn prepare_next(&mut self) {
+        if self.playing.as_ref().is_none_or(|playing| playing.paused) {
+            return;
+        }
         self.follow_mix();
         let Some(playing) = self.playing.as_ref() else {
             return;
         };
         let joins = &self.audio.joins;
         if joins.prepared.is_some()
-            || playing.paused
             || joins.tried == Some(playing.generation)
             || joins.fading()
             || self.player.snapshot().ramp.is_some()
