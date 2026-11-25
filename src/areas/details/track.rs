@@ -899,6 +899,7 @@ mod tests {
         LyricLine {
             start_ms: 0,
             words: words.into(),
+            heading: false,
         }
     }
 
