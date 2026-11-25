@@ -53,6 +53,21 @@ impl Message {
             Some(raw)
         }
     }
+
+    pub fn json_object(&self) -> Option<Value> {
+        if let Some(payload) = self.json() {
+            return Some(payload.clone());
+        }
+        let text = self.payloads.first()?.as_str()?;
+        serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .or_else(|| {
+                serde_json::from_slice::<Value>(&self.bytes()?)
+                    .ok()
+                    .filter(Value::is_object)
+            })
+    }
 }
 
 pub fn spawn(

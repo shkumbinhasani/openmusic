@@ -608,14 +608,7 @@ pub fn set_push(message: &Push) -> Option<SetPush> {
     if path.next() != Some("json") {
         return None;
     }
-    let decoded;
-    let payload = match message.json() {
-        Some(payload) => payload,
-        None => {
-            decoded = serde_json::from_slice::<Value>(&message.bytes()?).ok()?;
-            &decoded
-        }
-    };
+    let payload = message.json_object()?;
     let rows = payload["items"].as_array()?;
     let items: Vec<Pushed> = rows.iter().filter_map(pushed).collect();
     Some(SetPush {
@@ -1506,6 +1499,12 @@ mod tests {
                 },
             ]
         );
+        let text = set_push(&push(
+            "hm://collection/ignoreinrecs/someone/json",
+            Value::String(body.to_string()),
+        ))
+        .unwrap();
+        assert_eq!(text.items, pushed.items);
         let banned = set_push(&push(
             "hm://collection/artistban/someone/json",
             json!({"items": [{"type": "artist", "identifier": "4Z8W4fKeB5YxbusRsdQVPb"}]}),

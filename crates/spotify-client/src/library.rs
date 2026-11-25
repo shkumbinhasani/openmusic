@@ -268,14 +268,7 @@ pub fn collection_push(message: &Message) -> Option<Vec<(String, bool)>> {
     if !SAVED_SETS.contains(&set) {
         return None;
     }
-    let decoded;
-    let payload = match message.json() {
-        Some(payload) => payload,
-        None => {
-            decoded = serde_json::from_slice::<Value>(&message.bytes()?).ok()?;
-            &decoded
-        }
-    };
+    let payload = message.json_object()?;
     let items = payload.get("items")?.as_array()?;
     Some(
         items
@@ -471,8 +464,22 @@ mod tests {
                 ("spotify:album:0000000000000000000001".to_owned(), false),
             ]
         );
+        let text = collection_push(&message(
+            "hm://collection/collection/someone/json",
+            Value::String(body.to_string()),
+        ))
+        .unwrap();
+        assert_eq!(text, pushed);
         let plain = collection_push(&message("hm://collection/artist/someone/json", body)).unwrap();
         assert_eq!(plain.len(), 2);
+        let protobuf = Value::String("CgIIAA==".into());
+        assert!(
+            collection_push(&message(
+                "hm://collection/collection/someone/json",
+                protobuf
+            ))
+            .is_none()
+        );
     }
 
     #[test]
