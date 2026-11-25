@@ -21,13 +21,15 @@ use spotify_client::{
 
 use super::{
     canvas::Canvases,
+    screen::{ALBUM_KEY, FULL_KEY, Screen, VIDEO_KEY},
     transcript::{SYNC_KEY, TranscriptView},
+    video::{self, NOW_PLAYING_KEY},
     worker::{Command, Event},
     yours::{SORT_KEY, Yours},
 };
 use crate::{
     app::{OpenMusic, Page},
-    menus::{GoLyrics, Handle, route},
+    menus::{GoLyrics, GoNowPlaying, Handle, route},
     ui::{
         components::Sentinel,
         menu::Target,
@@ -45,11 +47,17 @@ const LOCATE_PATIENCE: Duration = Duration::from_secs(10);
 #[serde(default)]
 pub struct ContentPrefs {
     pub canvas: bool,
+    pub music_videos: bool,
+    pub video_podcasts: bool,
 }
 
 impl Default for ContentPrefs {
     fn default() -> Self {
-        Self { canvas: true }
+        Self {
+            canvas: true,
+            music_videos: true,
+            video_podcasts: true,
+        }
     }
 }
 
@@ -78,6 +86,7 @@ pub struct State {
     pub shows: HashMap<String, String>,
     pub locating: Option<(String, Instant)>,
     pub canvas: Canvases,
+    pub screen: Screen,
 }
 
 impl State {
@@ -97,6 +106,7 @@ impl State {
         if let Some((_, Ok(cards))) = &self.similar {
             urls.extend(cards.iter().filter_map(|card| card.image.clone()));
         }
+        self.screen.covers(urls);
     }
 
     pub fn loaded_show(&self) -> Option<&Show> {
@@ -781,6 +791,20 @@ pub fn on_event(
         }
         Event::Located { uri, result } => app.located(uri, result),
         Event::Canvas { uri, result } => app.took_canvas(uri, result),
+        Event::VideoOf { uri, result } => app.content.screen.took_video(uri, result),
+        Event::SongOf { uri, song } => app.content.screen.took_song(uri, song),
+        Event::ArtistVideos {
+            uri,
+            offset,
+            result,
+        } => app.content.screen.took_artist_videos(&uri, offset, result),
+        Event::NowEpisode { uri, episode } => {
+            if let Some(episode) = &episode {
+                app.content.note(std::slice::from_ref(episode));
+            }
+            app.content.screen.episode = Some((uri, episode.map(|episode| *episode)));
+        }
+        Event::Artwork(_) => {}
         Event::YourEpisodes(result) => {
             app.content.yours.take_entries(result);
             app.took_your_episodes();
@@ -966,7 +990,7 @@ pub fn debug(
     rest: &str,
     directory: &Path,
     _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
     let words: Vec<&str> = rest.split_whitespace().collect();
     match (verb, words.as_slice()) {
@@ -993,6 +1017,38 @@ pub fn debug(
             app.describe_canvas(&mut lines);
             let _ = std::fs::write(directory.join("canvas.txt"), lines);
         }
+        ("video", []) => {
+            let mut lines = String::new();
+            app.describe_screen(&mut lines);
+            app.describe_artist_videos(&mut lines);
+            let _ = std::fs::write(directory.join("video.txt"), lines);
+        }
+        ("video", [kind @ ("music" | "podcasts"), setting @ ("on" | "off")]) => {
+            let on = *setting == "on";
+            let music = *kind == "music";
+            app.update_settings(|settings| {
+                if music {
+                    settings.content.music_videos = on;
+                } else {
+                    settings.content.video_podcasts = on;
+                }
+            });
+        }
+        ("video", ["switch"]) => app.switch_video(cx),
+        ("video", ["fullscreen"]) => {
+            video::toggle_full_screen();
+        }
+        ("watch", [uri]) => app.send(Command::Watch {
+            uri: (*uri).to_owned(),
+            position_ms: 0,
+        }),
+        ("watch", [uri, position]) => match position.parse() {
+            Ok(position_ms) => app.send(Command::Watch {
+                uri: (*uri).to_owned(),
+                position_ms,
+            }),
+            Err(_) => return false,
+        },
         ("canvas", ["setting", setting @ ("on" | "off")]) => app.set_canvas(*setting == "on"),
         ("canvas", ["stop"]) => app.preview_canvas(None),
         ("canvas", [uri]) if spotify_client::canvas::is_track(uri) => {
@@ -1076,12 +1132,19 @@ pub fn debug(
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
-    let page = page_fragment(app);
-    match app.canvas_status() {
-        Some(status) if page.is_empty() => format!("canvas={status}"),
-        Some(status) => format!("{page} canvas={status}"),
-        None => page,
+    let mut parts = vec![page_fragment(app)];
+    if let Some(status) = app.canvas_status() {
+        parts.push(format!("canvas={status}"));
     }
+    if let Some(video) = app.video_status() {
+        parts.push(format!(
+            "video={}:{}",
+            video.kind.name(),
+            if video.on { "on" } else { "off" }
+        ));
+    }
+    parts.retain(|part| !part.is_empty());
+    parts.join(" ")
 }
 
 fn page_fragment(app: &OpenMusic) -> String {
@@ -1136,6 +1199,10 @@ fn page_fragment(app: &OpenMusic) -> String {
 pub fn register_actions(cx: &mut App, handle: &Handle) {
     route(cx, handle, |_: &GoLyrics, app, _, cx| {
         app.show_lyrics(app.page != Page::Lyrics);
+        cx.notify();
+    });
+    route(cx, handle, |_: &GoNowPlaying, app, _, cx| {
+        app.toggle_now_playing();
         cx.notify();
     });
 }
@@ -1202,6 +1269,12 @@ pub fn on_press(
             }
         }
         "your-episodes-play" => app.play_your_episodes(cx),
+        NOW_PLAYING_KEY => app.toggle_now_playing(),
+        VIDEO_KEY => app.switch_video(cx),
+        FULL_KEY => {
+            video::toggle_full_screen();
+        }
+        ALBUM_KEY => app.go_to_video_album(),
         SYNC_KEY => app.sync_transcript(),
         SORT_KEY => app.open_your_sort_menu(),
         "more-episode" => {
@@ -1227,6 +1300,7 @@ pub fn row_dropped(
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     let reduce_motion = app.content.canvas.reduce_motion;
     app.canvas_tick();
+    app.screen_tick(cx);
     if reduce_motion != app.content.canvas.reduce_motion && app.page == Page::Settings {
         cx.notify();
     }
@@ -1430,9 +1504,19 @@ mod tests {
         assert!(empty.canvas);
         let off: ContentPrefs = serde_json::from_str(r#"{"canvas":false}"#).unwrap();
         assert!(!off.canvas);
+        assert!(off.music_videos && off.video_podcasts);
         assert_eq!(
             serde_json::to_value(&off).unwrap(),
-            serde_json::json!({ "canvas": false })
+            serde_json::json!({ "canvas": false, "music_videos": true, "video_podcasts": true })
+        );
+        let audio_only: ContentPrefs =
+            serde_json::from_str(r#"{"music_videos":false,"video_podcasts":false}"#).unwrap();
+        assert!(audio_only.canvas);
+        let prefs = super::super::worker::video_prefs(&audio_only);
+        assert!(!prefs.music && !prefs.podcasts);
+        assert_eq!(
+            super::super::worker::video_prefs(&ContentPrefs::default()),
+            spotify_client::engine::playback::VideoPrefs::default()
         );
     }
 

@@ -6,7 +6,12 @@ use spotify_client::{
     catalog,
     catalog::Lyrics,
     dealer::Message,
+    engine::{
+        Control,
+        playback::{self, VideoPrefs},
+    },
     entity::Card,
+    music_video::{self, Song, VideoPage},
     podcast::{
         self, Episode, EpisodePage, Show, ShowKind, Transcript, Unavailable, similar, transcript,
         your_episodes::{self, Entry},
@@ -45,6 +50,18 @@ pub enum Command {
     },
     Locate(String),
     Canvas(String),
+    VideoOf(String),
+    SongOf(String),
+    ArtistVideos {
+        uri: String,
+        offset: u32,
+    },
+    NowEpisode(String),
+    Artwork(String),
+    Watch {
+        uri: String,
+        position_ms: u32,
+    },
 }
 
 pub enum Event {
@@ -87,6 +104,24 @@ pub enum Event {
         uri: String,
         result: Result<Option<Canvas>, String>,
     },
+    VideoOf {
+        uri: String,
+        result: Result<Option<String>, String>,
+    },
+    SongOf {
+        uri: String,
+        song: Option<Song>,
+    },
+    ArtistVideos {
+        uri: String,
+        offset: u32,
+        result: Result<VideoPage, String>,
+    },
+    NowEpisode {
+        uri: String,
+        episode: Option<Box<Episode>>,
+    },
+    Artwork(String),
 }
 
 impl Event {
@@ -125,6 +160,18 @@ impl Event {
             Self::Similar {
                 result: Ok(cards), ..
             } => cards.iter().filter_map(|card| card.image.clone()).collect(),
+            Self::ArtistVideos {
+                result: Ok(page), ..
+            } => page
+                .videos
+                .iter()
+                .filter_map(|video| video.still.clone())
+                .collect(),
+            Self::NowEpisode {
+                episode: Some(episode),
+                ..
+            } => episode.large_cover.iter().cloned().collect(),
+            Self::Artwork(url) => vec![url.clone()],
             Self::Lyrics { .. }
             | Self::Show { .. }
             | Self::ShowPage { .. }
@@ -135,7 +182,11 @@ impl Event {
             | Self::Decorated { .. }
             | Self::Similar { .. }
             | Self::Located { .. }
-            | Self::Canvas { .. } => Vec::new(),
+            | Self::Canvas { .. }
+            | Self::VideoOf { .. }
+            | Self::SongOf { .. }
+            | Self::ArtistVideos { .. }
+            | Self::NowEpisode { .. } => Vec::new(),
         }
     }
 }
@@ -185,12 +236,41 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Canvas(uri) => ctx
             .tasks
             .spawn_keyed("canvas", find_canvas(ctx.api.clone(), uri)),
+        Command::VideoOf(uri) => ctx
+            .tasks
+            .spawn_keyed("video-of", video_of(ctx.api.clone(), uri)),
+        Command::SongOf(uri) => ctx
+            .tasks
+            .spawn_keyed("song-of", song_of(ctx.api.clone(), uri)),
+        Command::ArtistVideos { uri, offset } => ctx
+            .tasks
+            .spawn_keyed("artist-videos", artist_videos(ctx.api.clone(), uri, offset)),
+        Command::NowEpisode(uri) => ctx
+            .tasks
+            .spawn_keyed("now-episode", now_episode(ctx.api.clone(), uri)),
+        Command::Artwork(url) => ctx.publish(Event::Artwork(url)),
+        Command::Watch { uri, position_ms } => {
+            ctx.handle.send(Control::Audio(playback::Control::Watch {
+                uri,
+                position_ms,
+            }))
+        }
     }
 }
 
 pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
 
-pub fn apply_settings(_prefs: &ContentPrefs, _ctx: &mut Ctx) {}
+pub fn video_prefs(prefs: &ContentPrefs) -> VideoPrefs {
+    VideoPrefs {
+        music: prefs.music_videos,
+        podcasts: prefs.video_podcasts,
+    }
+}
+
+pub fn apply_settings(prefs: &ContentPrefs, ctx: &mut Ctx) {
+    ctx.handle
+        .send(Control::Audio(playback::Control::Video(video_prefs(prefs))));
+}
 
 fn failure(error: &anyhow::Error, what: &str) -> String {
     match error.downcast_ref::<Unavailable>() {
@@ -247,6 +327,35 @@ async fn find_canvas(api: Api, uri: String) -> crate::worker::Event {
         .await
         .map_err(|error| error.to_string());
     Event::Canvas { uri, result }.into()
+}
+
+async fn video_of(api: Api, uri: String) -> crate::worker::Event {
+    let result = music_video::video_for(&api, &uri)
+        .await
+        .map_err(|error| error.to_string());
+    Event::VideoOf { uri, result }.into()
+}
+
+async fn song_of(api: Api, uri: String) -> crate::worker::Event {
+    let song = music_video::song_for(&api, &uri).await.ok().flatten();
+    Event::SongOf { uri, song }.into()
+}
+
+async fn artist_videos(api: Api, uri: String, offset: u32) -> crate::worker::Event {
+    let result = music_video::artist_videos(&api, &uri, offset)
+        .await
+        .map_err(|_| "Something went wrong while loading the artist’s music videos.".to_owned());
+    Event::ArtistVideos {
+        uri,
+        offset,
+        result,
+    }
+    .into()
+}
+
+async fn now_episode(api: Api, uri: String) -> crate::worker::Event {
+    let episode = podcast::episode(&api, &uri).await.ok().map(Box::new);
+    Event::NowEpisode { uri, episode }.into()
 }
 
 async fn locate(api: Api, uri: String) -> crate::worker::Event {

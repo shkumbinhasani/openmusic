@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod screen;
 pub mod state;
 pub mod transcript;
 pub mod video;

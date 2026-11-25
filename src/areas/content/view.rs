@@ -34,6 +34,8 @@ const SETTING_INSET: f32 = 14.;
 const CANVAS_TEXT: &str = "Short, looping visuals when a song is playing.";
 const CANVAS_STILL: &str =
     "Reduce Motion is on in System Settings, so the cover shows instead of Canvas.";
+const MUSIC_VIDEOS_TEXT: &str = "When off, music videos and live performances play as audio-only.";
+const VIDEO_PODCASTS_TEXT: &str = "When off, video podcasts play as audio-only.";
 
 fn settings_section(title: &'static str, rows: Vec<AnyElement>, palette: Palette) -> AnyElement {
     let count = rows.len();
@@ -270,9 +272,32 @@ impl OpenMusic {
         if self.settings.content.canvas && self.content.canvas.reduce_motion {
             description.push(CANVAS_STILL);
         }
+        let music = Switch::new("settings-music-videos")
+            .checked(self.settings.content.music_videos)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                let on = *checked;
+                this.update_settings(|settings| settings.content.music_videos = on);
+                cx.notify();
+            }));
+        let podcasts = Switch::new("settings-video-podcasts")
+            .checked(self.settings.content.video_podcasts)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                let on = *checked;
+                this.update_settings(|settings| settings.content.video_podcasts = on);
+                cx.notify();
+            }));
         Some(settings_section(
             "Videos and Canvas",
-            vec![setting_row("Canvas", description, switch, palette)],
+            vec![
+                setting_row("Canvas", description, switch, palette),
+                setting_row("Music videos", vec![MUSIC_VIDEOS_TEXT], music, palette),
+                setting_row(
+                    "Video podcasts",
+                    vec![VIDEO_PODCASTS_TEXT],
+                    podcasts,
+                    palette,
+                ),
+            ],
             palette,
         ))
     }
@@ -1520,9 +1545,9 @@ impl OpenMusic {
         &self,
         _card_side: Pixels,
         palette: Palette,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
+        self.screen_page(palette, cx)
     }
 }
 
@@ -1764,14 +1789,28 @@ fn menu_item(choice: Choice) -> MenuItem {
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
-    vec![NavEntry::new(
-        "nav-lyrics",
-        300,
-        icons::LYRICS,
-        "Lyrics",
-        app.page == Page::Lyrics,
-        |app, _, _| app.show_lyrics(true),
-    )]
+    vec![
+        NavEntry::new(
+            "nav-lyrics",
+            300,
+            icons::LYRICS,
+            "Lyrics",
+            app.page == Page::Lyrics,
+            |app, _, _| app.show_lyrics(true),
+        ),
+        NavEntry::new(
+            "nav-now-playing",
+            310,
+            icons::NOTE,
+            "Now Playing",
+            app.page == Page::NowPlaying,
+            |app, _, _| {
+                if app.page != Page::NowPlaying {
+                    app.navigate(Page::NowPlaying);
+                }
+            },
+        ),
+    ]
 }
 
 pub fn dock_items(

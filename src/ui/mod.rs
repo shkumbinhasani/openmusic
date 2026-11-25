@@ -494,5 +494,6 @@ impl Render for OpenMusic {
             .children(Root::render_notification_layer(window, cx))
             .child(glass::finish())
             .child(overlay::finish())
+            .child(crate::areas::content::video::finish())
     }
 }

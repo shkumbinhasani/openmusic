@@ -86,6 +86,7 @@ pub struct Conditions {
     pub reduce_motion: bool,
     pub visible: bool,
     pub explicit_filtered: bool,
+    pub screen: bool,
 }
 
 impl Conditions {
@@ -108,7 +109,7 @@ pub fn want(
     canvas: Option<&Canvas>,
     conditions: Conditions,
 ) -> Option<Want> {
-    if !conditions.moving() {
+    if !conditions.moving() || conditions.screen {
         return None;
     }
     let canvas = canvas.filter(|canvas| {
@@ -142,6 +143,7 @@ impl OpenMusic {
             explicit_filtered: self
                 .account()
                 .is_some_and(|account| account.explicit_filtered),
+            screen: self.video_on(),
         }
     }
 
@@ -158,6 +160,12 @@ impl OpenMusic {
         }
         let canvas = self.content.canvas.known(&track).flatten();
         video::sync(want(&track, playing, canvas, conditions).as_ref());
+    }
+
+    pub fn canvas_want(&self) -> Option<Want> {
+        let (track, playing) = self.canvas_subject()?;
+        let canvas = self.content.canvas.known(&track).flatten();
+        want(&track, playing, canvas, self.canvas_conditions())
     }
 
     pub fn canvas_tick(&mut self) {
@@ -206,6 +214,9 @@ impl OpenMusic {
         if conditions.reduce_motion {
             return Some("still");
         }
+        if conditions.screen {
+            return Some("video");
+        }
         let canvases = &self.content.canvas;
         let now = Instant::now();
         Some(match canvases.known(&track) {
@@ -224,11 +235,12 @@ impl OpenMusic {
         let canvases = &self.content.canvas;
         let _ = writeln!(
             lines,
-            "setting={} reduce_motion={} visible={} explicit_filtered={} cached={}",
+            "setting={} reduce_motion={} visible={} explicit_filtered={} screen={} cached={}",
             conditions.enabled,
             conditions.reduce_motion,
             conditions.visible,
             conditions.explicit_filtered,
+            conditions.screen,
             canvases.len(),
         );
         match self.canvas_subject() {
@@ -305,6 +317,7 @@ mod tests {
             reduce_motion: false,
             visible: true,
             explicit_filtered: false,
+            screen: false,
         }
     }
 
@@ -373,6 +386,11 @@ mod tests {
         };
         assert_eq!(want(TRACK, true, Some(&explicit), filtered), None);
         assert!(want(TRACK, true, Some(&looping), filtered).is_some());
+        let video = Conditions {
+            screen: true,
+            ..open()
+        };
+        assert_eq!(want(TRACK, true, Some(&looping), video), None);
     }
 
     #[test]

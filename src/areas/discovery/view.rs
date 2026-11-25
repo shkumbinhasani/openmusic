@@ -147,6 +147,7 @@ impl OpenMusic {
                         }),
                 )
             })
+            .children(self.artist_videos_section(loaded, card_side, palette, cx))
             .when_some(artist.biography.clone(), |page, biography| {
                 let (text, long) = about_text(&biography, about_open);
                 page.child(
