@@ -178,6 +178,9 @@ fn link_uri(parts: &[&str]) -> Result<String> {
         ["genre", id] if plain(id) => Ok(format!("spotify:genre:{id}")),
         ["page", id] if plain(id) => Ok(format!("spotify:page:{id}")),
         ["socialsession", token] if plain(token) => Ok(format!("spotify:socialsession:{token}")),
+        ["blend", "taste-match", id] if crate::blend::valid_id(id) => {
+            Ok(format!("spotify:blend:taste-match:{id}"))
+        }
         _ => anyhow::bail!("OpenMusic can’t open this kind of Spotify link."),
     }
 }
@@ -476,6 +479,8 @@ pub struct Capabilities {
     pub edit_metadata: bool,
     pub administrate: bool,
     pub publish: bool,
+    pub delete: bool,
+    pub cancel_membership: bool,
 }
 
 impl Capabilities {
@@ -487,6 +492,8 @@ impl Capabilities {
             edit_metadata: flag("canEditMetadata"),
             administrate: flag("canAdministratePermissions"),
             publish: flag("canPublishToProfile"),
+            delete: flag("canDelete"),
+            cancel_membership: flag("canCancelMembership"),
         }
     }
 }
@@ -506,6 +513,10 @@ pub struct Collection {
     pub format: Option<String>,
     pub capabilities: Capabilities,
     pub metadata: HashMap<String, String>,
+    pub total: usize,
+    pub next: Option<usize>,
+    pub picture: Option<String>,
+    pub attributions: HashMap<String, Vec<crate::blend::Attribution>>,
 }
 
 pub(crate) fn filled(value: &Value) -> Option<String> {
@@ -551,38 +562,8 @@ pub async fn playlists(api: &Api, user: &str) -> Result<Vec<Playlist>> {
 }
 
 pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
-    let id = uri.rsplit(':').next().unwrap_or_default();
-    if uri.starts_with("spotify:playlist:") {
-        let value: Value = api
-            .get_json(&format!(
-                "/playlist/v2/playlist/{id}?decorate=revision,length,attributes,timestamp,owner,capabilities&from=0&length=0"
-            ))
-            .await?;
-        let attributes = &value["attributes"];
-        let resolved = resolve(api, uri, 150).await?;
-        let tracks = item_tracks(api, &resolved.items).await?;
-        let description = strip_tags(attributes["description"].as_str().unwrap_or_default());
-        let count = value["length"].as_u64().unwrap_or(tracks.len() as u64);
-        let subtitle = if description.is_empty() {
-            format!("{count} songs")
-        } else {
-            format!("{description} · {count} songs")
-        };
-        return Ok(Collection {
-            uri: uri.to_owned(),
-            kind: "PLAYLIST".into(),
-            name: attributes["name"].as_str().unwrap_or("Playlist").to_owned(),
-            subtitle,
-            cover: playlist_cover(attributes),
-            artist_uri: None,
-            tracks,
-            owner: filled(&value["ownerUsername"]),
-            description,
-            revision: filled(&value["revision"]),
-            format: filled(&attributes["format"]),
-            capabilities: Capabilities::from_playlist(&value["capabilities"]),
-            metadata: resolved.metadata,
-        });
+    if crate::playlist::playlist_id(uri).is_some() {
+        return crate::playlist::collection(api, uri, crate::playlist::PAGE).await;
     }
     if uri.starts_with("spotify:album:") {
         let data = extended(api, &[(uri.to_owned(), ExtensionKind::AlbumV4)]).await?;
@@ -593,6 +574,7 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
             .ok_or_else(|| anyhow::anyhow!("Spotify has no details for this album."))?;
         let resolved = resolve(api, uri, 150).await?;
         let tracks = item_tracks(api, &resolved.items).await?;
+        let total = tracks.len();
         let artist = album.artist.first();
         let year = album.date.and_then(|date| date.year);
         let subtitle = [
@@ -627,6 +609,10 @@ pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
                 ..Capabilities::default()
             },
             metadata: resolved.metadata,
+            total,
+            next: None,
+            picture: None,
+            attributions: HashMap::new(),
         });
     }
     anyhow::bail!("OpenMusic can only open albums and playlists.")
@@ -944,6 +930,11 @@ mod tests {
             uri("spotify:socialsession:jamtoken123"),
             "spotify:socialsession:jamtoken123"
         );
+        assert_eq!(
+            uri("https://open.spotify.com/blend/taste-match/AbC-123_x?si=1"),
+            "spotify:blend:taste-match:AbC-123_x"
+        );
+        assert!(parse_link("https://open.spotify.com/blend/taste-match/").is_err());
         assert!(parse_link("spotify:user:").is_err());
         assert!(parse_link("spotify:collection:tracks").is_err());
     }
@@ -1123,6 +1114,8 @@ mod tests {
                 edit_metadata: true,
                 administrate: false,
                 publish: true,
+                delete: false,
+                cancel_membership: false,
             }
         );
         assert_eq!(

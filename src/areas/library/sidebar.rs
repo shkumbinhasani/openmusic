@@ -5,15 +5,16 @@ use gpui::{
 use gpui_component::{Sizable, input::Input, tooltip::Tooltip};
 use spotify_client::{
     entity,
-    library::{ItemKind, LibraryItem},
+    library::{CUSTOM_ORDER, ItemKind, LibraryItem, PLAYLISTS},
 };
 
 use super::{
-    state::LIBRARY_CONTEXT,
+    state::{LIBRARY_CONTEXT, State},
     view::{LIBRARY_ROW, PLAYLIST_ROW, ROW_BADGES, item_page},
 };
 use crate::{
     app::OpenMusic,
+    areas::playlists,
     icons, menus, overlay,
     ui::{
         Palette,
@@ -42,6 +43,18 @@ pub(super) fn empty_text(filter: Option<&str>) -> (&'static str, &'static str) {
             "Save songs, albums and playlists to see them here.",
         ),
     }
+}
+
+fn custom_order(library: &State) -> bool {
+    let filters = &library.query.filters;
+    let playlists = filters.is_empty() || (filters.len() == 1 && filters[0] == PLAYLISTS);
+    playlists
+        && library.query.text.is_none()
+        && library
+            .page
+            .as_ref()
+            .and_then(|page| page.sort.as_ref())
+            .is_some_and(|sort| sort.id == CUSTOM_ORDER)
 }
 
 impl OpenMusic {
@@ -117,30 +130,22 @@ impl OpenMusic {
             }))
     }
 
-    pub fn open_create_menu(&mut self, cx: &mut Context<Self>) {
-        let playlist = cx.is_action_available(&menus::NewPlaylist);
-        let folder = cx.is_action_available(&menus::NewFolder);
+    pub fn create_menu_items(&self, cx: &mut Context<Self>) -> Vec<MenuItem> {
         let jam = cx.is_action_available(&menus::StartJam);
-        let items = vec![
-            MenuItem::action("Playlist", |_, window, cx| {
-                window.dispatch_action(Box::new(menus::NewPlaylist), cx)
-            })
-            .symbol("music.note.list")
-            .subtitle("Create a playlist with songs or episodes")
-            .enabled(playlist),
-            MenuItem::action("Folder", |_, window, cx| {
-                window.dispatch_action(Box::new(menus::NewFolder), cx)
-            })
-            .symbol("folder")
-            .subtitle("Organize your playlists")
-            .enabled(folder),
+        let mut items = playlists::view::create_menu();
+        items.push(
             MenuItem::action("Jam", |_, window, cx| {
                 window.dispatch_action(Box::new(menus::StartJam), cx)
             })
             .symbol("person.2.wave.2")
             .subtitle("Listen together from anywhere")
             .enabled(jam),
-        ];
+        );
+        items
+    }
+
+    pub fn open_create_menu(&mut self, cx: &mut Context<Self>) {
+        let items = self.create_menu_items(cx);
         self.show_menu(items, Place::Under("library-create"), None);
     }
 
@@ -465,6 +470,7 @@ impl OpenMusic {
         index: usize,
         item: &LibraryItem,
         show_kind: bool,
+        reorder: bool,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
@@ -483,6 +489,7 @@ impl OpenMusic {
             .is_some_and(|uri| self.library.query.expanded.contains(uri));
         let menu_uri = item.uri.clone();
         let subtitle = item.subtitle(show_kind);
+        let draggable = reorder && matches!(item.kind, ItemKind::Playlist | ItemKind::Folder);
         div()
             .id(row)
             .h(px(ROW_HEIGHT))
@@ -596,6 +603,13 @@ impl OpenMusic {
                     cx.notify();
                 }
             }))
+            .map(|line| {
+                if draggable {
+                    self.library_drag(line, &item.uri, &item.name, palette, cx)
+                } else {
+                    line
+                }
+            })
     }
 
     fn library_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -635,12 +649,11 @@ impl OpenMusic {
             });
         }
         let show_kind = library.show_kind();
+        let reorder = custom_order(library);
         list.children(
-            library
-                .items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| self.library_row(index, item, show_kind, palette, cx)),
+            library.items.iter().enumerate().map(|(index, item)| {
+                self.library_row(index, item, show_kind, reorder, palette, cx)
+            }),
         )
         .child(scroll_sentinel(&library.sentinel))
         .map(|list| {

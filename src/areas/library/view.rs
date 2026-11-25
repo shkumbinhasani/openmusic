@@ -7,6 +7,7 @@ use spotify_client::{
 use super::{liked::LIKED_ROW, saves};
 use crate::{
     app::{OpenMusic, Page, page_for},
+    areas::playlists,
     icons,
     ui::{
         Palette,
@@ -23,7 +24,7 @@ pub const LIBRARY_ROW: &str = "library";
 
 pub type RowBadge = fn(&OpenMusic, &LibraryItem, Palette) -> Option<AnyElement>;
 
-pub const ROW_BADGES: &[RowBadge] = &[];
+pub const ROW_BADGES: &[RowBadge] = &[playlists::view::blend_badge];
 
 pub fn item_page(item: &LibraryItem) -> Option<Page> {
     if !item.available {

@@ -289,6 +289,10 @@ mod tests {
                 ..Capabilities::default()
             },
             metadata: HashMap::new(),
+            total: 0,
+            next: None,
+            picture: None,
+            attributions: HashMap::new(),
         }
     }
 
