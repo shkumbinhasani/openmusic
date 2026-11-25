@@ -343,6 +343,7 @@ impl OpenMusic {
             }
         }
         if !stale.is_empty() {
+            self.account.local.forget_art(&stale);
             self.send(Command::ForgetCovers(stale));
         }
     }

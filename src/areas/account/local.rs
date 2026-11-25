@@ -300,6 +300,12 @@ impl LocalLibrary {
         urls.extend(self.rows.keys().cloned());
     }
 
+    pub fn forget_art(&mut self, keys: &[String]) {
+        for key in keys {
+            self.art_requested.remove(key);
+        }
+    }
+
     pub fn reindex(&mut self) {
         self.index = LocalIndex::build(&self.files);
         self.version += 1;
@@ -682,6 +688,7 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
 pub fn signed_out(local: &mut LocalLibrary) {
     local.scanning = false;
     local.scanned = None;
+    local.art_requested.clear();
 }
 
 pub fn on_scan(app: &mut OpenMusic, update: ScanUpdate) {
@@ -1070,6 +1077,23 @@ mod tests {
         let mut urls = HashSet::new();
         local.covers(&mut urls);
         assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn asks_again_for_art_that_was_dropped() {
+        let mut local = LocalLibrary {
+            art_requested: ["local-art:1", "local-art:2", "local-art:3"]
+                .map(str::to_owned)
+                .into(),
+            ..LocalLibrary::default()
+        };
+        local.forget_art(&["local-art:2".to_owned(), "https://i.scdn.co/x".to_owned()]);
+        assert_eq!(
+            local.art_requested,
+            ["local-art:1", "local-art:3"].map(str::to_owned).into()
+        );
+        signed_out(&mut local);
+        assert!(local.art_requested.is_empty());
     }
 
     #[test]
