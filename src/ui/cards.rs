@@ -172,17 +172,22 @@ impl OpenMusic {
     pub fn facepile(&self, faces: &[Face], side: Pixels, max: usize, palette: Palette) -> Div {
         let shown = faces.len().min(max.max(1));
         let hidden = faces.len() - shown;
+        let overlap = side * 0.3;
+        let rings = shown + usize::from(hidden > 0);
+        let width = (side + px(4.)) * rings as f32 - overlap * rings.saturating_sub(1) as f32;
         let ring = |face: Div, index: usize| {
             div()
                 .flex_shrink_0()
                 .rounded_full()
                 .border_2()
                 .border_color(rgb(palette.canvas))
-                .when(index > 0, |face| face.ml(side * -0.3))
+                .when(index > 0, |face| face.ml(-overlap))
                 .child(face)
         };
         div()
             .flex()
+            .flex_none()
+            .w(width)
             .items_center()
             .children(faces.iter().take(shown).enumerate().map(|(index, face)| {
                 ring(
