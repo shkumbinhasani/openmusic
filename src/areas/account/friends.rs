@@ -29,6 +29,7 @@ pub struct Friends {
     pub loading: bool,
     pub asked: Option<Instant>,
     pub slow: bool,
+    pub fetches: u32,
     pub drawn: Cell<Option<Instant>>,
 }
 
@@ -57,6 +58,7 @@ impl Friends {
     pub fn ask(&mut self, now: Instant) {
         self.loading = true;
         self.asked = Some(now);
+        self.fetches = self.fetches.saturating_add(1);
     }
 
     pub fn answer(&mut self, result: Result<Vec<Friend>, String>, slow: bool) {
@@ -139,11 +141,12 @@ pub fn describe(app: &OpenMusic) -> String {
     let friends = &app.account.friends;
     let now = now_ms();
     let mut lines = vec![format!(
-        "setting={} shown={} loaded={} loading={} count={} wait={} error={}",
+        "setting={} shown={} loaded={} loading={} fetches={} count={} wait={} error={}",
         if app.friends_on() { "on" } else { "off" },
         friends.shown(Instant::now()),
         friends.loaded,
         friends.loading,
+        friends.fetches,
         friends.items.len(),
         friends.wait().as_secs(),
         friends.error.as_deref().unwrap_or("none"),
@@ -187,6 +190,7 @@ mod tests {
         friends.drawn.set(Some(start));
         assert!(friends.shown(start));
         friends.ask(start);
+        assert_eq!(friends.fetches, 1);
         assert!(!friends.due(start + POLL));
         friends.answer(Ok(Vec::new()), false);
         assert!(friends.loaded);
