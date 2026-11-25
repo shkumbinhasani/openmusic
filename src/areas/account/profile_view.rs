@@ -275,6 +275,21 @@ impl OpenMusic {
         let actions = self.profile_actions(view, palette, cx);
         let blocked = !profile.is_current_user
             && self.account.profiles.known_blocking(&profile.uri) == Some(true);
+        let editable = profile.is_current_user && self.can_edit_name();
+        let name = div()
+            .id("profile-name")
+            .max_w_full()
+            .text_size(px(40.))
+            .font_weight(FontWeight::BOLD)
+            .truncate()
+            .child(profile.name.clone())
+            .when(editable, |name| {
+                name.cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.edit_display_name(window, cx);
+                        cx.notify();
+                    }))
+            });
         div()
             .flex()
             .items_center()
@@ -284,8 +299,22 @@ impl OpenMusic {
                 self.on_menu(None, move |_| Some(target.clone()), cx),
             )
             .child(
-                self.avatar(&profile.name, profile.image.as_deref(), px(176.), palette)
-                    .shadow_lg(),
+                div()
+                    .id("profile-picture")
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .child(
+                        self.avatar(&profile.name, profile.image.as_deref(), px(176.), palette)
+                            .shadow_lg(),
+                    )
+                    .when(editable, |picture| {
+                        picture
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.edit_display_name(window, cx);
+                                cx.notify();
+                            }))
+                    }),
             )
             .child(
                 div()
@@ -302,14 +331,7 @@ impl OpenMusic {
                             .text_color(rgb(palette.accent))
                             .child("PROFILE"),
                     )
-                    .child(
-                        div()
-                            .text_size(px(40.))
-                            .font_weight(FontWeight::BOLD)
-                            .truncate()
-                            .w_full()
-                            .child(profile.name.clone()),
-                    )
+                    .child(div().w_full().min_w_0().flex().child(name))
                     .when(!stats.is_empty(), |column| {
                         column.child(
                             div()

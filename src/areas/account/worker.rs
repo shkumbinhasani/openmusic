@@ -40,6 +40,8 @@ pub enum Command {
         field: PrivacyField,
         value: bool,
     },
+    SetName(String),
+    RefreshSoon,
 }
 
 pub struct ProfileView {
@@ -142,6 +144,10 @@ pub enum Event {
         saved: bool,
         now: Option<Privacy>,
     },
+    NameSaved {
+        name: String,
+        done: bool,
+    },
 }
 
 impl Event {
@@ -165,7 +171,8 @@ impl Event {
             | Self::Blocked { .. }
             | Self::BlockState(_)
             | Self::Privacy(_)
-            | Self::PrivacySaved { .. } => Vec::new(),
+            | Self::PrivacySaved { .. }
+            | Self::NameSaved { .. } => Vec::new(),
         }
     }
 }
@@ -213,6 +220,16 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 Ok(privacy_write(api, user, field, value).await)
             }));
         }
+        Command::SetName(name) => {
+            let (api, user) = (ctx.api.clone(), ctx.user.clone());
+            ctx.writes
+                .push(Mutation::new(vec!["profile:name".to_owned()], async move {
+                    Ok(rename(api, user, name).await)
+                }));
+        }
+        Command::RefreshSoon => ctx
+            .tasks
+            .spawn_keyed("account-later", fetch(ctx.api.clone(), Some(SECOND_LOOK))),
     }
 }
 
@@ -382,6 +399,14 @@ async fn privacy_write(
         now: written.flatten(),
     }
     .into()
+}
+
+async fn rename(api: Api, user: User, name: String) -> crate::worker::Event {
+    let done = match user.name(&api).await {
+        Ok(me) => social::set_display_name(&api, &me, &name).await.is_ok(),
+        Err(_) => false,
+    };
+    Event::NameSaved { name, done }.into()
 }
 
 pub fn block_message(block: bool, done: bool) -> &'static str {

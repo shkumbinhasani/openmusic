@@ -1,11 +1,12 @@
 use std::{collections::HashSet, path::Path};
 
-use gpui::{App, Context, PromptButton, PromptLevel, Window};
+use gpui::{App, Context, Entity, PromptButton, PromptLevel, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spotify_client::account::{AccountInfo, Explicit};
 
 use super::{
+    name::{self, NameEditor},
     privacy::{self, PrivacyState},
     profile::{self, Profiles},
     profile_view::{FOLLOW_PROFILE, MORE_PROFILE, UNBLOCK_PROFILE},
@@ -217,6 +218,7 @@ pub struct State {
     pub cache_busy: bool,
     pub profiles: Profiles,
     pub privacy: PrivacyState,
+    pub name_editor: Option<Entity<NameEditor>>,
 }
 
 impl State {
@@ -462,8 +464,8 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
 pub fn on_event(
     app: &mut OpenMusic,
     event: Event,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) {
     match event {
         Event::Account(result) => {
@@ -495,6 +497,7 @@ pub fn on_event(
             saved,
             now,
         } => privacy::on_saved(app, field, value, saved, now),
+        Event::NameSaved { name, done } => name::on_saved(app, name, done, window, cx),
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -561,6 +564,7 @@ pub fn debug(
         }
         "account-menu" => app.open_account_menu(),
         "privacy" => privacy::debug(app, rest, directory),
+        "display-name" => name::debug(app, rest, directory, window, cx),
         "profile" | "profiles" | "follow-user" | "follows" | "block" | "block-ask" | "blocking" => {
             return profile::debug(app, verb, rest, directory, window, cx);
         }

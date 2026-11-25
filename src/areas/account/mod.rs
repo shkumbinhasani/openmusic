@@ -1,3 +1,4 @@
+pub mod name;
 pub mod privacy;
 pub mod profile;
 pub mod profile_view;

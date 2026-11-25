@@ -473,8 +473,16 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     let Target::User { uri } = target else {
         return Vec::new();
     };
-    if app.is_own_profile(uri) || username(uri).is_none() {
+    if username(uri).is_none() {
         return Vec::new();
+    }
+    if app.is_own_profile(uri) {
+        let edit = MenuItem::action("Edit profile", |app, window, cx| {
+            app.edit_display_name(window, cx)
+        })
+        .symbol("pencil")
+        .enabled(app.can_edit_name());
+        return vec![(Group::Edit, edit)];
     }
     let profiles = &app.account.profiles;
     let blocked = profiles.known_blocking(uri) == Some(true);

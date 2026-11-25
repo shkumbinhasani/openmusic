@@ -6,6 +6,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::{
+    account::{IdentityProfile, Wrapped, identity_path},
     api::{Api, Body},
     catalog::{self, Track},
     entity,
@@ -631,6 +632,46 @@ pub async fn set_privacy(
     Ok(())
 }
 
+#[derive(Clone, PartialEq, Message)]
+pub struct ProfileUpdate {
+    #[prost(message, optional, tag = "1")]
+    pub mask: Option<FieldMask>,
+    #[prost(message, optional, tag = "2")]
+    pub user_profile: Option<IdentityProfile>,
+}
+
+pub fn display_name(text: &str) -> Option<String> {
+    let name = text.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+pub fn name_update(name: &str) -> Vec<u8> {
+    ProfileUpdate {
+        mask: Some(FieldMask {
+            paths: vec!["name".to_owned()],
+        }),
+        user_profile: Some(IdentityProfile {
+            name: Some(Wrapped {
+                value: name.to_owned(),
+            }),
+            ..IdentityProfile::default()
+        }),
+    }
+    .encode_to_vec()
+}
+
+pub async fn set_display_name(api: &Api, username: &str, name: &str) -> Result<()> {
+    let Some(name) = display_name(name) else {
+        bail!("Display name is required.");
+    };
+    if username.is_empty() {
+        bail!("No Spotify username to rename.");
+    }
+    api.protobuf(Method::POST, &identity_path(username), name_update(&name))
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,6 +1024,35 @@ mod tests {
             assert!(field.get(&privacy));
         }
         assert_eq!(PrivacyField::AllowFollows.path(), "allow_follows");
+    }
+
+    #[test]
+    fn asks_to_change_only_the_name() {
+        let mut expected = vec![0x0a, 6, 0x0a, 4];
+        expected.extend(b"name");
+        expected.extend([0x12, 12, 0x12, 10, 0x0a, 8]);
+        expected.extend(b"New Name");
+        assert_eq!(name_update("New Name"), expected);
+
+        let update = ProfileUpdate::decode(name_update("Zoë").as_slice()).unwrap();
+        let profile = update.user_profile.unwrap();
+        assert_eq!(profile.name.unwrap().value, "Zoë");
+        assert_eq!(profile.username, None);
+        assert!(profile.images.is_empty());
+
+        assert_eq!(display_name("  New  Name \n").as_deref(), Some("New  Name"));
+        assert_eq!(display_name(" \t "), None);
+    }
+
+    #[test]
+    fn reads_whether_the_name_can_change() {
+        let mut reply = own_profile();
+        assert!(!parse_profile(&reply).unwrap().name_locked);
+        reply["edit_name_disabled"] = json!(true);
+        assert!(parse_profile(&reply).unwrap().name_locked);
+        let mut reply = own_profile();
+        reply["edit_profile_disabled"] = json!(true);
+        assert!(parse_profile(&reply).unwrap().name_locked);
     }
 
     #[test]
