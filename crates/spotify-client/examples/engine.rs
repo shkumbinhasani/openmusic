@@ -157,7 +157,10 @@ async fn scenario() -> Result<()> {
                 started.elapsed().as_secs_f32(),
                 message.uri
             ),
-            Update::Audio(update) => match update {},
+            Update::Audio(update) => println!(
+                "[{:>4.1}s] audio: {update:?}",
+                started.elapsed().as_secs_f32()
+            ),
             Update::Notice(message) => println!(
                 "[{:>4.1}s] notice: {message}",
                 started.elapsed().as_secs_f32()

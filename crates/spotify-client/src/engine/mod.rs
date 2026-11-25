@@ -243,6 +243,7 @@ struct Engine {
     published: Option<(PublishedKey, u32, Instant)>,
     published_playback: Option<PlaybackKey>,
     remote: remote::State,
+    audio: playback::State,
 }
 
 #[derive(PartialEq)]
@@ -341,6 +342,7 @@ async fn run(
         published: None,
         published_playback: None,
         remote: remote::State::default(),
+        audio: playback::State::default(),
     };
     let mut refresh_at = tokio::time::Instant::from_std(token.refresh_due());
 
@@ -603,6 +605,9 @@ impl Engine {
     }
 
     fn publish(&mut self, updates: &mpsc::UnboundedSender<Update>) {
+        for update in self.audio.take_updates() {
+            let _ = updates.send(Update::Audio(update));
+        }
         if let Some(playback) = &self.playback {
             let key = PlaybackKey::of(playback);
             if self.published_playback.as_ref() != Some(&key) {

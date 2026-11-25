@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -12,6 +13,7 @@ use crate::{
     api::Body,
     catalog::{LocalTrack, Track, image_url},
     connect::{Repeat, Shuffle},
+    playback_settings::LoudnessLevel,
     player::{Media, PlayerEvent},
 };
 
@@ -21,10 +23,93 @@ pub enum Control {
         tracks: Vec<LocalTrack>,
         index: usize,
     },
+    Settings(AudioSettings),
+    Report,
 }
 
 #[derive(Clone, Debug)]
-pub enum Update {}
+pub enum Update {
+    Report(Box<AudioReport>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioSettings {
+    pub gapless: bool,
+    pub crossfade: bool,
+    pub crossfade_ms: u32,
+    pub normalize: bool,
+    pub level: LoudnessLevel,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            gapless: true,
+            crossfade: false,
+            crossfade_ms: 0,
+            normalize: true,
+            level: LoudnessLevel::Normal,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReportItem {
+    pub generation: u64,
+    pub uri: String,
+    pub position_ms: u32,
+    pub duration_ms: u32,
+    pub paused: bool,
+    pub format: String,
+    pub bitrate: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioReport {
+    pub settings: AudioSettings,
+    pub playing: Option<ReportItem>,
+}
+
+impl fmt::Display for AudioReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let settings = &self.settings;
+        writeln!(
+            f,
+            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={}",
+            settings.gapless,
+            settings.crossfade,
+            settings.crossfade_ms,
+            settings.normalize,
+            settings.level.name()
+        )?;
+        match &self.playing {
+            Some(item) => writeln!(
+                f,
+                "playing generation={} uri={} position={} duration={} paused={} format={} bitrate={}",
+                item.generation,
+                item.uri,
+                item.position_ms,
+                item.duration_ms,
+                item.paused,
+                item.format,
+                item.bitrate
+            ),
+            None => writeln!(f, "playing none"),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct State {
+    settings: AudioSettings,
+    updates: Vec<Update>,
+}
+
+impl State {
+    pub(super) fn take_updates(&mut self) -> Vec<Update> {
+        std::mem::take(&mut self.updates)
+    }
+}
 
 pub(super) struct Playing {
     machine: Value,
@@ -147,6 +232,35 @@ impl Engine {
     pub(super) async fn audio(&mut self, control: Control) -> Result<()> {
         match control {
             Control::PlayLocal { .. } => bail!("Local files can’t play yet."),
+            Control::Settings(settings) => self.audio.settings = settings,
+            Control::Report => {
+                let report = self.audio_report();
+                self.audio.updates.push(Update::Report(Box::new(report)));
+            }
+        }
+        Ok(())
+    }
+
+    fn audio_report(&self) -> AudioReport {
+        AudioReport {
+            settings: self.audio.settings,
+            playing: self.playing.as_ref().map(|playing| ReportItem {
+                generation: playing.generation,
+                uri: playing
+                    .track()
+                    .and_then(|track| track["metadata"]["uri"].as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                position_ms: playing.position_ms,
+                duration_ms: playing.duration_ms,
+                paused: playing.paused,
+                format: playing
+                    .format
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| playing.format.to_string()),
+                bitrate: playing.bitrate,
+            }),
         }
     }
 
