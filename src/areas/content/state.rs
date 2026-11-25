@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     app::{OpenMusic, Page},
-    menus::Handle,
+    menus::{GoLyrics, Handle, route},
     ui::{
         components::Sentinel,
         menu::Target,
@@ -1133,7 +1133,12 @@ fn page_fragment(app: &OpenMusic) -> String {
     }
 }
 
-pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
+pub fn register_actions(cx: &mut App, handle: &Handle) {
+    route(cx, handle, |_: &GoLyrics, app, _, cx| {
+        app.show_lyrics(app.page != Page::Lyrics);
+        cx.notify();
+    });
+}
 
 pub fn on_press(
     app: &mut OpenMusic,
