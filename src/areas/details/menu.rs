@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use spotify_client::{
     catalog::{Collection, Link},
     details::hide_context,
@@ -11,12 +9,12 @@ use crate::{
     ui::menu::{Group, MenuItem, Target, TrackTarget},
 };
 
-use super::{feedback, feedback::Sets, go, share};
+use super::{feedback, feedback::Sets, go, lookup::Lookups, share};
 
 pub struct Facts<'a> {
     pub page: &'a Page,
     pub sets: &'a Sets,
-    pub artists: &'a HashMap<String, Vec<Link>>,
+    pub artists: &'a Lookups<Vec<Link>>,
     pub collection: Option<&'a Collection>,
 }
 
@@ -180,6 +178,8 @@ pub fn describe(items: &[MenuItem], depth: usize, lines: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use spotify_client::{
         Track,
         catalog::{Capabilities, Collection, Link},
@@ -209,7 +209,7 @@ mod tests {
     struct World {
         page: Page,
         sets: Sets,
-        artists: HashMap<String, Vec<Link>>,
+        artists: Lookups<Vec<Link>>,
         collection: Option<Collection>,
     }
 
@@ -220,7 +220,7 @@ mod tests {
             Self {
                 page: Page::Home,
                 sets,
-                artists: HashMap::new(),
+                artists: Lookups::default(),
                 collection: None,
             }
         }
@@ -411,9 +411,15 @@ mod tests {
                 .menu(&target)
                 .contains(&"Go to artist  alt-a  <music.mic>".to_owned())
         );
-        world.artists.insert(
+        world.artists.answer(SONG.into(), Err("offline".into()));
+        assert!(
+            world
+                .menu(&target)
+                .contains(&"Go to artist  alt-a  <music.mic>".to_owned())
+        );
+        world.artists.answer(
             SONG.into(),
-            vec![
+            Ok(vec![
                 Link {
                     uri: RADIOHEAD.into(),
                     name: "Radiohead".into(),
@@ -422,7 +428,7 @@ mod tests {
                     uri: BOWIE.into(),
                     name: "David Bowie".into(),
                 },
-            ],
+            ]),
         );
         assert!(
             world
@@ -430,7 +436,7 @@ mod tests {
                 .contains(&"Go to artist ▸  <music.mic>".to_owned())
         );
         track.artist_uri = None;
-        world.artists.clear();
+        world.artists = Lookups::default();
         let lines = world.menu(&Target::track(track, None, Surface::NowPlaying));
         assert!(lines.iter().all(|line| !line.starts_with("Go to artist")));
     }

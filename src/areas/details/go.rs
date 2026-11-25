@@ -256,12 +256,13 @@ impl OpenMusic {
         let Some(track) = self.track().filter(|track| track.is_track()) else {
             return;
         };
-        if !track.artists.is_empty() || self.details.artists.contains_key(&track.uri) {
+        if !track.artists.is_empty() {
             return;
         }
         let uri = track.uri.clone();
-        self.details.artists.insert(uri.clone(), Vec::new());
-        self.send(Command::TrackArtists(uri));
+        if self.details.artists.ask(&uri) {
+            self.send(Command::TrackArtists(uri));
+        }
     }
 }
 

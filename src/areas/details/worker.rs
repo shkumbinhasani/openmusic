@@ -78,7 +78,7 @@ pub enum Event {
     },
     TrackArtists {
         uri: String,
-        artists: Vec<Link>,
+        artists: Result<Vec<Link>, String>,
     },
     Radio {
         seed: String,
@@ -190,7 +190,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             Event::Editable { uri, editable }.into()
         }),
         Command::TrackArtists(uri) => ctx.tasks.spawn(async move {
-            let artists = details::track_artists(&api, &uri).await.unwrap_or_default();
+            let artists = details::track_artists(&api, &uri)
+                .await
+                .map_err(|error| error.to_string());
             Event::TrackArtists { uri, artists }.into()
         }),
         Command::Radio(seed) => ctx.tasks.spawn_keyed("radio", radio(api, seed)),

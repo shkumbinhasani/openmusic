@@ -17,6 +17,7 @@ use super::{
     embed::EmbedView,
     feedback::Sets,
     go::{ContentScroll, Highlight},
+    lookup::Lookups,
     menu,
     track::TrackView,
     worker::{Command, Event},
@@ -41,7 +42,7 @@ pub struct State {
     pub credits: credits::Cache,
     pub dialog: Slot<Shown>,
     pub sets: Sets,
-    pub artists: HashMap<String, Vec<Link>>,
+    pub artists: Lookups<Vec<Link>>,
     pub highlight: Option<Highlight>,
     pub radio: Option<String>,
     pub scroll: ContentScroll,
@@ -181,7 +182,7 @@ pub fn on_event(
             app.details.sets.editable.answer(uri, editable);
         }
         Event::TrackArtists { uri, artists } => {
-            app.details.artists.insert(uri, artists);
+            app.details.artists.answer(uri, artists);
         }
         Event::Radio { seed, result } => app.radio_ready(&seed, result),
         Event::TrackPage { uri, result } => {
@@ -438,16 +439,17 @@ pub fn debug(
         ("radio", [seed]) => app.start_radio((*seed).to_owned()),
         ("goalbum", [album, track]) => app.go_to_album((*album).to_owned(), (*track).to_owned()),
         ("artists", [uri]) => {
-            let lines = match app.details.artists.get(*uri) {
+            let lines = match app.details.artists.get(uri) {
                 Some(artists) if !artists.is_empty() => artists
                     .iter()
                     .map(|artist| format!("{} {}", artist.uri, artist.name))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                Some(_) => "pending".to_owned(),
+                Some(_) => "none".to_owned(),
                 None => {
-                    app.details.artists.insert((*uri).to_owned(), Vec::new());
-                    app.send(Command::TrackArtists((*uri).to_owned()));
+                    if app.details.artists.ask(uri) {
+                        app.send(Command::TrackArtists((*uri).to_owned()));
+                    }
                     "pending".to_owned()
                 }
             };
