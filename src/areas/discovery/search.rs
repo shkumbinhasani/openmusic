@@ -987,10 +987,10 @@ impl OpenMusic {
             }
             "suggest" => {
                 let text = rest.to_owned();
-                self.input.update(cx, |input, cx| {
-                    input.focus(window, cx);
-                    input.set_value(text, window, cx);
-                });
+                self.input.update(cx, |input, cx| input.focus(window, cx));
+                self.search_input(&InputEvent::Focus, window, cx);
+                self.input
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
             }
             "suggest-key" => match rest {
                 "up" => self.move_suggestion(false),
@@ -1001,13 +1001,16 @@ impl OpenMusic {
             },
             "recent-searches" => {
                 let (action, uri) = rest.split_once(' ').unwrap_or((rest, ""));
-                match (action, uri.trim()) {
+                let uri = uri.trim();
+                let single = !uri.is_empty() && !uri.contains(char::is_whitespace);
+                match (action, uri) {
                     ("reload", _) => self.load_recent_searches(true),
-                    ("save", uri) if !uri.is_empty() => {
+                    ("save", uri) if single => {
                         let hit = self.known_hit(uri);
                         self.remember_search(hit);
                     }
-                    ("remove", uri) if !uri.is_empty() => self.forget_search(uri),
+                    ("remove", uri) if single => self.forget_search(uri),
+                    ("save" | "remove", _) => {}
                     _ => {
                         let lines: Vec<String> = self
                             .discovery
