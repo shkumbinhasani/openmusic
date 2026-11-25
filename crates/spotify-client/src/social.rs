@@ -35,6 +35,8 @@ pub const RECENT_ARTISTS: usize = 50;
 pub const TOP_PREVIEW_ARTISTS: usize = 10;
 pub const TOP_PREVIEW_TRACKS: usize = 4;
 pub const TOP_ALL: usize = 50;
+pub const PRIVACY_READ: &str = "/profile-privacy/v2/read-settings";
+pub const PRIVACY_STORE: &str = "/profile-privacy/v2/store-settings";
 const IMAGE_SIZE: u32 = 300;
 const PROTOBUF: &str = "application/x-protobuf";
 
@@ -492,6 +494,143 @@ pub async fn set_blocking(api: &Api, me: &str, target: &str, block: bool) -> Res
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Privacy {
+    pub allow_follows: bool,
+    pub show_follows: bool,
+    pub show_playlists: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PrivacyField {
+    AllowFollows,
+    ShowFollows,
+    ShowPlaylists,
+}
+
+impl PrivacyField {
+    pub const FIELDS: [Self; 3] = [Self::AllowFollows, Self::ShowFollows, Self::ShowPlaylists];
+
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::AllowFollows => "allow_follows",
+            Self::ShowFollows => "show_follows",
+            Self::ShowPlaylists => "show_published_playlists",
+        }
+    }
+
+    pub fn get(self, privacy: &Privacy) -> bool {
+        match self {
+            Self::AllowFollows => privacy.allow_follows,
+            Self::ShowFollows => privacy.show_follows,
+            Self::ShowPlaylists => privacy.show_playlists,
+        }
+    }
+
+    pub fn set(self, privacy: &mut Privacy, value: bool) {
+        match self {
+            Self::AllowFollows => privacy.allow_follows = value,
+            Self::ShowFollows => privacy.show_follows = value,
+            Self::ShowPlaylists => privacy.show_playlists = value,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivacyRequest {
+    #[prost(string, tag = "1")]
+    pub username: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivacySettings {
+    #[prost(bool, tag = "3")]
+    pub allow_follows: bool,
+    #[prost(bool, tag = "4")]
+    pub show_follows: bool,
+    #[prost(bool, tag = "5")]
+    pub show_published_playlists: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct FieldMask {
+    #[prost(string, repeated, tag = "1")]
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PrivacyUpdate {
+    #[prost(string, tag = "1")]
+    pub username: String,
+    #[prost(message, optional, tag = "3")]
+    pub mask: Option<FieldMask>,
+    #[prost(bool, optional, tag = "4")]
+    pub allow_follows: Option<bool>,
+    #[prost(bool, optional, tag = "5")]
+    pub show_follows: Option<bool>,
+    #[prost(bool, optional, tag = "6")]
+    pub show_published_playlists: Option<bool>,
+}
+
+pub fn privacy_request(username: &str) -> Vec<u8> {
+    PrivacyRequest {
+        username: username.to_owned(),
+    }
+    .encode_to_vec()
+}
+
+pub fn parse_privacy(bytes: &[u8]) -> Result<Privacy> {
+    let settings =
+        PrivacySettings::decode(bytes).context("Unreadable profile settings from Spotify.")?;
+    Ok(Privacy {
+        allow_follows: settings.allow_follows,
+        show_follows: settings.show_follows,
+        show_playlists: settings.show_published_playlists,
+    })
+}
+
+pub fn privacy_update(username: &str, field: PrivacyField, value: bool) -> Vec<u8> {
+    let only = |wanted: PrivacyField| (field == wanted).then_some(value);
+    PrivacyUpdate {
+        username: username.to_owned(),
+        mask: Some(FieldMask {
+            paths: vec![field.path().to_owned()],
+        }),
+        allow_follows: only(PrivacyField::AllowFollows),
+        show_follows: only(PrivacyField::ShowFollows),
+        show_published_playlists: only(PrivacyField::ShowPlaylists),
+    }
+    .encode_to_vec()
+}
+
+pub async fn privacy(api: &Api, username: &str) -> Result<Privacy> {
+    if username.is_empty() {
+        bail!("No Spotify username to read settings for.");
+    }
+    let bytes = api
+        .protobuf(Method::POST, PRIVACY_READ, privacy_request(username))
+        .await?;
+    parse_privacy(&bytes)
+}
+
+pub async fn set_privacy(
+    api: &Api,
+    username: &str,
+    field: PrivacyField,
+    value: bool,
+) -> Result<()> {
+    if username.is_empty() {
+        bail!("No Spotify username to change settings for.");
+    }
+    api.protobuf(
+        Method::POST,
+        PRIVACY_STORE,
+        privacy_update(username, field, value),
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +929,60 @@ mod tests {
         assert!(!parse_blocking(&[0x08, 0x00]).unwrap());
         assert!(parse_blocking(&[0x08, 0x01, 0x12, 0x01, b'x']).unwrap());
         assert!(parse_blocking(&[0x0a]).is_err());
+    }
+
+    #[test]
+    fn asks_for_privacy_settings() {
+        let mut expected = vec![0x0a, 7];
+        expected.extend(b"someone");
+        assert_eq!(privacy_request("someone"), expected);
+        assert_eq!(
+            parse_privacy(&[0x18, 0x01, 0x20, 0x01, 0x28, 0x01]).unwrap(),
+            Privacy {
+                allow_follows: true,
+                show_follows: true,
+                show_playlists: true,
+            }
+        );
+        assert_eq!(
+            parse_privacy(&[0x18, 0x01, 0x28, 0x01]).unwrap(),
+            Privacy {
+                allow_follows: true,
+                show_follows: false,
+                show_playlists: true,
+            }
+        );
+        assert_eq!(parse_privacy(&[]).unwrap(), Privacy::default());
+        assert!(parse_privacy(&[0x18]).is_err());
+    }
+
+    #[test]
+    fn writes_one_privacy_field_at_a_time() {
+        let mut expected = vec![0x0a, 7];
+        expected.extend(b"someone");
+        expected.extend([0x1a, 14, 0x0a, 12]);
+        expected.extend(b"show_follows");
+        expected.extend([0x28, 0x00]);
+        assert_eq!(
+            privacy_update("someone", PrivacyField::ShowFollows, false),
+            expected
+        );
+
+        let update = PrivacyUpdate::decode(
+            privacy_update("someone", PrivacyField::ShowPlaylists, true).as_slice(),
+        )
+        .unwrap();
+        assert_eq!(update.mask.unwrap().paths, vec!["show_published_playlists"]);
+        assert_eq!(update.show_published_playlists, Some(true));
+        assert_eq!(update.show_follows, None);
+        assert_eq!(update.allow_follows, None);
+
+        let mut privacy = Privacy::default();
+        for field in PrivacyField::FIELDS {
+            field.set(&mut privacy, true);
+            assert!(field.get(&privacy));
+        }
+        assert_eq!(PrivacyField::AllowFollows.path(), "allow_follows");
     }
 
     #[test]

@@ -410,8 +410,9 @@ impl OpenMusic {
         Some(settings_section("Explicit content", rows, palette))
     }
 
-    pub fn social_section(&self, _palette: Palette, _cx: &mut Context<Self>) -> Option<AnyElement> {
-        None
+    pub fn social_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = self.privacy_rows(palette, cx);
+        Some(settings_section("Social", rows, palette))
     }
 
     pub fn library_section(

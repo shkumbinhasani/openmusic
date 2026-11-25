@@ -5,7 +5,7 @@ use spotify_client::{
     account::{self, AccountInfo},
     api::HttpStatus,
     dealer::Message,
-    social::{self, PlaylistRef, Profile, ProfileRef, TopContent},
+    social::{self, PlaylistRef, Privacy, PrivacyField, Profile, ProfileRef, TopContent},
 };
 
 use super::state::{AccountPrefs, ProfileListKind, chosen_language, system_language};
@@ -35,6 +35,11 @@ pub enum Command {
         block: bool,
     },
     BlockLookup(Vec<String>),
+    Privacy,
+    SetPrivacy {
+        field: PrivacyField,
+        value: bool,
+    },
 }
 
 pub struct ProfileView {
@@ -130,6 +135,13 @@ pub enum Event {
         state: Option<bool>,
     },
     BlockState(Vec<(String, bool)>),
+    Privacy(Result<Privacy, String>),
+    PrivacySaved {
+        field: PrivacyField,
+        value: bool,
+        saved: bool,
+        now: Option<Privacy>,
+    },
 }
 
 impl Event {
@@ -151,7 +163,9 @@ impl Event {
             | Self::FollowFailed { .. }
             | Self::FollowState(_)
             | Self::Blocked { .. }
-            | Self::BlockState(_) => Vec::new(),
+            | Self::BlockState(_)
+            | Self::Privacy(_)
+            | Self::PrivacySaved { .. } => Vec::new(),
         }
     }
 }
@@ -188,6 +202,16 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::BlockLookup(uris) => {
             ctx.tasks
                 .spawn(block_lookup(ctx.api.clone(), ctx.user.clone(), uris))
+        }
+        Command::Privacy => ctx
+            .tasks
+            .spawn_keyed("privacy", privacy_read(ctx.api.clone(), ctx.user.clone())),
+        Command::SetPrivacy { field, value } => {
+            let keys = vec![format!("privacy:{}", field.path())];
+            let (api, user) = (ctx.api.clone(), ctx.user.clone());
+            ctx.writes.push(Mutation::new(keys, async move {
+                Ok(privacy_write(api, user, field, value).await)
+            }));
         }
     }
 }
@@ -327,6 +351,37 @@ async fn block_lookup(api: Api, user: User, uris: Vec<String>) -> crate::worker:
         }
     }
     Event::BlockState(states).into()
+}
+
+async fn privacy_read(api: Api, user: User) -> crate::worker::Event {
+    let result = async {
+        let me = user.name(&api).await?;
+        social::privacy(&api, &me).await
+    }
+    .await
+    .map_err(|_| super::privacy::LOAD_FAILED.to_owned());
+    Event::Privacy(result).into()
+}
+
+async fn privacy_write(
+    api: Api,
+    user: User,
+    field: PrivacyField,
+    value: bool,
+) -> crate::worker::Event {
+    let written = async {
+        let me = user.name(&api).await.ok()?;
+        social::set_privacy(&api, &me, field, value).await.ok()?;
+        Some(social::privacy(&api, &me).await.ok())
+    }
+    .await;
+    Event::PrivacySaved {
+        field,
+        value,
+        saved: written.is_some(),
+        now: written.flatten(),
+    }
+    .into()
 }
 
 pub fn block_message(block: bool, done: bool) -> &'static str {

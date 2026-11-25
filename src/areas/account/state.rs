@@ -6,6 +6,7 @@ use serde_json::Value;
 use spotify_client::account::{AccountInfo, Explicit};
 
 use super::{
+    privacy::{self, PrivacyState},
     profile::{self, Profiles},
     profile_view::{FOLLOW_PROFILE, MORE_PROFILE, UNBLOCK_PROFILE},
     worker::{Command, Event},
@@ -215,6 +216,7 @@ pub struct State {
     pub cache: Option<u64>,
     pub cache_busy: bool,
     pub profiles: Profiles,
+    pub privacy: PrivacyState,
 }
 
 impl State {
@@ -452,6 +454,7 @@ pub fn cache_label(bytes: u64) -> String {
 pub fn load(app: &mut OpenMusic, page: &Page) {
     if *page == Page::Settings {
         app.refresh_cache_size();
+        app.refresh_privacy();
     }
     profile::load(app, page);
 }
@@ -485,6 +488,13 @@ pub fn on_event(
         Event::FollowState(states) => app.account.profiles.learn_following(states),
         Event::Blocked { uri, block, state } => profile::on_blocked(app, uri, block, state),
         Event::BlockState(states) => app.account.profiles.learn_blocking(states),
+        Event::Privacy(result) => privacy::on_privacy(app, result),
+        Event::PrivacySaved {
+            field,
+            value,
+            saved,
+            now,
+        } => privacy::on_saved(app, field, value, saved, now),
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -550,6 +560,7 @@ pub fn debug(
             let _ = std::fs::write(directory.join("account.txt"), text);
         }
         "account-menu" => app.open_account_menu(),
+        "privacy" => privacy::debug(app, rest, directory),
         "profile" | "profiles" | "follow-user" | "follows" | "block" | "block-ask" | "blocking" => {
             return profile::debug(app, verb, rest, directory, window, cx);
         }
@@ -645,6 +656,7 @@ pub fn on_press(
         PREMIUM_KEY => cx.open_url(PREMIUM_URL),
         LANGUAGE_KEY => app.open_language_menu(),
         CLEAR_CACHE_KEY => app.confirm_clear_cache(window, cx),
+        privacy::RETRY_KEY => app.refresh_privacy(),
         FOLLOW_PROFILE => {
             if let Page::Profile(uri) = &app.page {
                 let uri = uri.clone();
