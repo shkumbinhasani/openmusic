@@ -155,7 +155,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Keyboard shortcuts",
     ),
     shortcut(
-        "shift-/",
+        "?",
         boxed::<ShowShortcuts>,
         QUIET,
         Basic,
@@ -358,9 +358,6 @@ pub fn sheet() -> Vec<(Category, Vec<SheetRow>)> {
 }
 
 pub fn glyphs(control: bool, alt: bool, shift: bool, command: bool, key: &str) -> String {
-    if shift && key == "/" && !control && !alt && !command {
-        return "?".into();
-    }
     let mut label = String::new();
     for (held, glyph) in [(control, '⌃'), (alt, '⌥'), (shift, '⇧'), (command, '⌘')] {
         if held {
@@ -630,6 +627,27 @@ mod tests {
     }
 
     #[test]
+    fn question_mark_opens_the_sheet() {
+        let typed = Keystroke {
+            modifiers: gpui::Modifiers::default(),
+            key: "?".into(),
+            key_char: Some("?".into()),
+        };
+        let matching: Vec<&Shortcut> = SHORTCUTS
+            .iter()
+            .filter(|shortcut| {
+                shortcut
+                    .binding()
+                    .match_keystrokes(std::slice::from_ref(&typed))
+                    == Some(false)
+            })
+            .collect();
+        assert_eq!(matching.len(), 1);
+        assert!((matching[0].action)().partial_eq(&ShowShortcuts));
+        assert_eq!(matching[0].context, Some("!Input"));
+    }
+
+    #[test]
     fn menu_keys_come_first() {
         let first = |action: &dyn Action| {
             SHORTCUTS
@@ -657,7 +675,7 @@ mod tests {
         };
         assert_eq!(row("Search").keys, ["cmd-l", "cmd-f", "cmd-k"]);
         assert_eq!(row("Go back").keys, ["alt-cmd-left", "cmd-[", "alt-left"]);
-        assert_eq!(row("Keyboard shortcuts").keys, ["cmd-/", "shift-/"]);
+        assert_eq!(row("Keyboard shortcuts").keys, ["cmd-/", "?"]);
         let total: usize = sheet
             .iter()
             .flat_map(|(_, rows)| rows)
@@ -675,7 +693,7 @@ mod tests {
         assert_eq!(key_label("alt-cmd-1"), "⌥⌘1");
         assert_eq!(key_label("cmd-,"), "⌘,");
         assert_eq!(key_label("space"), "Space");
-        assert_eq!(key_label("shift-/"), "?");
+        assert_eq!(key_label("?"), "?");
         assert_eq!(key_label("cmd-/"), "⌘/");
         assert_eq!(key_label("cmd-up"), "⌘↑");
     }
