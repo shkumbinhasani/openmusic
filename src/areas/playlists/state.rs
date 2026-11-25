@@ -2197,24 +2197,28 @@ pub fn debug(
             write("curates.txt", describe_editable(app, &uris));
         }
         ("save-to", ["dump"]) => {
-            let text = app
-                .playlists
-                .save_to
-                .as_ref()
-                .and_then(WeakEntity::upgrade)
-                .map_or("closed".to_owned(), |sheet| sheet.read(cx).describe(cx));
-            write("save-to.txt", text);
+            let sheet = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade);
+            let path = directory.join("save-to.txt");
+            window.defer(cx, move |_, cx| {
+                let text = sheet.map_or("closed".to_owned(), |sheet| sheet.read(cx).describe(cx));
+                let _ = std::fs::write(path, text);
+            });
         }
         ("save-to", ["toggle", uri]) => {
             if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade) {
-                sheet.update(cx, |sheet, cx| sheet.toggle(uri, cx));
+                let uri = (*uri).to_owned();
+                window.defer(cx, move |_, cx| {
+                    sheet.update(cx, |sheet, cx| sheet.toggle(&uri, cx));
+                });
             }
         }
         ("save-to", ["done"]) => {
-            if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade)
-                && sheet.update(cx, |sheet, cx| sheet.done(cx))
-            {
-                window.close_dialog(cx);
+            if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade) {
+                window.defer(cx, move |window, cx| {
+                    if sheet.update(cx, |sheet, cx| sheet.done(cx)) {
+                        window.close_dialog(cx);
+                    }
+                });
             }
         }
         ("save-to", [uri]) => app.open_save_to(vec![(*uri).to_owned()], None, window, cx),
