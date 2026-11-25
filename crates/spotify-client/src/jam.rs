@@ -322,8 +322,9 @@ pub fn accepts(current: Option<&Session>, update: &SessionUpdate, departed: Opti
             return false;
         }
     }
+    let unnamed_end = update.session_id.is_empty() && ENDING.contains(&update.reason.as_str());
     match current {
-        Some(current) if current.id == update.session_id => {
+        Some(current) if current.id == update.session_id || unnamed_end => {
             update.timestamp <= 0 || update.timestamp >= current.timestamp
         }
         Some(_) => update.session.is_some() && JOINING.contains(&update.reason.as_str()),
@@ -912,6 +913,11 @@ mod tests {
             None
         ));
         assert!(!accepts(None, &update_for("b", 1, "YOU_LEFT", false), None));
+        let bare_end = parse_update(&json!({"reason": "SESSION_DELETED"})).unwrap();
+        assert!(accepts(Some(&current), &bare_end, None));
+        assert!(!accepts(None, &bare_end, None));
+        let bare_join = parse_update(&json!({"reason": "USER_JOINED", "session": {}})).unwrap();
+        assert!(!accepts(Some(&current), &bare_join, None));
         assert!(!accepts(
             None,
             &update_for("a", 150, "USER_LEFT", true),

@@ -574,9 +574,14 @@ impl OpenMusic {
         let Ok(found) = result else {
             return;
         };
+        let departed = &self.playback.jam.departed;
         match (found.map(|session| *session), self.jam()) {
             (Some(found), Some(current))
                 if found.id == current.id && found.timestamp < current.timestamp => {}
+            (Some(found), None)
+                if departed
+                    .get(&found.id)
+                    .is_some_and(|left| found.timestamp <= *left) => {}
             (Some(found), _) => self.set_jam(Some(found), "UNKNOWN_UPDATE_TYPE", window, cx),
             (None, Some(current)) => {
                 let guest = !current.is_owner;
@@ -607,6 +612,7 @@ impl OpenMusic {
             }
             Ok(session) => session.map(|session| *session),
         };
+        self.refresh_jam();
         if action.ends() {
             self.set_jam(None, action.reason(), window, cx);
             return;
@@ -650,6 +656,9 @@ impl OpenMusic {
 
     pub fn on_people(&mut self, asked: Vec<String>, found: Option<Vec<Person>>) {
         let Some(found) = found else {
+            for name in &asked {
+                self.playback.jam.requested.remove(name);
+            }
             return;
         };
         for person in found {
@@ -684,6 +693,9 @@ impl OpenMusic {
             self.refresh_jam();
         }
         let failed = self.playback.notice.is_some();
+        if self.playback.notice.as_deref() == Some(JAM_ENDED) {
+            self.playback.jam.redirect = None;
+        }
         if failed && self.jam_redirected() && !self.playback.jam.noticed {
             self.playback.jam.noticed = true;
             self.refresh_jam();
