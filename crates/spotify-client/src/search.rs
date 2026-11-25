@@ -269,6 +269,16 @@ impl SearchResults {
             .iter()
             .find(|hit| hit.card.kind == Kind::Artist)
             .map(|hit| hit.card.title.as_str())
+            .or_else(|| {
+                self.top.iter().find_map(|hit| {
+                    let track = hit.track.as_ref()?;
+                    track
+                        .artists
+                        .first()
+                        .map(|artist| artist.name.as_str())
+                        .filter(|name| !name.is_empty())
+                })
+            })
     }
 
     pub fn cards_of(&self, kind: SearchKind) -> Option<&Paged<Card>> {
@@ -872,6 +882,11 @@ mod tests {
         );
         assert_eq!(results.top[1].track, None);
         assert_eq!(results.featuring(), Some("Radiohead"));
+        let songs_first = SearchResults {
+            top: results.top[..1].to_vec(),
+            ..results.clone()
+        };
+        assert_eq!(songs_first.featuring(), Some("Radiohead"));
         assert_eq!(results.featured.len(), 1);
         assert_eq!(results.featured[0].title, "Radiohead Radio");
         assert_eq!(results.tracks.items.len(), 2);
