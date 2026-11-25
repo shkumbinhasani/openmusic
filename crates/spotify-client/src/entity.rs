@@ -589,7 +589,7 @@ mod tests {
         let radio = json!({"__typename": "PlaylistResponseWrapper", "data": {
             "__typename": "Playlist", "name": "Radiohead Radio", "format": "inspiredby-mix",
             "description": "",
-            "uri": "spotify:playlist:37i9dQZF1E4EgTnU7Hvt0A",
+            "uri": "spotify:playlist:37i9dQZF1E4Redacted002",
             "images": {"items": [{"sources": [{"url": "https://pickasso.spotifycdn.com/x", "width": null, "height": null}]}]},
             "ownerV2": {"data": {"name": "Spotify", "uri": "spotify:user:spotify"}}
         }});
@@ -753,7 +753,7 @@ mod tests {
             "RestrictedContent",
             "UnknownType",
         ] {
-            let value = json!({"uri": "spotify:playlist:37i9dQZF1E8OvD4G5pVGhr", "content": {
+            let value = json!({"uri": "spotify:playlist:37i9dQZF1E8Redacted001", "content": {
                 "__typename": "PlaylistResponseWrapper",
                 "data": {"__typename": typename, "message": "gone"}
             }});

@@ -230,7 +230,7 @@ mod tests {
                 ("spotify:track:70LcF31zb1H0PyJoS1Sx1r".into(), None),
                 (
                     "spotify:track:70LcF31zb1H0PyJoS1Sx1r".into(),
-                    Some("spotify:playlist:37i9dQZF1E8OvD4G5pVGhr".into()),
+                    Some("spotify:playlist:37i9dQZF1E8Redacted001".into()),
                 ),
             ],
         );
@@ -238,7 +238,7 @@ mod tests {
             body,
             json!({"username": "someone", "set": "playcontextbans", "items": [
                 {"uri": "spotify:track:70LcF31zb1H0PyJoS1Sx1r"},
-                {"uri": "spotify:track:70LcF31zb1H0PyJoS1Sx1r", "context_uri": "spotify:playlist:37i9dQZF1E8OvD4G5pVGhr"}
+                {"uri": "spotify:track:70LcF31zb1H0PyJoS1Sx1r", "context_uri": "spotify:playlist:37i9dQZF1E8Redacted001"}
             ]})
         );
     }
@@ -250,7 +250,7 @@ mod tests {
             IGNORE_IN_RECS,
             &[
                 Write {
-                    uri: "spotify:playlist:37i9dQZF1E8OvD4G5pVGhr".into(),
+                    uri: "spotify:playlist:37i9dQZF1E8Redacted001".into(),
                     context_uri: None,
                     removed: false,
                 },
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(
             body,
             json!({"username": "someone", "set": "ignoreinrecs", "items": [
-                {"uri": "spotify:playlist:37i9dQZF1E8OvD4G5pVGhr"},
+                {"uri": "spotify:playlist:37i9dQZF1E8Redacted001"},
                 {"uri": "spotify:track:70LcF31zb1H0PyJoS1Sx1r", "context_uri": "spotify:album:3gBVdu4a1MMJVMy6vwPEb8", "is_removed": true}
             ]})
         );
