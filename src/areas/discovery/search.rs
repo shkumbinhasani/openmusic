@@ -14,11 +14,11 @@ use spotify_client::{
     search::{Hit, SearchKind, SearchPage, SearchResults, Suggestion, Suggestions, page_limit},
 };
 
-use super::{state::SearchTab, worker::Command};
+use super::{home::SEARCH_ORIGIN, state::SearchTab, worker::Command};
 use crate::{
     app::{OpenMusic, Page, Session, page_for},
     ui::{
-        cards::CardOpen,
+        cards::{CardOpen, CardOptions},
         tracks::{RowClick, RowOptions},
     },
 };
@@ -559,6 +559,13 @@ impl OpenMusic {
         )
     }
 
+    pub fn search_card_options(&self) -> CardOptions {
+        CardOptions {
+            on_use: Some(self.search_card_open()),
+            origin: SEARCH_ORIGIN,
+        }
+    }
+
     pub fn search_row_options(&self, show_album: bool) -> RowOptions {
         let click: RowClick = std::rc::Rc::new(|app, tracks, index, _, cx| {
             app.play_search_track(tracks, index, cx);
@@ -593,7 +600,7 @@ impl OpenMusic {
             &uri,
             &[],
             0,
-            "search",
+            SEARCH_ORIGIN,
             spotify_client::connect::PlayOptions::default(),
             cx,
         );

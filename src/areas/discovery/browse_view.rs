@@ -9,7 +9,7 @@ use spotify_client::{
 };
 
 use super::{
-    home::SHELF_CARDS,
+    home::{SHELF_CARDS, origin_for},
     home_view::CARD_TEXT_HEIGHT,
     search_view::{card_bones, heading_bone},
     state::SectionSource,
@@ -18,7 +18,7 @@ use crate::{
     app::{OpenMusic, Page, page_for},
     ui::{
         Palette,
-        cards::card_target,
+        cards::{CardOptions, card_target},
         components::{artwork, bone, scroll_sentinel},
     },
 };
@@ -325,9 +325,16 @@ impl OpenMusic {
                     .gap_3()
                     .child(self.section_heading(section, show_all, palette, cx))
                     .child(
-                        self.card_grid(&section.cards, "browse-card", card_side, palette, cx)
-                            .max_h(card_side + px(CARD_TEXT_HEIGHT))
-                            .overflow_hidden(),
+                        self.card_grid_with(
+                            &section.cards,
+                            "browse-card",
+                            card_side,
+                            &CardOptions::from(origin_for(&self.page)),
+                            palette,
+                            cx,
+                        )
+                        .max_h(card_side + px(CARD_TEXT_HEIGHT))
+                        .overflow_hidden(),
                     )
             }
         };
@@ -413,7 +420,17 @@ impl OpenMusic {
         let grid = if section.layout == Layout::Tiles {
             self.tile_grid(&section.cards, "section-tile", card_side, palette, cx)
         } else {
-            self.card_grid(&section.cards, "section-card", card_side, palette, cx)
+            self.card_grid_with(
+                &section.cards,
+                "section-card",
+                card_side,
+                &CardOptions::from(origin_for(&Page::Section {
+                    uri: uri.to_owned(),
+                    source,
+                })),
+                palette,
+                cx,
+            )
         };
         let paged = source == SectionSource::Browse && section.next.is_some();
         page.when(section.cards.is_empty() && !pending, |page| {

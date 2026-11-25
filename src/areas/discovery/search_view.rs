@@ -16,7 +16,7 @@ use crate::{
     icons,
     ui::{
         Palette,
-        cards::{card_target, hero_subtitle, round_kind},
+        cards::{card_target, hero_subtitle, play_side, round_kind},
         components::{artwork, bone, explicit_badge, icon, link, scroll_sentinel, skeleton_rows},
     },
 };
@@ -224,7 +224,7 @@ impl OpenMusic {
                     &results.featured,
                     "search-featured",
                     card_side,
-                    Some(self.search_card_open()),
+                    &self.search_card_options(),
                     palette,
                     cx,
                 ))
@@ -240,7 +240,7 @@ impl OpenMusic {
                     &page.items,
                     prefix,
                     card_side,
-                    Some(self.search_card_open()),
+                    &self.search_card_options(),
                     palette,
                     cx,
                 ))
@@ -449,7 +449,7 @@ impl OpenMusic {
                 &page.items,
                 "search-tab-card",
                 card_side,
-                Some(self.search_card_open()),
+                &self.search_card_options(),
                 palette,
                 cx,
             ),
@@ -576,17 +576,22 @@ impl OpenMusic {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let card = &hit.card;
-        let image = card.image.as_ref().and_then(|url| self.covers.get(url));
         let radius = if round_kind(card.kind) {
             card_side / 2.
         } else {
             px(12.)
         };
-        let art = if card.kind == Kind::User {
-            self.avatar(&card.title, card.image.as_deref(), card_side, palette)
-        } else {
-            artwork(image, card_side, radius, palette)
-        };
+        let art = self.card_art(card, card_side, radius, palette);
+        let play = self
+            .play_bubble(
+                RECENT_GROUP,
+                card,
+                &self.search_card_options(),
+                play_side(card_side),
+                palette,
+                cx,
+            )
+            .map(|play| play.absolute().right(px(8.)).bottom(px(8.)));
         let open = hit.clone();
         let target = card_target(card);
         let uri = card.uri.clone();
@@ -600,28 +605,32 @@ impl OpenMusic {
             .cursor_pointer()
             .when(!card.playable, |card| card.opacity(0.5))
             .child(
-                div().relative().child(art.shadow_md()).child(
-                    div()
-                        .id(("search-recent-remove", index))
-                        .absolute()
-                        .top(px(6.))
-                        .right(px(6.))
-                        .size(px(26.))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(rgba(0x000000a6))
-                        .opacity(0.)
-                        .group_hover(RECENT_GROUP, |remove| remove.opacity(1.))
-                        .hover(|remove| remove.bg(rgba(0x000000e0)))
-                        .child(icon(icons::CLOSE, 11., 0xffffff))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.forget_search(&uri);
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .relative()
+                    .child(art.shadow_md())
+                    .children(play)
+                    .child(
+                        div()
+                            .id(("search-recent-remove", index))
+                            .absolute()
+                            .top(px(6.))
+                            .right(px(6.))
+                            .size(px(26.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgba(0x000000a6))
+                            .opacity(0.)
+                            .group_hover(RECENT_GROUP, |remove| remove.opacity(1.))
+                            .hover(|remove| remove.bg(rgba(0x000000e0)))
+                            .child(icon(icons::CLOSE, 11., 0xffffff))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.forget_search(&uri);
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 div()

@@ -8,7 +8,7 @@ use spotify_client::{
 };
 
 use super::{
-    home::{ChipEntry, SHELF_CARDS, card_plays, chip_entries},
+    home::{ChipEntry, HOME_ORIGIN, SHELF_CARDS, card_plays, chip_entries},
     search_view::{card_bones, heading_bone},
     state::SectionSource,
 };
@@ -17,7 +17,7 @@ use crate::{
     icons,
     ui::{
         Palette,
-        cards::{card_target, round_kind},
+        cards::{CardOptions, card_target, round_kind},
         components::{artwork, bone, icon, link},
     },
 };
@@ -137,7 +137,7 @@ impl OpenMusic {
             Layout::Shortcuts => self.shortcuts(
                 &section.cards,
                 shortcut_columns(card_side),
-                "home",
+                HOME_ORIGIN,
                 palette,
                 cx,
             ),
@@ -146,7 +146,14 @@ impl OpenMusic {
                 .flex_col()
                 .gap_3()
                 .child(self.section_heading(section, None, palette, cx))
-                .child(self.card_grid(&section.cards, "home-card", card_side, palette, cx)),
+                .child(self.card_grid_with(
+                    &section.cards,
+                    "home-card",
+                    card_side,
+                    &CardOptions::from(HOME_ORIGIN),
+                    palette,
+                    cx,
+                )),
             Layout::Shelf | Layout::Tiles => {
                 let show_all =
                     (section.has_more(SHELF_CARDS) && !section.uri.is_empty()).then(|| {
@@ -161,9 +168,16 @@ impl OpenMusic {
                     .gap_3()
                     .child(self.section_heading(section, show_all, palette, cx))
                     .child(
-                        self.card_grid(&section.cards, "home-card", card_side, palette, cx)
-                            .max_h(card_side + px(CARD_TEXT_HEIGHT))
-                            .overflow_hidden(),
+                        self.card_grid_with(
+                            &section.cards,
+                            "home-card",
+                            card_side,
+                            &CardOptions::from(HOME_ORIGIN),
+                            palette,
+                            cx,
+                        )
+                        .max_h(card_side + px(CARD_TEXT_HEIGHT))
+                        .overflow_hidden(),
                     )
             }
         };
@@ -266,7 +280,7 @@ impl OpenMusic {
             Kind::User => self.avatar(&card.title, card.image.as_deref(), side, palette),
             kind => {
                 let image = card.image.as_ref().and_then(|url| self.covers.get(url));
-                let radius = if round_kind(kind) { side / 2. } else { px(6.) };
+                let radius = if round_kind(kind) { side / 2. } else { radius };
                 artwork(image, side, radius, palette)
             }
         }
@@ -276,7 +290,7 @@ impl OpenMusic {
         &self,
         group: &'static str,
         card: &Card,
-        origin: &'static str,
+        options: &CardOptions,
         side: f32,
         palette: Palette,
         cx: &mut Context<Self>,
@@ -287,6 +301,8 @@ impl OpenMusic {
         }
         let playing = current && self.playback.now.playing;
         let card = card.clone();
+        let origin = options.origin;
+        let on_use = options.on_use.clone();
         let label = if playing {
             format!("Pause {}", card.title)
         } else {
@@ -317,8 +333,13 @@ impl OpenMusic {
                     side * 0.42,
                     0xffffff,
                 ))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
+                    if !this.card_is_current(&card)
+                        && let Some(on_use) = &on_use
+                    {
+                        on_use(this, &card, window, cx);
+                    }
                     this.play_card(&card, origin, cx);
                     cx.notify();
                 })),
@@ -378,7 +399,7 @@ impl OpenMusic {
             .hover(move |tile| tile.bg(rgba(hover_fill(palette))))
             .when(page.is_some(), |tile| tile.cursor_pointer())
             .when(!card.playable, |tile| tile.opacity(0.5))
-            .child(self.card_art(card, px(SHORTCUT_HEIGHT), px(0.), palette))
+            .child(self.card_art(card, px(SHORTCUT_HEIGHT), px(6.), palette))
             .child(
                 div()
                     .flex_1()
@@ -389,7 +410,14 @@ impl OpenMusic {
                     .line_clamp(2)
                     .child(card.title.clone()),
             )
-            .children(self.play_bubble(SHORTCUT_GROUP, card, origin, 32., palette, cx))
+            .children(self.play_bubble(
+                SHORTCUT_GROUP,
+                card,
+                &CardOptions::from(origin),
+                32.,
+                palette,
+                cx,
+            ))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if let Some(page) = page.clone() {
                     this.navigate(page);

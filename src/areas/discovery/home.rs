@@ -7,7 +7,7 @@ use std::{
 use gpui::{Context, SharedString, Window};
 use spotify_client::{
     Track,
-    connect::PlayOptions,
+    connect::{self, PlayOptions},
     entity::{self, Card, Kind},
     home::{Chip, Home, Section},
 };
@@ -19,6 +19,27 @@ pub const HOME_STALE: Duration = Duration::from_secs(300);
 pub const SHELF_CARDS: usize = 4;
 const KEPT_FACETS: usize = 6;
 pub const LIKED_SONGS: &str = "spotify:collection:tracks";
+pub const HOME_ORIGIN: &str = "home";
+pub const SEARCH_ORIGIN: &str = "search";
+pub const ARTIST_ORIGIN: &str = "artist";
+
+pub fn origin_for(page: &Page) -> &'static str {
+    match page {
+        Page::Home
+        | Page::Section {
+            source: SectionSource::Home,
+            ..
+        } => HOME_ORIGIN,
+        Page::Search(_)
+        | Page::Browse(_)
+        | Page::Section {
+            source: SectionSource::Browse,
+            ..
+        } => SEARCH_ORIGIN,
+        Page::Artist(_) => ARTIST_ORIGIN,
+        _ => connect::ORIGIN,
+    }
+}
 
 #[derive(Default)]
 pub struct HomeFeed {
@@ -211,12 +232,16 @@ impl OpenMusic {
         }
     }
 
-    pub fn card_is_current(&self, card: &Card) -> bool {
+    pub fn context_is_current(&self, uri: &str) -> bool {
         self.playback
             .now
             .context_uri
             .as_deref()
-            .is_some_and(|context| same_context(&card.uri, context))
+            .is_some_and(|context| same_context(uri, context))
+    }
+
+    pub fn card_is_current(&self, card: &Card) -> bool {
+        self.context_is_current(&card.uri)
             || (card.kind == Kind::Track
                 && self
                     .playback
@@ -315,17 +340,11 @@ impl OpenMusic {
                 }
             }
             "playcard" if !rest.is_empty() => {
-                let card = self.visible_card(rest);
-                if let Some(card) = card {
-                    let origin = match self.page {
-                        Page::Home
-                        | Page::Section {
-                            source: SectionSource::Home,
-                            ..
-                        } => "home",
-                        _ => "search",
-                    };
-                    self.play_card(&card, origin, cx);
+                if let Some(card) = self.visible_card(rest) {
+                    if self.page_remembers_cards() && !self.card_is_current(&card) {
+                        self.remember_card(&card);
+                    }
+                    self.play_card(&card, origin_for(&self.page), cx);
                 }
             }
             "discovery" => {
@@ -334,6 +353,10 @@ impl OpenMusic {
             _ => return false,
         }
         true
+    }
+
+    fn page_remembers_cards(&self) -> bool {
+        matches!(self.page, Page::Search(_))
     }
 
     fn visible_card(&self, uri: &str) -> Option<Card> {
@@ -354,11 +377,37 @@ impl OpenMusic {
             .iter()
             .filter_map(|state| state.section.as_ref())
             .flat_map(|section| &section.cards);
+        let search_cards = self
+            .discovery
+            .search_results()
+            .into_iter()
+            .flat_map(|results| {
+                results
+                    .top
+                    .iter()
+                    .map(|hit| &hit.card)
+                    .chain(&results.featured)
+                    .chain(results.cards.iter().flat_map(|(_, page)| &page.items))
+            });
+        let tab_cards = self
+            .discovery
+            .search_tabs
+            .values()
+            .filter_map(|tab| match &tab.items {
+                Some(spotify_client::search::SearchPage::Cards(page)) => Some(&page.items),
+                _ => None,
+            })
+            .flatten();
+        let recent_cards = self.discovery.recent.items.iter().map(|hit| &hit.card);
         home_cards
             .chain(page_cards)
             .chain(section_cards)
+            .chain(search_cards)
+            .chain(tab_cards)
+            .chain(recent_cards)
             .find(|card| card.uri == uri)
             .cloned()
+            .or_else(|| self.artist_cards().into_iter().find(|card| card.uri == uri))
     }
 
     fn discovery_dump(&self) -> String {
@@ -556,6 +605,35 @@ mod tests {
         }
         assert!(feed.feeds.len() <= KEPT_FACETS);
         assert!(feed.feeds.contains_key(""));
+    }
+
+    #[test]
+    fn names_the_page_a_play_came_from() {
+        assert_eq!(origin_for(&Page::Home), "home");
+        assert_eq!(
+            origin_for(&Page::Section {
+                uri: "spotify:section:x".into(),
+                source: SectionSource::Home,
+            }),
+            "home"
+        );
+        assert_eq!(
+            origin_for(&Page::Search(super::super::state::SearchTab::All)),
+            "search"
+        );
+        assert_eq!(origin_for(&Page::Browse("spotify:page:x".into())), "search");
+        assert_eq!(
+            origin_for(&Page::Section {
+                uri: "spotify:section:x".into(),
+                source: SectionSource::Browse,
+            }),
+            "search"
+        );
+        assert_eq!(
+            origin_for(&Page::Artist("spotify:artist:x".into())),
+            "artist"
+        );
+        assert_eq!(origin_for(&Page::Liked), connect::ORIGIN);
     }
 
     #[test]

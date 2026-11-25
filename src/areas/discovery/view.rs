@@ -1,16 +1,17 @@
 use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
 use spotify_client::{
     Track,
+    catalog::Artist,
     entity::{Card, Kind},
 };
 
-use super::{search::SONG_ROWS, state::SearchTab};
+use super::{home::ARTIST_ORIGIN, search::SONG_ROWS, state::SearchTab};
 use crate::{
     app::{OpenMusic, Page},
     icons,
     ui::{
         Palette,
-        cards::card,
+        cards::{CardOptions, card},
         components::{artwork, bone, skeleton_header, skeleton_rows},
         dock::DockItem,
         menu::{Group, MenuItem, Row, Target},
@@ -128,40 +129,9 @@ impl OpenMusic {
                             }),
                     ),
             );
-        let releases: Vec<Card> = artist
-            .releases
-            .iter()
-            .map(|release| {
-                let subtitle = [
-                    release.year.map(|year| year.to_string()),
-                    Some(release.kind.clone()),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" · ");
-                card(
-                    &release.uri,
-                    Kind::Album,
-                    &release.name,
-                    subtitle,
-                    release.cover.clone(),
-                )
-            })
-            .collect();
-        let related: Vec<Card> = artist
-            .related
-            .iter()
-            .map(|related| {
-                card(
-                    &related.uri,
-                    Kind::Artist,
-                    &related.name,
-                    "Artist",
-                    related.image.clone(),
-                )
-            })
-            .collect();
+        let releases = release_cards(artist);
+        let related = related_cards(artist);
+        let options = CardOptions::from(ARTIST_ORIGIN);
         page.child(header)
             .when(!artist.top_tracks.is_empty(), |page| {
                 page.child(
@@ -197,7 +167,9 @@ impl OpenMusic {
                                 .font_weight(FontWeight::BOLD)
                                 .child("Releases"),
                         )
-                        .child(self.card_grid(&releases, "release", card_side, palette, cx)),
+                        .child(self.card_grid_with(
+                            &releases, "release", card_side, &options, palette, cx,
+                        )),
                 )
             })
             .when_some(artist.biography.clone(), |page, biography| {
@@ -240,9 +212,65 @@ impl OpenMusic {
                                 .font_weight(FontWeight::BOLD)
                                 .child("Fans Also Like"),
                         )
-                        .child(self.card_grid(&related, "related", card_side, palette, cx)),
+                        .child(
+                            self.card_grid_with(
+                                &related, "related", card_side, &options, palette, cx,
+                            ),
+                        ),
                 )
             })
+    }
+}
+
+pub fn release_cards(artist: &Artist) -> Vec<Card> {
+    artist
+        .releases
+        .iter()
+        .map(|release| {
+            let subtitle = [
+                release.year.map(|year| year.to_string()),
+                Some(release.kind.clone()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" • ");
+            card(
+                &release.uri,
+                Kind::Album,
+                &release.name,
+                subtitle,
+                release.cover.clone(),
+            )
+        })
+        .collect()
+}
+
+pub fn related_cards(artist: &Artist) -> Vec<Card> {
+    artist
+        .related
+        .iter()
+        .map(|related| {
+            card(
+                &related.uri,
+                Kind::Artist,
+                &related.name,
+                "Artist",
+                related.image.clone(),
+            )
+        })
+        .collect()
+}
+
+impl OpenMusic {
+    pub fn artist_cards(&self) -> Vec<Card> {
+        match &self.discovery.artist {
+            Some((_, Ok(artist))) => release_cards(artist)
+                .into_iter()
+                .chain(related_cards(artist))
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -302,4 +330,50 @@ pub fn row_accessories(
 
 pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOptions) -> bool {
     SONG_ROWS.contains(&row.0) && app.discovery.is_unplayable(&track.uri)
+}
+
+#[cfg(test)]
+mod tests {
+    use spotify_client::catalog::{ArtistRef, Release};
+
+    use super::*;
+
+    #[test]
+    fn turns_artist_releases_and_peers_into_cards() {
+        let artist = Artist {
+            uri: "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".into(),
+            name: "Radiohead".into(),
+            image: None,
+            biography: None,
+            top_tracks: Vec::new(),
+            releases: vec![
+                Release {
+                    uri: "spotify:album:6dVIqQ8qmQ5GBnJ9shOYGE".into(),
+                    name: "OK Computer".into(),
+                    year: Some(1997),
+                    cover: Some("https://i.scdn.co/image/ok".into()),
+                    kind: "Album".into(),
+                },
+                Release {
+                    uri: "spotify:album:x".into(),
+                    name: "Single".into(),
+                    year: None,
+                    cover: None,
+                    kind: "Single".into(),
+                },
+            ],
+            related: vec![ArtistRef {
+                uri: "spotify:artist:y".into(),
+                name: "Peer".into(),
+                image: None,
+            }],
+        };
+        let releases = release_cards(&artist);
+        assert_eq!(releases[0].subtitle, "1997 • Album");
+        assert_eq!(releases[0].kind, Kind::Album);
+        assert_eq!(releases[1].subtitle, "Single");
+        let related = related_cards(&artist);
+        assert_eq!(related[0].kind, Kind::Artist);
+        assert_eq!(related[0].subtitle, "Artist");
+    }
 }
