@@ -29,6 +29,7 @@ use crate::{
         HideOthers, Minimize, Next, PlayPause, PlayRecent, Previous, SeekBackward, SeekForward,
         ShowAll, ShowMainWindow, ShowShortcuts, ToggleFullScreen, ToggleMiniOnMinimize,
         ToggleMiniPlayer, ToggleNotifications, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
+        route_visible,
     },
     ui::{
         menu::{MenuItem, Place},
@@ -132,6 +133,14 @@ impl OpenMusic {
         cx.activate(true);
     }
 
+    pub fn reveal_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !native_window::state().hidden() {
+            return false;
+        }
+        self.show_main_window(window, cx);
+        true
+    }
+
     pub fn close_main_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if native_window::state().installed {
             native_window::hide();
@@ -140,10 +149,11 @@ impl OpenMusic {
         }
     }
 
-    pub fn toggle_mini_player(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    pub fn toggle_mini_player(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if mini_player::is_visible() {
             self.close_mini_player();
         } else if !self.open_mini_player() {
+            self.reveal_main_window(window, cx);
             self.show_toast("Play something to open the mini player.", None);
         }
     }
@@ -889,15 +899,19 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.perform(Intent::Navigate(Page::Home), window, cx)
     });
     route(cx, handle, |_: &ShowShortcuts, app, window, cx| {
-        app.toggle_shortcuts(window, cx)
+        if app.reveal_main_window(window, cx) {
+            app.open_shortcuts(window, cx);
+        } else {
+            app.toggle_shortcuts(window, cx);
+        }
     });
-    route(cx, handle, |_: &ToggleFullScreen, _, window, _| {
+    route_visible(cx, handle, |_: &ToggleFullScreen, _, window, _| {
         window.toggle_fullscreen()
     });
     route(cx, handle, |_: &Minimize, _, window, _| {
         window.minimize_window()
     });
-    route(cx, handle, |_: &Zoom, _, window, _| window.zoom_window());
+    route_visible(cx, handle, |_: &Zoom, _, window, _| window.zoom_window());
     route(cx, handle, |_: &CloseWindow, app, window, cx| {
         app.close_main_window(window, cx)
     });

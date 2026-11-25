@@ -1201,7 +1201,7 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         Some(LIBRARY_CONTEXT),
     )]);
     fn shelf<A: gpui::Action>(cx: &mut App, handle: &Handle, shelf: Shelf) {
-        menus::route(cx, handle, move |_: &A, app, _, cx| {
+        menus::route_visible(cx, handle, move |_: &A, app, _, cx| {
             app.open_shelf(shelf);
             cx.notify();
         });
@@ -1222,11 +1222,11 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.like_current();
         cx.notify();
     });
-    menus::route(cx, handle, |_: &menus::GoToLikedSongs, app, _, cx| {
+    menus::route_visible(cx, handle, |_: &menus::GoToLikedSongs, app, _, cx| {
         app.navigate(Page::Liked);
         cx.notify();
     });
-    menus::route(cx, handle, |_: &menus::GoToRecents, app, _, cx| {
+    menus::route_visible(cx, handle, |_: &menus::GoToRecents, app, _, cx| {
         app.navigate(Page::Recent);
         cx.notify();
     });

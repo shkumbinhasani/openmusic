@@ -2383,11 +2383,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
-    menus::route(cx, handle, |_: &menus::NewPlaylist, app, _, cx| {
+    menus::route_visible(cx, handle, |_: &menus::NewPlaylist, app, _, cx| {
         app.create_playlist(None, None, Vec::new(), true);
         cx.notify();
     });
-    menus::route(cx, handle, |_: &menus::NewFolder, app, _, cx| {
+    menus::route_visible(cx, handle, |_: &menus::NewFolder, app, _, cx| {
         app.create_folder(None, Vec::new(), true);
         cx.notify();
     });

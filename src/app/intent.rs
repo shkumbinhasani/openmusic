@@ -55,10 +55,20 @@ impl Intent {
             _ => None,
         }
     }
+
+    pub fn needs_window(&self) -> bool {
+        matches!(
+            self,
+            Intent::Navigate(_) | Intent::Back | Intent::Forward | Intent::FocusSearch
+        )
+    }
 }
 
 impl OpenMusic {
     pub fn perform(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
+        if intent.needs_window() {
+            self.reveal_main_window(window, cx);
+        }
         match intent {
             Intent::PlayPause => self.toggle(cx),
             Intent::Play => self.set_playing(true, cx),
@@ -118,5 +128,30 @@ mod tests {
         assert_eq!(Intent::parse("seekto soon"), None);
         assert_eq!(Intent::parse("playcontext"), None);
         assert_eq!(Intent::parse("dance"), None);
+    }
+
+    #[test]
+    fn only_window_intents_bring_the_window_back() {
+        for intent in [
+            Intent::Navigate(Page::Home),
+            Intent::Back,
+            Intent::Forward,
+            Intent::FocusSearch,
+        ] {
+            assert!(intent.needs_window(), "{intent:?}");
+        }
+        for intent in [
+            Intent::PlayPause,
+            Intent::Next,
+            Intent::SeekBy(5_000),
+            Intent::VolumeUp,
+            Intent::ToggleShuffle,
+            Intent::ToggleLike,
+            Intent::PlayContext("spotify:album:1b5KESuOMQomF3wntoLAsk".into()),
+            Intent::ShowMainWindow,
+            Intent::ToggleMiniPlayer,
+        ] {
+            assert!(!intent.needs_window(), "{intent:?}");
+        }
     }
 }

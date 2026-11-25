@@ -741,7 +741,10 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         cx.notify();
     });
     menus::route(cx, handle, |_: &ToggleFriendActivity, app, window, cx| {
-        app.toggle_friend_activity(window);
+        let revealed = app.reveal_main_window(window, cx);
+        if !revealed || !app.friends_on() {
+            app.toggle_friend_activity(window);
+        }
         cx.notify();
     });
 }

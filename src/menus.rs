@@ -611,6 +611,17 @@ pub fn route<A: Action>(
     });
 }
 
+pub fn route_visible<A: Action>(
+    cx: &mut App,
+    handle: &Handle,
+    run: impl Fn(&A, &mut OpenMusic, &mut Window, &mut Context<OpenMusic>) + 'static,
+) {
+    route(cx, handle, move |action: &A, app, window, cx| {
+        app.reveal_main_window(window, cx);
+        run(action, app, window, cx);
+    });
+}
+
 pub fn connect(app: WeakEntity<OpenMusic>, window: AnyWindowHandle, cx: &mut App) {
     let handle = Handle { app, window };
     account::state::register_actions(cx, &handle);

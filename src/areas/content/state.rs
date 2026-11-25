@@ -1269,12 +1269,16 @@ fn page_fragment(app: &OpenMusic) -> String {
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
-    route(cx, handle, |_: &GoLyrics, app, _, cx| {
-        app.show_lyrics(app.page != Page::Lyrics);
+    route(cx, handle, |_: &GoLyrics, app, window, cx| {
+        let revealed = app.reveal_main_window(window, cx);
+        app.show_lyrics(revealed || app.page != Page::Lyrics);
         cx.notify();
     });
-    route(cx, handle, |_: &GoNowPlaying, app, _, cx| {
-        app.toggle_now_playing();
+    route(cx, handle, |_: &GoNowPlaying, app, window, cx| {
+        let revealed = app.reveal_main_window(window, cx);
+        if !revealed || app.page != Page::NowPlaying {
+            app.toggle_now_playing();
+        }
         cx.notify();
     });
 }

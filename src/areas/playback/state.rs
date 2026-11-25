@@ -1754,11 +1754,14 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     menus::route(cx, handle, |_: &CycleRepeat, app, window, cx| {
         app.perform(Intent::CycleRepeat, window, cx)
     });
-    menus::route(cx, handle, |_: &ShowQueue, app, _, cx| {
-        app.toggle_queue_page();
+    menus::route(cx, handle, |_: &ShowQueue, app, window, cx| {
+        let revealed = app.reveal_main_window(window, cx);
+        if !revealed || app.page != Page::Queue {
+            app.toggle_queue_page();
+        }
         cx.notify();
     });
-    menus::route(cx, handle, |_: &ShowDevices, app, _, cx| {
+    menus::route_visible(cx, handle, |_: &ShowDevices, app, _, cx| {
         if app.show_devices(None) {
             cx.notify();
         }
@@ -1766,7 +1769,7 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     menus::route(cx, handle, |_: &PlayOnThisMac, app, _, cx| {
         app.play_here(cx)
     });
-    menus::route(cx, handle, |_: &StartJam, app, _, cx| {
+    menus::route_visible(cx, handle, |_: &StartJam, app, _, cx| {
         app.start_jam(None, cx);
         cx.notify();
     });

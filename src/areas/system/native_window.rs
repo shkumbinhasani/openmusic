@@ -20,6 +20,10 @@ impl WindowState {
         self.app_active && self.visible && !self.miniaturized
     }
 
+    pub fn hidden(&self) -> bool {
+        self.installed && (!self.visible || self.miniaturized)
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "installed={} visible={} miniaturized={} key={} full_screen={} app_active={} frontmost={} listed={}",
@@ -284,5 +288,37 @@ mod tests {
         ] {
             assert!(!state.frontmost(), "{}", state.describe());
         }
+    }
+
+    #[test]
+    fn hidden_means_closed_or_minimized_but_not_merely_behind() {
+        let shown = WindowState {
+            installed: true,
+            visible: true,
+            ..WindowState::default()
+        };
+        assert!(!shown.hidden());
+        assert!(
+            !WindowState {
+                app_active: true,
+                ..shown
+            }
+            .hidden()
+        );
+        assert!(
+            WindowState {
+                visible: false,
+                ..shown
+            }
+            .hidden()
+        );
+        assert!(
+            WindowState {
+                miniaturized: true,
+                ..shown
+            }
+            .hidden()
+        );
+        assert!(!WindowState::default().hidden());
     }
 }
