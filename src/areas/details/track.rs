@@ -258,7 +258,13 @@ impl OpenMusic {
             }))
     }
 
-    fn track_header(&self, page: &TrackPage, palette: Palette, cx: &mut Context<Self>) -> Div {
+    fn track_header(
+        &self,
+        uri: &str,
+        page: &TrackPage,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let track = page.track.clone();
         let menu_track = track.clone();
         let playing = self.is_current(&track.uri) && self.playback.now.playing;
@@ -315,6 +321,7 @@ impl OpenMusic {
                     .w(px(96.)),
                 )
             })
+            .children(self.library_button(uri, palette, cx))
             .child(self.menu_button("more-track", &track.title, palette, cx));
         div()
             .flex()
@@ -842,7 +849,7 @@ impl OpenMusic {
                 .children(artists)
         });
         let footer = footer_lines(data);
-        page.child(self.track_header(data, palette, cx))
+        page.child(self.track_header(uri, data, palette, cx))
             .children(top)
             .children(self.track_credits(data, palette, cx))
             .children(self.track_songs(view, data, palette, cx))
