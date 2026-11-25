@@ -152,7 +152,7 @@ fn target_of(entry: &RecentEntry) -> Option<Target> {
 }
 
 fn playable(entry: &RecentEntry) -> bool {
-    entry.kind.context() || entry.kind == RecentKind::Track
+    entry.kind.context() || matches!(entry.kind, RecentKind::Track | RecentKind::Episode)
 }
 
 impl OpenMusic {
@@ -307,14 +307,23 @@ impl OpenMusic {
             })
     }
 
+    fn recent_current(&self, entry: &RecentEntry) -> bool {
+        self.recent_playing(&entry.uri)
+            || (entry.kind == RecentKind::Episode && self.is_current(&entry.uri))
+    }
+
     fn play_recent(&mut self, entry: &RecentEntry, cx: &mut Context<Self>) {
-        if self.recent_playing(&entry.uri) {
+        if self.recent_current(entry) {
             let playing = self.playback.now.playing;
             self.set_playing(!playing, cx);
             return;
         }
         match entry.kind {
             RecentKind::Track => self.play(&[track_of(entry)], 0, cx),
+            RecentKind::Episode => {
+                let episode = [track_of(entry)];
+                self.play_context_from(&entry.uri, &episode, 0, "recents", Default::default(), cx);
+            }
             _ => self.play_context_from(&entry.uri, &[], 0, "recents", Default::default(), cx),
         }
     }
@@ -383,7 +392,7 @@ impl OpenMusic {
         if !playable(entry) || entry.uri.is_empty() {
             return None;
         }
-        let current = self.recent_playing(&entry.uri) && self.playback.now.playing;
+        let current = self.recent_current(entry) && self.playback.now.playing;
         let target = entry.clone();
         let size = (side * 0.5).clamp(24., 32.);
         Some(
@@ -799,6 +808,8 @@ mod tests {
         );
         assert!(playable(&album) && playable(&song));
         let episode = entry("spotify:episode:a", RecentKind::Episode, "Talk", 1);
-        assert!(!playable(&episode));
+        assert!(playable(&episode));
+        let chapter = entry("spotify:chapter:a", RecentKind::Chapter, "Part", 1);
+        assert!(!playable(&chapter));
     }
 }
