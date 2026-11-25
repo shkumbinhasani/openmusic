@@ -1,3 +1,4 @@
+pub mod transcript;
 pub mod your_episodes;
 
 use std::fmt;
@@ -181,22 +182,7 @@ impl Episode {
     }
 
     pub fn transcript(&self, language: &str) -> Option<&Transcript> {
-        let wanted = language.to_ascii_lowercase();
-        let base = wanted.split(['-', '_']).next().unwrap_or_default();
-        self.transcripts
-            .iter()
-            .find(|transcript| transcript.language.eq_ignore_ascii_case(&wanted))
-            .or_else(|| {
-                self.transcripts.iter().find(|transcript| {
-                    !base.is_empty()
-                        && transcript
-                            .language
-                            .split(['-', '_'])
-                            .next()
-                            .is_some_and(|language| language.eq_ignore_ascii_case(base))
-                })
-            })
-            .or_else(|| self.transcripts.first())
+        transcript::pick(&self.transcripts, language)
     }
 }
 

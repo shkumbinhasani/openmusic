@@ -189,7 +189,13 @@ impl OpenMusic {
         None
     }
 
-    pub fn lyrics_page(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn lyrics_page(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        if self
+            .track()
+            .is_some_and(|track| track.uri.starts_with("spotify:episode:"))
+        {
+            return self.transcript_page(palette, cx);
+        }
         let track = self.track();
         let lyrics = self.current_lyrics();
         let synced = lyrics.is_some_and(|lyrics| lyrics.synced);
@@ -324,6 +330,7 @@ impl OpenMusic {
                     )
                 },
             )
+            .into_any_element()
     }
 }
 

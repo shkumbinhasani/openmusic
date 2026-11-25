@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
     path::Path,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -17,6 +18,7 @@ use spotify_client::{
 };
 
 use super::{
+    transcript::{SYNC_KEY, TranscriptView},
     worker::{Command, Event},
     yours::{SORT_KEY, Yours},
 };
@@ -41,7 +43,7 @@ pub struct ContentPrefs {}
 
 #[derive(Default)]
 pub struct State {
-    pub lyrics: Option<(String, Option<Lyrics>)>,
+    pub lyrics: Option<(String, Option<Rc<Lyrics>>)>,
     pub lyrics_scroll: ScrollHandle,
     pub lyrics_line: Option<usize>,
     pub lyrics_loading: bool,
@@ -57,6 +59,7 @@ pub struct State {
     pub progress_drawn: Option<Instant>,
     pub wanted: HashMap<String, (bool, Instant)>,
     pub yours: Yours,
+    pub transcript: Option<TranscriptView>,
 }
 
 impl State {
@@ -160,7 +163,7 @@ impl OpenMusic {
         if !self.is_current(uri) {
             return None;
         }
-        lyrics.as_ref()
+        lyrics.as_deref()
     }
 
     fn lyric_line(&self) -> Option<usize> {
@@ -169,7 +172,7 @@ impl OpenMusic {
         lyrics
             .lines
             .iter()
-            .rposition(|line| line.start_ms <= position)
+            .rposition(|line| !line.heading && line.start_ms <= position)
     }
 
     pub fn follow_lyrics(&mut self) -> bool {
@@ -181,17 +184,32 @@ impl OpenMusic {
         if self.page == Page::Lyrics
             && let Some(line) = line
         {
-            self.content
-                .lyrics_scroll
-                .scroll_to_top_of_item((line + 1).saturating_sub(3));
+            match self.transcript_view() {
+                Some(view) => view.follow(line),
+                None => self
+                    .content
+                    .lyrics_scroll
+                    .scroll_to_top_of_item((line + 1).saturating_sub(3)),
+            }
         }
         true
+    }
+
+    fn transcript_view(&self) -> Option<&TranscriptView> {
+        let uri = &self.track()?.uri;
+        self.content
+            .transcript
+            .as_ref()
+            .filter(|view| view.uri == *uri)
     }
 
     pub fn show_lyrics(&mut self, show: bool) {
         if show {
             self.navigate(Page::Lyrics);
             self.content.lyrics_line = None;
+            if let Some(view) = self.transcript_view() {
+                view.sync(None);
+            }
             self.follow_lyrics();
         } else if self.page == Page::Lyrics {
             self.back();
@@ -200,18 +218,33 @@ impl OpenMusic {
 
     pub fn request_lyrics(&mut self, now: &NowPlaying) {
         self.watch_episode(now);
-        if let Some(track) = &now.track
-            && track.is_track()
-            && self
+        let Some(track) = &now.track else {
+            return;
+        };
+        let episode = is_episode(&track.uri);
+        if !(track.is_track() || episode)
+            || self
                 .content
                 .lyrics
                 .as_ref()
-                .is_none_or(|(uri, _)| *uri != track.uri)
+                .is_some_and(|(uri, _)| *uri == track.uri)
         {
-            self.content.lyrics = Some((track.uri.clone(), None));
-            self.content.lyrics_loading = true;
-            self.content.lyrics_line = None;
-            self.send(Command::Lyrics(track.uri.clone()));
+            return;
+        }
+        let uri = track.uri.clone();
+        self.content.lyrics = Some((uri.clone(), None));
+        self.content.lyrics_loading = true;
+        self.content.lyrics_line = None;
+        self.content.transcript = None;
+        if episode {
+            let known = self
+                .content
+                .loaded_episode(&uri)
+                .map(|episode| episode.transcripts.clone())
+                .filter(|transcripts| !transcripts.is_empty());
+            self.send(Command::Transcript { uri, known });
+        } else {
+            self.send(Command::Lyrics(uri));
         }
     }
 
@@ -555,7 +588,11 @@ pub fn on_event(
                 .as_ref()
                 .is_some_and(|(pending, _)| *pending == uri)
             {
-                app.content.lyrics = Some((uri, lyrics));
+                app.content.transcript = lyrics
+                    .as_ref()
+                    .filter(|_| is_episode(&uri))
+                    .map(|lyrics| TranscriptView::new(uri.clone(), lyrics.lines.len()));
+                app.content.lyrics = Some((uri, lyrics.map(Rc::new)));
                 app.content.lyrics_loading = false;
                 app.content.lyrics_line = None;
                 app.follow_lyrics();
@@ -725,6 +762,51 @@ fn describe_saved(app: &OpenMusic, uri: &str) -> String {
     }
 }
 
+fn describe_words(app: &OpenMusic, lines: &mut String) {
+    let Some((uri, lyrics)) = &app.content.lyrics else {
+        lines.push_str("words none\n");
+        return;
+    };
+    let kind = if is_episode(uri) {
+        "transcript"
+    } else {
+        "lyrics"
+    };
+    let Some(lyrics) = lyrics else {
+        let state = if app.content.lyrics_loading {
+            "loading"
+        } else {
+            "none"
+        };
+        let _ = writeln!(lines, "words {kind} {uri} {state}");
+        return;
+    };
+    let headings = lyrics.lines.iter().filter(|line| line.heading).count();
+    let detached = app
+        .content
+        .transcript
+        .as_ref()
+        .filter(|view| view.uri == *uri)
+        .map(|view| view.detached.get());
+    let _ = writeln!(
+        lines,
+        "words {kind} {uri} lines={} headings={headings} synced={} line={:?} detached={detached:?} note={:?}",
+        lyrics.lines.len(),
+        lyrics.synced,
+        app.content.lyrics_line,
+        lyrics.provider,
+    );
+    for line in lyrics.lines.iter().take(5) {
+        let _ = writeln!(
+            lines,
+            "  {} {}{:?}",
+            line.start_ms,
+            if line.heading { "# " } else { "" },
+            line.words
+        );
+    }
+}
+
 pub(super) fn describe_played(played: Played) -> String {
     match played {
         Played::InProgress(position) => format!("in-progress@{position}"),
@@ -814,6 +896,8 @@ pub fn debug(
             for (uri, (saved, _)) in &app.content.wanted {
                 let _ = writeln!(lines, "wanted {uri} saved={saved}");
             }
+            describe_words(app, &mut lines);
+            app.describe_your_episodes(&mut lines);
             let _ = std::fs::write(directory.join("content.txt"), lines);
         }
         _ => return false,
@@ -918,6 +1002,7 @@ pub fn on_press(
             }
         }
         "your-episodes-play" => app.play_your_episodes(cx),
+        SYNC_KEY => app.sync_transcript(),
         SORT_KEY => app.open_your_sort_menu(),
         "more-episode" => {
             if let Some(uri) = episode_uri() {

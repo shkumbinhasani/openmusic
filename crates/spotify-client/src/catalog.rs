@@ -843,6 +843,7 @@ pub struct Lyrics {
 pub struct LyricLine {
     pub start_ms: u32,
     pub words: String,
+    pub heading: bool,
 }
 
 pub async fn lyrics(api: &Api, track_uri: &str) -> Result<Option<Lyrics>> {
@@ -881,6 +882,7 @@ pub async fn lyrics(api: &Api, track_uri: &str) -> Result<Option<Lyrics>> {
                 .replace('♪', "")
                 .trim()
                 .to_owned(),
+            heading: false,
         })
         .collect();
     if lines.iter().all(|line| line.words.is_empty()) {

@@ -5,7 +5,7 @@ use spotify_client::{
     catalog::Lyrics,
     dealer::Message,
     podcast::{
-        self, Episode, EpisodePage, Show, ShowKind, Unavailable,
+        self, Episode, EpisodePage, Show, ShowKind, Transcript, Unavailable, transcript,
         your_episodes::{self, Entry},
     },
 };
@@ -15,6 +15,10 @@ use crate::worker::{Ctx, Mutation, User};
 
 pub enum Command {
     Lyrics(String),
+    Transcript {
+        uri: String,
+        known: Option<Vec<Transcript>>,
+    },
     Show(String),
     ShowPage {
         uri: String,
@@ -114,6 +118,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Lyrics(uri) => ctx
             .tasks
             .spawn_keyed("lyrics", lyrics(ctx.api.clone(), uri)),
+        Command::Transcript { uri, known } => ctx
+            .tasks
+            .spawn_keyed("lyrics", read_transcript(ctx.api.clone(), uri, known)),
         Command::Show(uri) => ctx.tasks.spawn_keyed("show", show(ctx.api.clone(), uri)),
         Command::ShowPage { uri, kind, offset } => ctx
             .tasks
@@ -159,6 +166,15 @@ fn failure(error: &anyhow::Error, what: &str) -> String {
 
 async fn lyrics(api: Api, uri: String) -> crate::worker::Event {
     let found = catalog::lyrics(&api, &uri).await.ok().flatten();
+    Event::Lyrics { uri, lyrics: found }.into()
+}
+
+async fn read_transcript(
+    api: Api,
+    uri: String,
+    known: Option<Vec<Transcript>>,
+) -> crate::worker::Event {
+    let found = transcript::read(&api, &uri, known).await.ok().flatten();
     Event::Lyrics { uri, lyrics: found }.into()
 }
 
