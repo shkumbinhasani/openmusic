@@ -403,12 +403,17 @@ pub fn dock_heart(
     };
     app.want_saved(uri);
     let saved = app.is_saved(uri) == Some(true);
-    let symbol = if saved { on } else { off };
+    let spec = ButtonSpec {
+        label: Label::Symbol(if saved { on } else { off }),
+        prominent: saved,
+        enabled: true,
+        tooltip: save_label(uri, saved).map(str::to_owned),
+    };
     Some(DockItem::new(
         LIKE_CURRENT_KEY,
         600,
         48.,
-        app.dock_control(LIKE_CURRENT_KEY, Label::Symbol(symbol), saved, palette, cx)
+        app.glass_control(LIKE_CURRENT_KEY, spec, true, palette, cx)
             .size(px(48.)),
     ))
 }
