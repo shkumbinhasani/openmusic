@@ -78,12 +78,13 @@ pub struct Profiles {
     settled: HashMap<String, Instant>,
     pub blocking: HashMap<String, bool>,
     pub block_pending: HashSet<String>,
+    loads: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingFollow {
     pub before: Option<bool>,
-    pub counted: bool,
+    pub counted_in: Option<u64>,
 }
 
 impl Profiles {
@@ -98,6 +99,15 @@ impl Profiles {
         {
             urls.extend(listing.images());
         }
+    }
+
+    fn show(&mut self, profile: Option<(String, Result<ProfileView, String>)>) {
+        self.profile = profile;
+        self.loads += 1;
+    }
+
+    fn still_counted(&self, pending: PendingFollow) -> bool {
+        pending.counted_in == Some(self.loads)
     }
 
     pub fn loaded(&self, uri: &str) -> Option<&ProfileView> {
@@ -182,9 +192,9 @@ impl Profiles {
                 continue;
             }
             self.following.insert(uri.clone(), follow);
-            let counted = self.adjust(uri, before, follow);
+            let counted_in = self.adjust(uri, before, follow).then_some(self.loads);
             self.pending
-                .insert(uri.clone(), PendingFollow { before, counted });
+                .insert(uri.clone(), PendingFollow { before, counted_in });
             sent.push(uri.clone());
         }
         sent
@@ -195,7 +205,7 @@ impl Profiles {
             let pending = self.pending.remove(&uri);
             self.settled.insert(uri.clone(), Instant::now());
             let shown = self.following.insert(uri.clone(), state);
-            if pending.is_some_and(|pending| pending.counted) && shown != Some(state) {
+            if pending.is_some_and(|pending| self.still_counted(pending)) && shown != Some(state) {
                 self.adjust(&uri, shown, state);
             }
         }
@@ -210,7 +220,7 @@ impl Profiles {
                 Some(before) => self.following.insert(uri.clone(), before),
                 None => self.following.remove(uri),
             };
-            if let Some(shown) = shown.filter(|_| pending.counted) {
+            if let Some(shown) = shown.filter(|_| self.still_counted(pending)) {
                 self.adjust(uri, Some(shown), !shown);
             }
         }
@@ -363,7 +373,7 @@ impl OpenMusic {
     pub fn load_profile(&mut self, uri: &str) {
         let profiles = &mut self.account.profiles;
         if profiles.loaded(uri).is_none() {
-            profiles.profile = None;
+            profiles.show(None);
         }
         self.send(Command::Profile(uri.to_owned()));
     }
@@ -430,7 +440,7 @@ pub fn on_profile(
         }
         unknown = profiles.unknown_users(view.followers.iter().chain(&view.following));
     }
-    profiles.profile = Some((uri, result.map(|view| *view)));
+    profiles.show(Some((uri, result.map(|view| *view))));
     app.look_up_following(unknown);
 }
 
@@ -902,6 +912,28 @@ mod tests {
         profiles.finish_follow(vec![(friend.clone(), true)]);
         assert_eq!(profiles.known_following(&friend), Some(true));
         assert_eq!(counts(&profiles), (5, 20));
+    }
+
+    #[test]
+    fn rolls_back_only_the_profile_it_counted_on() {
+        let own = "spotify:user:someone".to_owned();
+        let friend = "spotify:user:friend".to_owned();
+        let mut profiles = viewing(&friend, false, false, 5);
+        profiles.begin_follow(std::slice::from_ref(&friend), true, Some(&own));
+        assert_eq!(counts(&profiles), (6, 20));
+        let mine = viewing(&own, true, false, 1).profile;
+        profiles.show(mine);
+        profiles.fail_follow(std::slice::from_ref(&friend));
+        assert_eq!(counts(&profiles), (1, 20));
+        assert_eq!(profiles.known_following(&friend), Some(false));
+
+        profiles.show(viewing(&friend, false, false, 5).profile);
+        profiles.begin_follow(std::slice::from_ref(&friend), true, Some(&own));
+        assert_eq!(counts(&profiles), (6, 20));
+        profiles.show(viewing(&friend, false, false, 5).profile);
+        profiles.finish_follow(vec![(friend.clone(), false)]);
+        assert_eq!(counts(&profiles), (5, 20));
+        assert_eq!(profiles.known_following(&friend), Some(false));
     }
 
     #[test]
