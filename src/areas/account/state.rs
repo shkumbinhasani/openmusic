@@ -3,7 +3,7 @@ use std::{collections::HashSet, path::Path};
 use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spotify_client::account::AccountInfo;
+use spotify_client::account::{AccountInfo, Explicit};
 
 use super::worker::{Command, Event};
 use crate::{
@@ -53,6 +53,7 @@ impl ProfileListKind {
 pub const CHIP: &str = "account-chip";
 pub const CHIP_ROW: Row = (CHIP, 0);
 pub const ACCOUNT_URL: &str = "https://www.spotify.com/account/overview/";
+pub const FAMILY_URL: &str = "https://www.spotify.com/account/family/";
 
 #[derive(Default)]
 pub struct State {
@@ -239,7 +240,13 @@ pub fn state_fragment(app: &OpenMusic) -> String {
     let user = app
         .account()
         .map_or("none", |account| account.username.as_str());
-    format!("plan={plan} user={user}")
+    let explicit = match app.account().map(AccountInfo::explicit) {
+        Some(Explicit::Allowed) => "allowed",
+        Some(Explicit::Filtered) => "filtered",
+        Some(Explicit::FilteredByManager) => "locked",
+        None => "unknown",
+    };
+    format!("plan={plan} user={user} explicit={explicit}")
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
@@ -262,6 +269,7 @@ pub fn on_press(
         "account-manage" => cx.open_url(ACCOUNT_URL),
         "account-sign-out" => app.send(worker::Command::SignOut),
         "account-retry" => app.refresh_account(),
+        "account-family" => cx.open_url(FAMILY_URL),
         _ => return false,
     }
     true

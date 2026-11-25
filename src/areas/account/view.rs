@@ -2,15 +2,18 @@ use gpui::{
     AnyElement, Context, FontWeight, MouseButton, Pixels, SharedString, div, prelude::*, px, rgb,
     rgba,
 };
-use spotify_client::Track;
+use spotify_client::{
+    Track,
+    account::{AccountInfo, Explicit},
+};
 
 use super::state::{CHIP, CHIP_ROW, ProfileListKind};
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
-    overlay,
+    icons, overlay,
     ui::{
         Palette, Panel,
-        components::{ROW_RADIUS, bone},
+        components::{ROW_RADIUS, bone, icon},
         dock::DockItem,
         menu::{Group, MenuItem, Row, Target},
         sidebar::NavEntry,
@@ -327,12 +330,52 @@ impl OpenMusic {
         Some(settings_section("Account", rows, palette))
     }
 
-    pub fn content_section(
-        &self,
-        _palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        None
+    pub fn content_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let info = self.account()?;
+        let explicit = info.explicit();
+        let (status, description) = match explicit {
+            Explicit::Allowed => (
+                "Allowed",
+                "Songs and episodes rated explicit play as usual.",
+            ),
+            Explicit::Filtered => (
+                "Filtered",
+                "Spotify skips songs and episodes rated explicit. They show dimmed here.",
+            ),
+            Explicit::FilteredByManager => {
+                ("Off", "Your plan manager has turned off explicit content.")
+            }
+        };
+        let status = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_size(px(13.))
+            .text_color(rgb(palette.muted))
+            .when(explicit == Explicit::FilteredByManager, |status| {
+                status.child(icon(icons::LOCK, 13., palette.muted))
+            })
+            .child(status);
+        let description = if explicit == Explicit::FilteredByManager {
+            description.to_owned()
+        } else {
+            format!("{description} Change it in Spotify on your phone or computer.")
+        };
+        let mut rows = vec![setting_row(
+            "Allow explicit content",
+            Some(description.into()),
+            status,
+            palette,
+        )];
+        if info.plan_manager() {
+            rows.push(setting_row(
+                "Members of your plan",
+                Some("Choose who can play explicit content on spotify.com.".into()),
+                self.text_control("account-family", "Manage Plan", false, palette, cx),
+                palette,
+            ));
+        }
+        Some(settings_section("Explicit content", rows, palette))
     }
 
     pub fn social_section(&self, _palette: Palette, _cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -392,6 +435,33 @@ pub fn row_accessories(
     Vec::new()
 }
 
-pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
-    false
+pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, _options: &RowOptions) -> bool {
+    filtered(app.account(), track)
+}
+
+pub fn filtered(account: Option<&AccountInfo>, track: &Track) -> bool {
+    track.explicit && account.is_some_and(|account| account.explicit_filtered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dims_explicit_rows_only_when_the_account_filters_them() {
+        let explicit = Track {
+            explicit: true,
+            ..Track::placeholder("spotify:track:a")
+        };
+        let clean = Track::placeholder("spotify:track:b");
+        let filtering = AccountInfo {
+            explicit_filtered: true,
+            ..AccountInfo::default()
+        };
+        let open = AccountInfo::default();
+        assert!(filtered(Some(&filtering), &explicit));
+        assert!(!filtered(Some(&filtering), &clean));
+        assert!(!filtered(Some(&open), &explicit));
+        assert!(!filtered(None, &explicit));
+    }
 }
