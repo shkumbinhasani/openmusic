@@ -151,6 +151,7 @@ pub fn describe(items: &[MenuItem], depth: usize, lines: &mut Vec<String>) {
             MenuItem::Note(text) => lines.push(format!("{indent}{text} [x]")),
             MenuItem::Header(text) => lines.push(format!("{indent}# {text}")),
             MenuItem::Separator => lines.push(format!("{indent}──")),
+            MenuItem::Volume(value) => lines.push(format!("{indent}[volume {value:.2}]")),
             MenuItem::Submenu {
                 title,
                 symbol,
