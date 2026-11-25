@@ -308,15 +308,44 @@ impl OpenMusic {
     }
 }
 
-pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    if matches!(target, Target::Track(_) | Target::User { .. }) {
-        return Vec::new();
-    }
-    let Some(item) = app.library_item(target.uri()) else {
-        return Vec::new();
+fn save_item(target: &Target, app: &OpenMusic) -> Option<MenuItem> {
+    let uri = match target {
+        Target::Track(target) => target.track.uri.clone(),
+        Target::Album { uri }
+        | Target::Artist { uri }
+        | Target::Show { uri }
+        | Target::Episode { uri } => uri.clone(),
+        _ => return None,
     };
+    saves::saves(&uri)?;
+    let row = app.library_item(&uri);
+    let audiobook = row.is_some_and(|item| item.kind == ItemKind::Audiobook);
+    let known = app.is_saved(&uri).or_else(|| row.map(|_| true));
+    if known.is_none() {
+        app.want_saved(&uri);
+    }
+    let menu = saves::save_menu(&uri, known.unwrap_or(false), audiobook)?;
+    let pending = app.saved.pending.contains_key(&uri);
+    let save = menu.save;
+    let item = MenuItem::action(menu.title, move |app, _, cx| {
+        app.save_from_menu(&uri, save);
+        cx.notify();
+    })
+    .symbol(menu.symbol)
+    .enabled(!pending);
+    Some(match menu.key {
+        Some(key) => item.key(key),
+        None => item,
+    })
+}
+
+fn pin_item(target: &Target, app: &OpenMusic) -> Option<MenuItem> {
+    if matches!(target, Target::Track(_) | Target::User { .. }) {
+        return None;
+    }
+    let item = app.library_item(target.uri())?;
     if !item.pinned && !item.pinnable {
-        return Vec::new();
+        return None;
     }
     let uri = item.uri.clone();
     let pin = !item.pinned;
@@ -327,15 +356,22 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
         format!("Unpin {noun}")
     };
     let pending = app.library.pins.contains_key(&uri);
-    vec![(
-        Group::Library,
+    Some(
         MenuItem::action(title, move |app, _, cx| {
             app.set_pinned(&uri, pin);
             cx.notify();
         })
         .symbol(if pin { "pin" } else { "pin.slash" })
         .enabled(!pending),
-    )]
+    )
+}
+
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    save_item(target, app)
+        .into_iter()
+        .chain(pin_item(target, app))
+        .map(|item| (Group::Library, item))
+        .collect()
 }
 
 pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {

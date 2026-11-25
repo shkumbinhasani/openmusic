@@ -55,6 +55,44 @@ pub fn save_label(uri: &str, saved: bool) -> Option<&'static str> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveMenu {
+    pub title: &'static str,
+    pub key: Option<&'static str>,
+    pub symbol: &'static str,
+    pub save: bool,
+}
+
+pub fn save_menu(uri: &str, saved: bool, audiobook: bool) -> Option<SaveMenu> {
+    let kind = saves(uri)?;
+    let library = kind == Saves::Library || (kind == Saves::Follow && audiobook);
+    let title = match (library, saved) {
+        (true, false) => "Add to Your Library",
+        (true, true) => "Remove from Your Library",
+        (false, _) => save_label(uri, saved)?,
+    };
+    let key = match kind {
+        Saves::Like => Some("l"),
+        _ if library => Some("s"),
+        Saves::Follow => Some("f"),
+        _ => None,
+    };
+    let symbol = match (kind, saved) {
+        (Saves::Like, false) => "heart",
+        (Saves::Like, true) => "heart.slash",
+        (Saves::Follow, false) if !library => "person.badge.plus",
+        (Saves::Follow, true) if !library => "person.badge.minus",
+        (_, false) => "plus.circle",
+        (_, true) => "minus.circle",
+    };
+    Some(SaveMenu {
+        title,
+        key,
+        symbol,
+        save: !saved,
+    })
+}
+
 pub fn saved_toast(uri: &str, saved: bool) -> Option<&'static str> {
     Some(match (saves(uri)?, saved) {
         (Saves::Like, true) => "Added to Liked Songs.",
@@ -88,12 +126,28 @@ impl OpenMusic {
             return;
         }
         let Some(saved) = self.is_saved(uri) else {
-            self.library.toggle_when_known = Some((uri.to_owned(), Instant::now()));
+            self.library.when_known = Some((uri.to_owned(), None, Instant::now()));
             self.lookup_saved([uri.to_owned()]);
             return;
         };
-        self.write_saved(vec![uri.to_owned()], !saved);
-        if let Some(text) = saved_toast(uri, !saved) {
+        self.apply_save(uri, !saved);
+    }
+
+    pub fn save_from_menu(&mut self, uri: &str, saved: bool) {
+        if saves(uri).is_none() || self.saved.pending.contains_key(uri) {
+            return;
+        }
+        if self.is_saved(uri).is_some() {
+            self.apply_save(uri, saved);
+        } else {
+            self.library.when_known = Some((uri.to_owned(), Some(saved), Instant::now()));
+            self.lookup_saved([uri.to_owned()]);
+        }
+    }
+
+    fn apply_save(&mut self, uri: &str, saved: bool) {
+        self.write_saved(vec![uri.to_owned()], saved);
+        if let Some(text) = saved_toast(uri, saved) {
             self.show_toast(text, None);
         }
     }
@@ -319,12 +373,15 @@ pub fn tick(app: &mut OpenMusic) -> bool {
         app.lookup_saved(fresh);
     }
     let mut changed = false;
-    if let Some((uri, at)) = app.library.toggle_when_known.clone() {
+    if let Some((uri, wanted, at)) = app.library.when_known.clone() {
         if at.elapsed() >= TOGGLE_WAIT {
-            app.library.toggle_when_known = None;
+            app.library.when_known = None;
         } else if app.is_saved(&uri).is_some() {
-            app.library.toggle_when_known = None;
-            app.toggle_saved(&uri);
+            app.library.when_known = None;
+            match wanted {
+                Some(saved) => app.save_from_menu(&uri, saved),
+                None => app.toggle_saved(&uri),
+            }
             changed = true;
         }
     }
@@ -367,6 +424,51 @@ mod tests {
             Some("Removed from Your Library.")
         );
         assert_eq!(saved_toast("spotify:artist:x", true), None);
+    }
+
+    #[test]
+    fn builds_the_library_menu_items() {
+        let menu = |uri, saved, audiobook| save_menu(uri, saved, audiobook).unwrap();
+        assert_eq!(
+            menu("spotify:track:x", false, false),
+            SaveMenu {
+                title: "Save to your Liked Songs",
+                key: Some("l"),
+                symbol: "heart",
+                save: true
+            }
+        );
+        assert_eq!(
+            menu("spotify:track:x", true, false).title,
+            "Remove from your Liked Songs"
+        );
+        let album = menu("spotify:album:x", false, false);
+        assert_eq!(
+            (album.title, album.key, album.symbol),
+            ("Add to Your Library", Some("s"), "plus.circle")
+        );
+        assert_eq!(
+            menu("spotify:album:x", true, false).title,
+            "Remove from Your Library"
+        );
+        let artist = menu("spotify:artist:x", true, false);
+        assert_eq!(
+            (artist.title, artist.key, artist.symbol, artist.save),
+            ("Unfollow", Some("f"), "person.badge.minus", false)
+        );
+        assert_eq!(menu("spotify:show:x", false, false).title, "Follow");
+        let book = menu("spotify:show:x", true, true);
+        assert_eq!(
+            (book.title, book.key),
+            ("Remove from Your Library", Some("s"))
+        );
+        let episode = menu("spotify:episode:x", false, false);
+        assert_eq!(
+            (episode.title, episode.key),
+            ("Save to Your Episodes", None)
+        );
+        assert_eq!(save_menu("spotify:playlist:x", false, false), None);
+        assert_eq!(save_menu("spotify:local:a:b:c:1", false, false), None);
     }
 
     #[test]

@@ -85,7 +85,7 @@ pub struct State {
     pub recents: Vec<Recent>,
     pub wanted: RefCell<HashSet<String>>,
     pub asked: HashMap<String, Instant>,
-    pub toggle_when_known: Option<(String, Instant)>,
+    pub when_known: Option<(String, Option<bool>, Instant)>,
     pub resync: bool,
     pub liked: Liked,
     pub grid: Grid,
