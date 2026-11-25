@@ -1596,11 +1596,12 @@ mod native {
             ));
             if let Some(dock) = overlay.dock.as_ref() {
                 lines.push(format!(
-                    "dock elapsed={} slider={:.4} slider_hidden={} slider_width={}",
+                    "dock elapsed={} slider={:.4} slider_hidden={} slider_width={} tooltip={:?}",
                     dock.elapsed.stringValue(),
                     dock.slider.doubleValue(),
                     dock.slider.isHidden(),
                     dock.slider.frame().size.width,
+                    dock.title.toolTip().map(|tip| tip.to_string()),
                 ));
             }
             if let Some(volume) = overlay.volume.as_ref() {
