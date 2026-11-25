@@ -1195,32 +1195,17 @@ impl OpenMusic {
                             cx,
                         )))
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap_1p5()
-                            .min_w_0()
-                            .when(episode.explicit, |line| {
-                                line.child(div().pt(px(2.)).child(explicit_badge(palette)))
-                            })
-                            .when(episode.video, |line| {
-                                line.child(div().pt(px(2.)).child(video_badge(palette)))
-                            })
-                            .when(!summary.is_empty(), |line| {
-                                line.child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(13.))
-                                        .line_height(px(19.))
-                                        .text_color(rgb(palette.muted))
-                                        .line_clamp(2)
-                                        .text_ellipsis()
-                                        .child(summary),
-                                )
-                            }),
-                    )
+                    .when(!summary.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .overflow_hidden()
+                                .text_size(px(13.))
+                                .line_height(px(19.))
+                                .text_color(rgb(palette.muted))
+                                .line_clamp(2)
+                                .child(summary),
+                        )
+                    })
                     .child(
                         div()
                             .mt_1()
@@ -1241,6 +1226,20 @@ impl OpenMusic {
                                     palette,
                                     cx,
                                 ))
+                            })
+                            .when(episode.explicit || episode.video, |line| {
+                                line.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .when(episode.explicit, |badges| {
+                                            badges.child(explicit_badge(palette))
+                                        })
+                                        .when(episode.video, |badges| {
+                                            badges.child(video_badge(palette))
+                                        }),
+                                )
                             })
                             .child(
                                 div()
