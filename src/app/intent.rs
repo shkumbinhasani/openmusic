@@ -1,4 +1,5 @@
 use gpui::{Context, Window};
+use spotify_client::connect::{self, PlayOptions};
 
 use crate::{
     app::{OpenMusic, Page},
@@ -91,6 +92,8 @@ impl OpenMusic {
                 uri,
                 index: 0,
                 track_uri: None,
+                origin: connect::ORIGIN,
+                options: PlayOptions::default(),
             }),
             Intent::ShowMainWindow => self.show_main_window(window, cx),
             Intent::ToggleMiniPlayer => self.toggle_mini_player(window, cx),

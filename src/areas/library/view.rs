@@ -9,9 +9,11 @@ use crate::{
         dock::DockItem,
         menu::{Group, MenuItem, Row, Target},
         sidebar::NavEntry,
-        tracks::RowOptions,
+        tracks::{RowDrag, RowDrop, RowOptions},
     },
 };
+
+pub const PLAYLIST_ROW: &str = "playlist";
 
 impl OpenMusic {
     pub fn playlist_list(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -67,8 +69,9 @@ impl OpenMusic {
                             let image =
                                 playlist.cover.as_ref().and_then(|url| self.covers.get(url));
                             let uri = playlist.uri.clone();
+                            let row = (PLAYLIST_ROW, index);
                             div()
-                                .id(("playlist", index))
+                                .id(row)
                                 .h(px(36.))
                                 .flex()
                                 .items_center()
@@ -80,18 +83,18 @@ impl OpenMusic {
                                     item.bg(rgba(palette.press))
                                         .font_weight(FontWeight::SEMIBOLD)
                                 })
-                                .when(self.menu_row(("playlist", index)), |item| {
-                                    item.bg(rgba(palette.press))
-                                })
+                                .when(self.menu_row(row), |item| item.bg(rgba(palette.press)))
                                 .on_mouse_down(
                                     MouseButton::Right,
-                                    self.on_menu(
-                                        Some(("playlist", index)),
-                                        move |_| Target::for_uri(&uri),
-                                        cx,
-                                    ),
+                                    self.on_menu(Some(row), move |_| Target::for_uri(&uri), cx),
                                 )
                                 .hover(move |item| item.bg(rgba(palette.press)))
+                                .drag_over::<RowDrag>(move |item, _, _, _| {
+                                    item.bg(rgba(palette.press))
+                                })
+                                .on_drop(cx.listener(move |this, drag: &RowDrag, window, cx| {
+                                    this.drop_rows(drag, RowDrop { row, after: false }, window, cx);
+                                }))
                                 .child(artwork(image, px(26.), px(5.), palette))
                                 .child(
                                     div()
@@ -167,4 +170,8 @@ pub fn row_accessories(
     _cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
     Vec::new()
+}
+
+pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
+    false
 }

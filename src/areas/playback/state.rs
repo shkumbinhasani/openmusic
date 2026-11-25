@@ -4,7 +4,7 @@ use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::{
     Track,
-    connect::{Repeat, Shuffle},
+    connect::{self, PlayOptions, Repeat, Shuffle},
     engine::NowPlaying,
 };
 
@@ -115,6 +115,25 @@ impl OpenMusic {
         index: usize,
         cx: &mut Context<Self>,
     ) {
+        self.play_context_from(
+            uri,
+            tracks,
+            index,
+            connect::ORIGIN,
+            PlayOptions::default(),
+            cx,
+        );
+    }
+
+    pub fn play_context_from(
+        &mut self,
+        uri: &str,
+        tracks: &[Track],
+        index: usize,
+        origin: &'static str,
+        options: PlayOptions,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(track) = tracks.get(index) {
             self.playback.now.track = Some(track.clone());
             self.playback.now.playing = true;
@@ -126,6 +145,8 @@ impl OpenMusic {
             uri: uri.to_owned(),
             index,
             track_uri: tracks.get(index).map(|track| track.uri.clone()),
+            origin,
+            options,
         });
         cx.notify();
     }

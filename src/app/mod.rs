@@ -55,11 +55,14 @@ pub struct OpenMusic {
     pub menus: Menus,
     pub gallery: Option<Gallery>,
     pub account: account::state::State,
+    pub audio: audio::state::State,
     pub content: content::state::State,
+    pub details: details::state::State,
     pub discovery: discovery::state::State,
     pub library: library::state::State,
     pub playback: playback::state::State,
     pub playlists: playlists::state::State,
+    pub system: system::state::State,
 }
 
 impl OpenMusic {
@@ -76,10 +79,11 @@ impl OpenMusic {
         .detach();
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Songs, artists, or links"));
-        cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.search(cx),
-            InputEvent::Blur if window.focused(cx).is_none() => window.focus(&this.focus),
-            _ => {}
+        cx.subscribe_in(&input, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::Blur) && window.focused(cx).is_none() {
+                window.focus(&this.focus);
+            }
+            discovery::state::on_input(this, event, window, cx);
         })
         .detach();
 
@@ -101,11 +105,14 @@ impl OpenMusic {
             menus: Menus::default(),
             gallery: None,
             account: Default::default(),
+            audio: Default::default(),
             content: Default::default(),
+            details: Default::default(),
             discovery: Default::default(),
             library: Default::default(),
             playback: Default::default(),
             playlists: Default::default(),
+            system: Default::default(),
         }
     }
 
@@ -191,6 +198,8 @@ impl OpenMusic {
                     uri: uri.to_owned(),
                     index: index.trim().parse().unwrap_or(0),
                     track_uri: None,
+                    origin: spotify_client::connect::ORIGIN,
+                    options: Default::default(),
                 });
             }
             "toggle" => self.toggle(cx),
@@ -305,10 +314,15 @@ impl OpenMusic {
 
     fn referenced_covers(&self) -> HashSet<String> {
         let mut urls = HashSet::new();
-        self.playback.covers(&mut urls);
-        self.library.covers(&mut urls);
+        self.account.covers(&mut urls);
+        self.audio.covers(&mut urls);
+        self.content.covers(&mut urls);
+        self.details.covers(&mut urls);
         self.discovery.covers(&mut urls);
+        self.library.covers(&mut urls);
+        self.playback.covers(&mut urls);
         self.playlists.covers(&mut urls);
+        self.system.covers(&mut urls);
         urls
     }
 

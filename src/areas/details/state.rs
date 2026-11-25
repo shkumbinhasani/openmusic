@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use gpui::{App, Context, Window};
 
@@ -8,6 +8,13 @@ use crate::{
     menus::Handle,
     ui::tracks::{RowDrag, RowDrop},
 };
+
+#[derive(Default)]
+pub struct State {}
+
+impl State {
+    pub fn covers(&self, _urls: &mut HashSet<String>) {}
+}
 
 pub fn load(_app: &mut OpenMusic, _page: &Page) {}
 

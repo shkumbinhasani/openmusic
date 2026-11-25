@@ -16,6 +16,7 @@ use super::{
 };
 use crate::{
     app::{OpenMusic, Page},
+    areas::library,
     overlay,
 };
 
@@ -82,7 +83,11 @@ pub fn row_dropped(
     _window: &mut Window,
     _cx: &mut Context<OpenMusic>,
 ) -> bool {
-    let Some(gallery) = app.gallery.as_mut().filter(|_| at.row.0 == ROWS) else {
+    let Some(gallery) = app
+        .gallery
+        .as_mut()
+        .filter(|_| at.row.0 == ROWS || at.row.0 == library::view::PLAYLIST_ROW)
+    else {
         return false;
     };
     gallery.drops.push(format!(

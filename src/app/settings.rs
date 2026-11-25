@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::OpenMusic,
     areas::{
-        account::state::AccountPrefs, audio::state::AudioPrefs, library::state::LibraryPrefs,
-        playback::state::PlaybackPrefs, system::state::SystemPrefs,
+        account::state::AccountPrefs, audio::state::AudioPrefs, content::state::ContentPrefs,
+        library::state::LibraryPrefs, playback::state::PlaybackPrefs, system::state::SystemPrefs,
     },
     ui::Palette,
     worker::Command,
@@ -21,6 +21,7 @@ pub struct Settings {
     pub system: SystemPrefs,
     pub account: AccountPrefs,
     pub library: LibraryPrefs,
+    pub content: ContentPrefs,
 }
 
 pub type Section = fn(&OpenMusic, Palette, &mut Context<OpenMusic>) -> Option<AnyElement>;
@@ -34,6 +35,7 @@ pub const SECTIONS: &[Section] = &[
     OpenMusic::social_section,
     OpenMusic::library_section,
     OpenMusic::language_section,
+    OpenMusic::display_section,
     OpenMusic::startup_section,
     OpenMusic::notifications_section,
     OpenMusic::device_section,

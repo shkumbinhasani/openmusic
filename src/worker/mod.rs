@@ -461,6 +461,7 @@ fn on_push(message: &Message, ctx: &mut Ctx) {
 fn apply_settings(settings: &Settings, ctx: &mut Ctx) {
     account::worker::apply_settings(&settings.account, ctx);
     audio::worker::apply_settings(&settings.audio, ctx);
+    content::worker::apply_settings(&settings.content, ctx);
     library::worker::apply_settings(&settings.library, ctx);
     playback::worker::apply_settings(&settings.playback, ctx);
     system::worker::apply_settings(&settings.system, ctx);

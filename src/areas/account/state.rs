@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,10 @@ impl ProfileListKind {
 #[derive(Default)]
 pub struct State {
     pub info: Option<AccountInfo>,
+}
+
+impl State {
+    pub fn covers(&self, _urls: &mut HashSet<String>) {}
 }
 
 impl OpenMusic {

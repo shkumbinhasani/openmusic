@@ -51,3 +51,7 @@ pub fn row_accessories(
 ) -> Vec<AnyElement> {
     Vec::new()
 }
+
+pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
+    false
+}

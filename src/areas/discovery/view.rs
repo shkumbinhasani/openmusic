@@ -571,6 +571,14 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
+
+    pub fn search_suggestions(
+        &self,
+        _palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        None
+    }
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
@@ -622,4 +630,8 @@ pub fn row_accessories(
     _cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
     Vec::new()
+}
+
+pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
+    false
 }

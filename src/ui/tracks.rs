@@ -23,6 +23,7 @@ use crate::{
 };
 
 pub const ROW_GROUP: &str = "track-row";
+pub const DIMMED_OPACITY: f32 = 0.45;
 
 pub type Accessories =
     fn(&OpenMusic, &Track, Row, &RowOptions, Palette, &mut Context<OpenMusic>) -> Vec<AnyElement>;
@@ -37,6 +38,20 @@ pub const ACCESSORIES: &[Accessories] = &[
     playback::view::row_accessories,
     playlists::view::row_accessories,
     system::view::row_accessories,
+];
+
+pub type Dimmed = fn(&OpenMusic, &Track, Row, &RowOptions) -> bool;
+
+pub const DIMMED: &[Dimmed] = &[
+    account::view::row_dimmed,
+    audio::view::row_dimmed,
+    content::view::row_dimmed,
+    details::view::row_dimmed,
+    discovery::view::row_dimmed,
+    library::view::row_dimmed,
+    playback::view::row_dimmed,
+    playlists::view::row_dimmed,
+    system::view::row_dimmed,
 ];
 
 pub type RowClick =
@@ -220,6 +235,10 @@ impl OpenMusic {
             .collect()
     }
 
+    pub fn row_dimmed(&self, track: &Track, row: Row, options: &RowOptions) -> bool {
+        DIMMED.iter().any(|hook| hook(self, track, row, options))
+    }
+
     pub fn drop_rows(
         &mut self,
         drag: &RowDrag,
@@ -293,10 +312,12 @@ impl OpenMusic {
                 let album_uri = track.album_uri.clone();
                 let artists = artist_links(track);
                 let last_artist = artists.len().saturating_sub(1);
+                let dimmed = self.row_dimmed(track, id, options);
                 div()
                     .id(id)
                     .group(ROW_GROUP)
                     .relative()
+                    .when(dimmed, |row| row.opacity(DIMMED_OPACITY))
                     .h(px(56.))
                     .flex()
                     .items_center()

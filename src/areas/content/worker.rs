@@ -1,5 +1,6 @@
 use spotify_client::{Api, catalog, catalog::Lyrics, dealer::Message};
 
+use super::state::ContentPrefs;
 use crate::worker::Ctx;
 
 pub enum Command {
@@ -27,6 +28,8 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
 }
 
 pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
+
+pub fn apply_settings(_prefs: &ContentPrefs, _ctx: &mut Ctx) {}
 
 async fn lyrics(api: Api, uri: String) -> crate::worker::Event {
     let found = catalog::lyrics(&api, &uri).await.ok().flatten();

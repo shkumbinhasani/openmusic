@@ -1,6 +1,7 @@
 use std::{collections::HashSet, path::Path};
 
 use gpui::{App, Context, Window};
+use gpui_component::input::InputEvent;
 use spotify_client::{Track, catalog::Artist, engine::NowPlaying};
 
 use super::worker::{Command, Discovery, Event, Mix};
@@ -178,6 +179,17 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
     {
         app.discovery.artist = None;
         app.send(Command::Artist(uri.clone()));
+    }
+}
+
+pub fn on_input(
+    app: &mut OpenMusic,
+    event: &InputEvent,
+    _window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) {
+    if let InputEvent::PressEnter { .. } = event {
+        app.search(cx);
     }
 }
 

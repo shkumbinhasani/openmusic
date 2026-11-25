@@ -1,5 +1,5 @@
 use spotify_client::{
-    connect::{self, PlayOptions, Playback},
+    connect::{PlayOptions, Playback},
     dealer::Message,
     engine::Control,
 };
@@ -12,6 +12,8 @@ pub enum Command {
         uri: String,
         index: usize,
         track_uri: Option<String>,
+        origin: &'static str,
+        options: PlayOptions,
     },
     PlayTracks {
         tracks: Vec<String>,
@@ -39,12 +41,14 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             uri,
             index,
             track_uri,
+            origin,
+            options,
         } => Control::PlayContext {
             uri,
             index,
             track_uri,
-            origin: connect::ORIGIN,
-            options: PlayOptions::default(),
+            origin,
+            options,
         },
         Command::PlayTracks { tracks, index } => Control::PlayTracks {
             uris: tracks,

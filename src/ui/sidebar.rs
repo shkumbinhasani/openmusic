@@ -104,6 +104,7 @@ impl OpenMusic {
                             ),
                         ),
                 )
+                .children(self.search_suggestions(palette, cx))
                 .child(div().flex().flex_col().gap_0p5().children(
                     self.nav_entries().into_iter().map(|entry| {
                         let run = entry.run;

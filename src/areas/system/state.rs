@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,13 @@ use crate::{
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SystemPrefs {}
+
+#[derive(Default)]
+pub struct State {}
+
+impl State {
+    pub fn covers(&self, _urls: &mut HashSet<String>) {}
+}
 
 pub fn install(cx: &mut App) {
     cx.on_window_closed(|cx| {

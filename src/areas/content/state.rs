@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use gpui::{App, Context, ScrollHandle, Window};
+use serde::{Deserialize, Serialize};
 use spotify_client::{catalog::Lyrics, engine::NowPlaying};
 
 use super::worker::{Command, Event};
@@ -10,12 +11,20 @@ use crate::{
     ui::tracks::{RowDrag, RowDrop},
 };
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContentPrefs {}
+
 #[derive(Default)]
 pub struct State {
     pub lyrics: Option<(String, Option<Lyrics>)>,
     pub lyrics_scroll: ScrollHandle,
     pub lyrics_line: Option<usize>,
     pub lyrics_loading: bool,
+}
+
+impl State {
+    pub fn covers(&self, _urls: &mut HashSet<String>) {}
 }
 
 impl OpenMusic {

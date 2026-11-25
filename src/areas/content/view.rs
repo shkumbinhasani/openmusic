@@ -16,6 +16,14 @@ use crate::{
 };
 
 impl OpenMusic {
+    pub fn display_section(
+        &self,
+        _palette: Palette,
+        _cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        None
+    }
+
     pub fn lyrics_page(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let track = self.track();
         let lyrics = self.current_lyrics();
@@ -238,4 +246,8 @@ pub fn row_accessories(
     _cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
     Vec::new()
+}
+
+pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
+    false
 }
