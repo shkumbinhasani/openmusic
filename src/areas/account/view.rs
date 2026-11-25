@@ -121,9 +121,6 @@ impl OpenMusic {
         div()
             .w_full()
             .max_w(px(SETTINGS_WIDTH))
-            .flex()
-            .flex_col()
-            .gap(px(28.))
             .child(
                 div()
                     .text_size(px(30.))
@@ -132,9 +129,17 @@ impl OpenMusic {
             )
             .map(|page| {
                 if sections.is_empty() {
-                    page.child(self.page_status("Nothing to set up yet.", palette))
+                    page.child(
+                        div()
+                            .mt(px(28.))
+                            .child(self.page_status("Nothing to set up yet.", palette)),
+                    )
                 } else {
-                    page.children(sections)
+                    page.children(
+                        sections
+                            .into_iter()
+                            .map(|section| div().mt(px(28.)).child(section)),
+                    )
                 }
             })
             .into_any_element()
