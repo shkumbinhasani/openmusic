@@ -253,6 +253,7 @@ pub async fn run(mut commands: UnboundedReceiver<Command>, events: UnboundedSend
         let Some(token) = token else { continue };
         keychain::write(&token.refresh_token);
         let reason = connected(&http, token, &mut commands, &events).await;
+        crate::debug::forget_token();
         let _ = events.send(Event::SignedOut(reason));
     }
 }

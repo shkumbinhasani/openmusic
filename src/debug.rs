@@ -20,6 +20,12 @@ pub fn write_token(token: &str) {
     }
 }
 
+pub fn forget_token() {
+    if let Some(directory) = secrets() {
+        let _ = std::fs::remove_file(directory.join("token"));
+    }
+}
+
 #[cfg(unix)]
 pub fn write_private(path: &std::path::Path, contents: &str) {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};

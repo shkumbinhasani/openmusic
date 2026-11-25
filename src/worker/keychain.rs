@@ -4,11 +4,7 @@ pub fn read() -> Option<String> {
     let Some(path) = debug_file() else {
         return native::read();
     };
-    saved(&path).or_else(|| {
-        let token = native::read()?;
-        crate::debug::write_private(&path, &token);
-        Some(token)
-    })
+    read_debug(&path, native::read)
 }
 
 pub fn write(token: &str) {
@@ -21,7 +17,7 @@ pub fn write(token: &str) {
 pub fn clear() -> Result<(), native::Error> {
     match debug_file() {
         Some(path) => {
-            let _ = std::fs::remove_file(path);
+            crate::debug::write_private(&path, "");
             Ok(())
         }
         None => native::clear(),
@@ -30,6 +26,15 @@ pub fn clear() -> Result<(), native::Error> {
 
 fn debug_file() -> Option<PathBuf> {
     crate::debug::secrets().map(|directory| directory.join("refresh-token"))
+}
+
+fn read_debug(path: &Path, keychain: impl FnOnce() -> Option<String>) -> Option<String> {
+    if path.exists() {
+        return saved(path);
+    }
+    let token = keychain()?;
+    crate::debug::write_private(path, &token);
+    Some(token)
 }
 
 fn saved(path: &Path) -> Option<String> {
@@ -127,6 +132,23 @@ mod tests {
         write_shared(&path, "", || Some("third".into()), store);
         assert_eq!(stored.take(), None);
         assert_eq!(saved(&path).as_deref(), Some("third"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_debug_build_borrows_keychain_once_and_stays_signed_out() {
+        let path = scratch("borrow");
+        assert_eq!(
+            read_debug(&path, || Some("installed".into())).as_deref(),
+            Some("installed")
+        );
+        assert_eq!(saved(&path).as_deref(), Some("installed"));
+        assert_eq!(
+            read_debug(&path, || panic!("read Keychain twice")).as_deref(),
+            Some("installed")
+        );
+        crate::debug::write_private(&path, "");
+        assert_eq!(read_debug(&path, || Some("installed".into())), None);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
