@@ -225,21 +225,19 @@ pub async fn run(mut commands: UnboundedReceiver<Command>, events: UnboundedSend
     };
     while let Some(command) = commands.recv().await {
         let saved = keychain::read();
+        let mut restored = Vec::new();
         let token = match (command, saved) {
             (Command::Restore, Some(refresh)) | (Command::SignIn, Some(refresh)) => {
-                if let Some(library) = cache::load() {
-                    let _ = events.send(Event::Connected);
-                    let _ =
-                        events.send(library::worker::Event::Playlists(library.playlists).into());
-                    if let Some(discovery) = library.discovery {
-                        let _ = events.send(discovery::worker::Event::Discovered(discovery).into());
+                match cache::load() {
+                    Some(library) => restored = restore(library, &events),
+                    None => {
+                        let _ = events.send(Event::Connecting);
                     }
-                } else {
-                    let _ = events.send(Event::Connecting);
                 }
                 match oauth::refresh(&http, oauth::DESKTOP_CLIENT_ID, &refresh).await {
                     Ok(token) => Some(token),
                     Err(error) if error.downcast_ref::<oauth::Rejected>().is_some() => {
+                        restored.clear();
                         let _ = keychain::clear();
                         let _ = events.send(Event::SignedOut(None));
                         pair(&http, &mut commands, &events).await
@@ -261,10 +259,26 @@ pub async fn run(mut commands: UnboundedReceiver<Command>, events: UnboundedSend
         };
         let Some(token) = token else { continue };
         keychain::write(&token.refresh_token);
-        let reason = connected(&http, token, &mut commands, &events).await;
+        let reason = connected(&http, token, restored, &mut commands, &events).await;
         crate::debug::forget_token();
         let _ = events.send(Event::SignedOut(reason));
     }
+}
+
+fn restore(library: cache::Library, events: &UnboundedSender<Event>) -> Vec<String> {
+    let cached = [
+        Some(Event::Connected),
+        Some(library::worker::Event::Playlists(library.playlists).into()),
+        library
+            .discovery
+            .map(|discovery| discovery::worker::Event::Discovered(discovery).into()),
+    ];
+    let mut covers = Vec::new();
+    for event in cached.into_iter().flatten() {
+        covers.extend(event.covers());
+        let _ = events.send(event);
+    }
+    covers
 }
 
 async fn pair(
@@ -328,6 +342,7 @@ async fn pair(
 async fn connected(
     http: &reqwest::Client,
     token: Token,
+    restored: Vec<String>,
     commands: &mut UnboundedReceiver<Command>,
     events: &UnboundedSender<Event>,
 ) -> Option<String> {
@@ -346,6 +361,7 @@ async fn connected(
         covers: Covers::default(),
         saved: saved::Lookups::default(),
     };
+    ctx.covers.request(restored, &ctx.http);
     let _ = events.send(Event::Connected);
 
     let mut dealer_seen = false;
@@ -518,5 +534,49 @@ mod tests {
         assert_eq!(covers.requested.len(), 2);
         assert_eq!(covers.requested.get("loaded"), Some(&None));
         assert!(covers.requested.get("missing").is_some_and(Option::is_some));
+    }
+
+    #[test]
+    fn collects_the_covers_of_cached_home_and_browse_all() {
+        let image = |name: &str| Some(format!("https://i.scdn.co/image/{name}"));
+        let card = |uri: &str, name: &str| {
+            crate::ui::cards::card(
+                uri,
+                spotify_client::entity::Kind::Album,
+                name,
+                "",
+                image(name),
+            )
+        };
+        let section = spotify_client::home::Section {
+            uri: "spotify:section:shortcuts".into(),
+            title: String::new(),
+            subtitle: String::new(),
+            layout: spotify_client::home::Layout::Shortcuts,
+            header: None,
+            cards: vec![card("spotify:album:a", "shortcut")],
+            total: 1,
+            next: None,
+        };
+        let library = cache::Library {
+            playlists: Vec::new(),
+            discovery: Some(discovery::worker::Discovery {
+                home: Some(spotify_client::home::Home {
+                    sections: vec![section],
+                    ..Default::default()
+                }),
+                browse: Some(spotify_client::browse::BrowseAll {
+                    title: "Browse all".into(),
+                    tiles: vec![card("spotify:page:rock", "tile")],
+                }),
+            }),
+        };
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let covers = restore(library, &events);
+        assert_eq!(covers, [image("shortcut").unwrap(), image("tile").unwrap()]);
+        assert!(matches!(received.try_recv(), Ok(Event::Connected)));
+        assert!(matches!(received.try_recv(), Ok(Event::Library(_))));
+        assert!(matches!(received.try_recv(), Ok(Event::Discovery(_))));
+        assert!(received.try_recv().is_err());
     }
 }
