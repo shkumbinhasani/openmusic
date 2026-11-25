@@ -13,11 +13,14 @@ use crate::{
     api::Body,
     catalog::{LocalTrack, Track, image_url},
     connect::{Repeat, Shuffle},
+    loudness,
     playback_settings::LoudnessLevel,
     player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
 };
+use gain::{Gains, linear, state_options};
 use join::{Joins, Taken, choose_file};
 
+mod gain;
 mod join;
 
 #[derive(Clone, Debug)]
@@ -65,6 +68,7 @@ pub struct ReportItem {
     pub paused: bool,
     pub format: String,
     pub bitrate: u64,
+    pub gain_db: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +77,11 @@ pub struct ReportPrepared {
     pub uri: String,
     pub join: Join,
     pub ready: bool,
+    pub gain_db: Option<f32>,
+}
+
+fn gain_text(gain_db: Option<f32>) -> String {
+    gain_db.map_or_else(|| "none".to_owned(), |gain| format!("{gain:.2}dB"))
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -99,25 +108,27 @@ impl fmt::Display for AudioReport {
         match &self.playing {
             Some(item) => writeln!(
                 f,
-                "playing generation={} uri={} position={} duration={} paused={} format={} bitrate={}",
+                "playing generation={} uri={} position={} duration={} paused={} format={} bitrate={} gain={}",
                 item.generation,
                 item.uri,
                 item.position_ms,
                 item.duration_ms,
                 item.paused,
                 item.format,
-                item.bitrate
+                item.bitrate,
+                gain_text(item.gain_db)
             )?,
             None => writeln!(f, "playing none")?,
         }
         match &self.prepared {
             Some(prepared) => writeln!(
                 f,
-                "prepared generation={} uri={} join={} ready={}",
+                "prepared generation={} uri={} join={} ready={} gain={}",
                 prepared.generation,
                 prepared.uri,
                 prepared.join.name(),
-                prepared.ready
+                prepared.ready,
+                gain_text(prepared.gain_db)
             )?,
             None => writeln!(f, "prepared none")?,
         }
@@ -160,6 +171,7 @@ pub(super) struct State {
     settings: AudioSettings,
     updates: Vec<Update>,
     joins: Joins,
+    gains: Gains,
 }
 
 impl State {
@@ -181,6 +193,7 @@ pub(super) struct Playing {
     started_reported: bool,
     threshold_reported: bool,
     last_progress: Instant,
+    gain_db: Option<f32>,
 }
 
 impl Playing {
@@ -198,6 +211,7 @@ impl Playing {
             started_reported: false,
             threshold_reported: false,
             last_progress: Instant::now(),
+            gain_db: None,
         }
     }
 
@@ -283,11 +297,7 @@ impl Playing {
     }
 
     pub(super) fn options(&self) -> (Shuffle, Repeat) {
-        let options = self
-            .state()
-            .map(|state| &state["options"])
-            .filter(|options| options.is_object())
-            .unwrap_or(&self.machine["attributes"]["options"]);
+        let options = state_options(&self.machine, self.index);
         let flag = |key: &str| options[key].as_bool().unwrap_or(false);
         let shuffle = match (
             flag("shuffling_context"),
@@ -315,6 +325,7 @@ impl Engine {
             Control::Settings(settings) => {
                 self.audio.settings = settings;
                 self.check_prepared();
+                self.refresh_gains();
             }
             Control::Report => {
                 let report = self.audio_report();
@@ -339,6 +350,7 @@ impl Engine {
                     .map(str::to_owned)
                     .unwrap_or_else(|| playing.format.to_string()),
                 bitrate: playing.bitrate,
+                gain_db: playing.gain_db,
             }),
             prepared: self
                 .audio
@@ -607,14 +619,29 @@ impl Engine {
         playing.format = file.format.clone();
         playing.bitrate = file.bitrate;
         playing.duration_ms = track["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
+        let missing = self.audio.gains.missing(&playing.machine);
         self.playing = Some(playing);
         self.audio.joins.record(format!("cold {}", self.generation));
         self.report("before_track_load").await;
 
+        let api = self.api.clone();
+        let (found, media) = tokio::join!(
+            loudness::fetch(&api, &missing),
+            self.media(&file.id, &file.format_number)
+        );
+        self.store_loudness(found);
+        let gain_db = self
+            .playing
+            .as_ref()
+            .and_then(|playing| self.gain_at(&playing.machine, playing.index));
+        if let Some(playing) = self.playing.as_mut() {
+            playing.gain_db = gain_db;
+        }
         let media = Media {
             start_ms: seek.unwrap_or(initial),
             play: !paused,
-            ..self.media(&file.id, &file.format_number).await?
+            gain: linear(gain_db),
+            ..media?
         };
         self.player.set_volume(f32::from(self.volume) / GAIA_VOLUME);
         self.player.load(self.generation, media);

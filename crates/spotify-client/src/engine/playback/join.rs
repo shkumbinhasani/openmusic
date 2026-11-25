@@ -2,8 +2,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{AudioSettings, Playing, ReportPrepared};
-use crate::{engine::Engine, player::Join};
+use super::{AudioSettings, Playing, ReportPrepared, gain::linear};
+use crate::{
+    engine::Engine,
+    loudness,
+    player::{Join, Media},
+};
 
 pub(super) const PREPARE_LEAD_MS: u32 = 30_000;
 const JOIN_LOG: usize = 12;
@@ -112,11 +116,16 @@ pub(super) struct Prepared {
     file: File,
     duration_ms: u32,
     pub(super) ready: bool,
+    pub(super) gain_db: Option<f32>,
 }
 
 impl Prepared {
     pub(super) fn matches(&self, target: &Target) -> bool {
         !target.paused && self.target.state_id == target.state_id && self.target.uri == target.uri
+    }
+
+    pub(super) fn index(&self) -> usize {
+        self.target.index
     }
 
     pub(super) fn report(&self) -> ReportPrepared {
@@ -125,6 +134,7 @@ impl Prepared {
             uri: self.target.uri.clone(),
             join: self.join,
             ready: self.ready,
+            gain_db: self.gain_db,
         }
     }
 }
@@ -235,19 +245,38 @@ impl Engine {
         let duration_ms = track_at(&playing.machine, target.index)
             .and_then(|track| track["metadata"]["duration"].as_u64())
             .unwrap_or_default() as u32;
+        let missing = self.audio.gains.missing(&playing.machine);
         self.generation += 1;
         let generation = self.generation;
-        let media = match self.media(&file.id, &file.format_number).await {
+        let api = self.api.clone();
+        let (found, media) = tokio::join!(
+            loudness::fetch(&api, &missing),
+            self.media(&file.id, &file.format_number)
+        );
+        self.store_loudness(found);
+        let media = match media {
             Ok(media) => media,
             Err(_) => {
                 self.audio.joins.tried = Some(source);
                 return;
             }
         };
-        if self.playing.as_ref().map(|playing| playing.generation) != Some(source) {
+        let Some(playing) = self
+            .playing
+            .as_ref()
+            .filter(|playing| playing.generation == source)
+        else {
             return;
-        }
-        self.player.prepare(generation, media, join);
+        };
+        let gain_db = self.gain_at(&playing.machine, target.index);
+        self.player.prepare(
+            generation,
+            Media {
+                gain: linear(gain_db),
+                ..media
+            },
+            join,
+        );
         self.audio.joins.prepared = Some(Prepared {
             generation,
             target,
@@ -255,6 +284,7 @@ impl Engine {
             file,
             duration_ms,
             ready: false,
+            gain_db,
         });
     }
 
@@ -340,6 +370,7 @@ impl Engine {
         next.format = prepared.file.format.clone();
         next.bitrate = prepared.file.bitrate;
         next.duration_ms = prepared.duration_ms;
+        next.gain_db = prepared.gain_db;
         self.playing = Some(next);
         self.audio.joins.tried = None;
         self.audio
@@ -447,6 +478,7 @@ mod tests {
             },
             duration_ms: 180_000,
             ready: false,
+            gain_db: None,
         }
     }
 

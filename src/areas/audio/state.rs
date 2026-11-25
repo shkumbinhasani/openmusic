@@ -100,6 +100,14 @@ impl OpenMusic {
         self.change_audio(vec![Setting::Gapless(on)]);
     }
 
+    pub fn set_normalize(&mut self, on: bool) {
+        self.change_audio(vec![Setting::Normalize(on)]);
+    }
+
+    pub fn set_loudness_level(&mut self, level: LoudnessLevel) {
+        self.change_audio(vec![Setting::Normalize(true), Setting::Level(level)]);
+    }
+
     pub fn set_crossfade(&mut self, on: bool, ms: u32) {
         self.change_audio(vec![
             Setting::Crossfade(on),
@@ -232,6 +240,11 @@ pub fn debug(
                 _ => {}
             }
         }
+        "normalize" => match (switch(rest), LoudnessLevel::parse(rest)) {
+            (Some(on), _) => app.set_normalize(on),
+            (None, Some(level)) => app.set_loudness_level(level),
+            _ => {}
+        },
         _ => return false,
     }
     true
@@ -240,8 +253,12 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let prefs = &app.settings.audio;
     format!(
-        "gapless={} crossfade={} crossfade_ms={}",
-        prefs.gapless, prefs.crossfade, prefs.crossfade_ms
+        "gapless={} crossfade={} crossfade_ms={} normalize={} level={}",
+        prefs.gapless,
+        prefs.crossfade,
+        prefs.crossfade_ms,
+        prefs.normalize,
+        prefs.level.name()
     )
 }
 
