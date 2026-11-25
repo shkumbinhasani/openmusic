@@ -195,8 +195,6 @@ fn finished_mark(text: &'static str, palette: Palette) -> Div {
 fn paragraphs(text: &str, size: f32, palette: Palette) -> Div {
     div()
         .max_w(px(760.))
-        .flex()
-        .flex_col()
         .text_size(px(size))
         .line_height(px(size * 1.57))
         .text_color(rgb(palette.muted))
