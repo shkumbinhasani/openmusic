@@ -57,6 +57,7 @@ pub const VIRTUAL_PLAYLISTS: [&str; 3] = [
     "spotify:playlist:37i9dQZF1CIl0ks0ynmzpD",
 ];
 const DECORATE: &str = "revision,length,attributes,timestamp,owner,capabilities";
+const ITEMS_DECORATE: &str = "length";
 const START_GROUP: &str = "spotify:start-group:";
 const END_GROUP: &str = "spotify:end-group:";
 
@@ -1062,8 +1063,18 @@ pub async fn tracks_for(api: &Api, items: &[PlaylistItem]) -> Result<Vec<Track>>
 }
 
 async fn fetch(api: &Api, id: &str, from: usize, length: usize) -> Result<Value> {
+    fetch_decorated(api, id, DECORATE, from, length).await
+}
+
+async fn fetch_decorated(
+    api: &Api,
+    id: &str,
+    decorate: &str,
+    from: usize,
+    length: usize,
+) -> Result<Value> {
     api.get_json(&format!(
-        "/playlist/v2/playlist/{id}?decorate={DECORATE}&from={from}&length={length}"
+        "/playlist/v2/playlist/{id}?decorate={decorate}&from={from}&length={length}"
     ))
     .await
 }
@@ -1888,7 +1899,8 @@ pub async fn item_uris(api: &Api, uri: &str, limit: usize) -> Result<Vec<String>
     let mut uris = Vec::new();
     let mut from = 0;
     loop {
-        let contents = parse_contents(&fetch(api, id, from, PAGE).await?);
+        let page = fetch_decorated(api, id, ITEMS_DECORATE, from, PAGE).await?;
+        let contents = parse_contents(&page);
         uris.extend(contents.items.into_iter().map(|item| item.uri));
         match contents.next {
             Some(next) if next > from && uris.len() < limit => from = next,

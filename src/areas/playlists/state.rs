@@ -253,6 +253,23 @@ impl State {
         self.editable.values_mut().for_each(Editable::stale);
     }
 
+    fn curated_in(&self, sources: &[String], target: &str) -> Option<bool> {
+        let [source] = sources else {
+            return None;
+        };
+        if !playlist::addable(source) {
+            return None;
+        }
+        let entry = self.editable.get(sources).filter(|entry| entry.fresh())?;
+        let Some(Ok(targets)) = &entry.result else {
+            return None;
+        };
+        targets
+            .iter()
+            .find(|found| found.uri == target && found.kind != TargetKind::Folder)
+            .map(|found| found.curates)
+    }
+
     fn rootlist_loaded(&mut self, user: String, rootlist: Rootlist) {
         self.base_queue = rootlist
             .playlists()
@@ -373,6 +390,10 @@ impl DuplicateQuestion {
             some,
         }
     }
+}
+
+pub fn adding_note(name: &str) -> String {
+    format!("Adding to {name}…")
 }
 
 fn row_uid(track: &Track) -> Option<&str> {
@@ -910,7 +931,25 @@ impl OpenMusic {
                     .iter()
                     .map(|track| track.uri.clone())
                     .collect()
+            })
+            .or_else(|| {
+                let curates = self.playlists.curated_in(&sources, &info.uri)?;
+                Some(if curates {
+                    sources.iter().cloned().collect()
+                } else {
+                    HashSet::new()
+                })
             });
+        let long = known.is_none()
+            && self
+                .playlists
+                .rootlist
+                .as_ref()
+                .and_then(|list| list.playlist(&info.uri))
+                .is_some_and(|entry| entry.length as usize > playlist::PAGE);
+        if long {
+            self.show_waiting_toast(adding_note(&info.name));
+        }
         self.send(Command::PrepareAdd {
             target: info.uri,
             name: info.name,
@@ -1645,9 +1684,12 @@ pub fn on_event(
             }
         }
         Event::AddReady(ready) => {
-            if ready.duplicates.is_empty() {
+            if ready.duplicates.is_empty() && !ready.uris.is_empty() {
                 app.write_add(ready.target, ready.name, ready.uris, ready.position);
-            } else {
+                return;
+            }
+            app.dismiss_toast(&adding_note(&ready.name));
+            if !ready.duplicates.is_empty() {
                 app.confirm_duplicates(ready, window, cx);
             }
         }
@@ -2499,6 +2541,26 @@ mod tests {
         state.store_editable(song.clone(), Ok(vec![target(LIST, true)]));
         assert_eq!(curated(&state, &song), Some(vec![true]));
         assert!(!state.ask_editable(&[]));
+    }
+
+    #[test]
+    fn answers_the_duplicate_check_from_a_fresh_list() {
+        let mut state = State::default();
+        let song = vec!["spotify:track:t".to_owned()];
+        let other = "spotify:playlist:other";
+        assert_eq!(state.curated_in(&song, LIST), None);
+        state.store_editable(
+            song.clone(),
+            Ok(vec![target(LIST, true), target(other, false)]),
+        );
+        assert_eq!(state.curated_in(&song, LIST), Some(true));
+        assert_eq!(state.curated_in(&song, other), Some(false));
+        assert_eq!(state.curated_in(&song, "spotify:playlist:missing"), None);
+        let album = vec!["spotify:album:a".to_owned()];
+        state.store_editable(album.clone(), Ok(vec![target(LIST, true)]));
+        assert_eq!(state.curated_in(&album, LIST), None);
+        state.stale_editable();
+        assert_eq!(state.curated_in(&song, LIST), None);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::app::OpenMusic;
 
 const SHOWN_FOR: Duration = Duration::from_secs(4);
 const SHOWN_WITH_UNDO_FOR: Duration = Duration::from_secs(6);
+const WAITING_FOR: Duration = Duration::from_secs(60);
 
 pub type Undo = Rc<dyn Fn(&mut OpenMusic, &mut Context<OpenMusic>)>;
 
@@ -30,6 +31,20 @@ impl OpenMusic {
             undo,
             until: Instant::now() + shown_for,
         });
+    }
+
+    pub fn show_waiting_toast(&mut self, text: impl Into<String>) {
+        self.toast = Some(Toast {
+            text: text.into(),
+            undo: None,
+            until: Instant::now() + WAITING_FOR,
+        });
+    }
+
+    pub fn dismiss_toast(&mut self, text: &str) {
+        if self.toast.as_ref().is_some_and(|toast| toast.text == text) {
+            self.toast = None;
+        }
     }
 
     pub fn show_toast_if_idle(&mut self, text: impl Into<String>) {
