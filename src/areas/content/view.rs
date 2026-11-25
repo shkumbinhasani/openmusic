@@ -4,7 +4,7 @@ use gpui::{
 };
 use spotify_client::{
     Track, entity,
-    podcast::{self, Availability, Episode, Played, Show, ShowKind},
+    podcast::{self, Availability, Episode, Played, Show, ShowKind, similar},
 };
 
 use super::state::{open_in_spotify, show_kind_label};
@@ -338,7 +338,7 @@ impl OpenMusic {
     pub fn show_page(
         &self,
         uri: &str,
-        _card_side: Pixels,
+        card_side: Pixels,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -390,6 +390,25 @@ impl OpenMusic {
                         .children(copyrights.into_iter().map(|line| div().child(line))),
                 )
             })
+            .when_some(
+                self.content
+                    .similar
+                    .as_ref()
+                    .filter(|(loaded, _)| loaded == uri)
+                    .and_then(|(_, cards)| cards.as_ref().ok())
+                    .filter(|cards| !cards.is_empty()),
+                |page, cards| {
+                    page.child(self.shelf(
+                        similar::title(show.kind),
+                        None,
+                        cards,
+                        "show-similar",
+                        card_side,
+                        palette,
+                        cx,
+                    ))
+                },
+            )
             .into_any_element()
     }
 
@@ -401,15 +420,7 @@ impl OpenMusic {
         let has_menu = self.has_menu(&target);
         let saved = self.saved_or_known(&show.uri).unwrap_or(false);
         let book = show.book.as_ref();
-        let byline = match book {
-            Some(book) if !book.authors.is_empty() => book
-                .authors
-                .iter()
-                .map(|author| author.name.clone())
-                .collect::<Vec<_>>()
-                .join(", "),
-            _ => show.publisher.clone(),
-        };
+        let byline = self.byline(show, palette, cx);
         let narrators = book
             .map(|book| book.narrators.join(", "))
             .filter(|narrators| !narrators.is_empty());
@@ -508,16 +519,7 @@ impl OpenMusic {
                             .text_ellipsis()
                             .child(show.name.clone()),
                     )
-                    .when(!byline.is_empty(), |column| {
-                        column.child(
-                            div()
-                                .w_full()
-                                .truncate()
-                                .text_size(px(14.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(byline),
-                        )
-                    })
+                    .when_some(byline, |column, byline| column.child(byline))
                     .when_some(narrators, |column, narrators| {
                         column.child(
                             div()
@@ -573,6 +575,44 @@ impl OpenMusic {
                         actions.child(self.menu_button("more-show", &show.name, palette, cx))
                     })),
             )
+    }
+
+    fn byline(&self, show: &Show, palette: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let line = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .text_size(px(14.))
+            .font_weight(FontWeight::SEMIBOLD);
+        let authors = show
+            .book
+            .as_ref()
+            .map(|book| book.authors.as_slice())
+            .unwrap_or_default();
+        if authors.is_empty() {
+            return (!show.publisher.is_empty())
+                .then(|| line.child(div().truncate().child(show.publisher.clone())));
+        }
+        Some(
+            line.children(authors.iter().enumerate().map(|(index, author)| {
+                let name = if index + 1 < authors.len() {
+                    format!("{}, ", author.name)
+                } else {
+                    author.name.clone()
+                };
+                let uri = author.uri.clone();
+                div()
+                    .id(("book-author", index))
+                    .flex_shrink_0()
+                    .when(!uri.is_empty(), |name| {
+                        name.cursor_pointer()
+                            .hover(move |name| name.text_color(rgb(palette.text)).underline())
+                            .on_click(cx.listener(move |_, _, _, cx| open_in_spotify(&uri, cx)))
+                    })
+                    .child(name)
+            })),
+        )
     }
 
     fn access_note(&self, show: &Show, palette: Palette) -> Option<Div> {
@@ -1375,13 +1415,24 @@ fn library_item(app: &OpenMusic, uri: &str, titles: [(&'static str, &'static str
     .enabled(!app.saving(uri))
 }
 
+fn open_item(uri: String) -> MenuItem {
+    MenuItem::action("Open in Spotify", move |_, _, cx| open_in_spotify(&uri, cx))
+        .symbol("arrow.up.forward.app")
+}
+
 fn episode_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    let chapter = app
+    let book = app
         .content
         .loaded_episode(uri)
-        .is_some_and(|episode| episode.chapter);
+        .filter(|episode| episode.chapter)
+        .map(|episode| episode.show_uri.clone());
     let mut items = Vec::new();
-    if !chapter {
+    if let Some(book) = &book {
+        items.push((
+            Group::Navigate,
+            open_item(book.clone().unwrap_or_else(|| uri.to_owned())),
+        ));
+    } else {
         items.push((
             Group::Library,
             library_item(
@@ -1414,19 +1465,30 @@ fn episode_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
 }
 
 fn show_items(uri: &str, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    let book = app
-        .content
-        .loaded_show()
-        .is_some_and(|show| show.uri == uri && show.kind == ShowKind::Audiobook);
-    let titles = if book {
-        [
-            ("Add to Your Library", "plus.circle"),
-            ("Remove from Your Library", "minus.circle"),
-        ]
-    } else {
-        [("Follow", "plus.circle"), ("Unfollow", "minus.circle")]
-    };
-    vec![(Group::Library, library_item(app, uri, titles))]
+    if app.show_kind(uri) == Some(ShowKind::Audiobook) {
+        return vec![
+            (
+                Group::Library,
+                library_item(
+                    app,
+                    uri,
+                    [
+                        ("Add to Your Library", "plus.circle"),
+                        ("Remove from Your Library", "minus.circle"),
+                    ],
+                ),
+            ),
+            (Group::Navigate, open_item(uri.to_owned())),
+        ];
+    }
+    vec![(
+        Group::Library,
+        library_item(
+            app,
+            uri,
+            [("Follow", "plus.circle"), ("Unfollow", "minus.circle")],
+        ),
+    )]
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {

@@ -4,8 +4,9 @@ use spotify_client::{
     Api, catalog,
     catalog::Lyrics,
     dealer::Message,
+    entity::Card,
     podcast::{
-        self, Episode, EpisodePage, Show, ShowKind, Transcript, Unavailable, transcript,
+        self, Episode, EpisodePage, Show, ShowKind, Transcript, Unavailable, similar, transcript,
         your_episodes::{self, Entry},
     },
 };
@@ -36,6 +37,10 @@ pub enum Command {
     },
     YourEpisodes,
     DecorateEpisodes(Vec<String>),
+    Similar {
+        uri: String,
+        kind: ShowKind,
+    },
 }
 
 pub enum Event {
@@ -65,6 +70,10 @@ pub enum Event {
     Decorated {
         uris: Vec<String>,
         result: Result<Vec<Option<Episode>>, String>,
+    },
+    Similar {
+        uri: String,
+        result: Result<Vec<Card>, String>,
     },
 }
 
@@ -101,6 +110,9 @@ impl Event {
                 .flatten()
                 .filter_map(|episode| episode.cover.clone())
                 .collect(),
+            Self::Similar {
+                result: Ok(cards), ..
+            } => cards.iter().filter_map(|card| card.image.clone()).collect(),
             Self::Lyrics { .. }
             | Self::Show { .. }
             | Self::ShowPage { .. }
@@ -108,7 +120,8 @@ impl Event {
             | Self::Refreshed(_)
             | Self::Marked { .. }
             | Self::YourEpisodes(_)
-            | Self::Decorated { .. } => Vec::new(),
+            | Self::Decorated { .. }
+            | Self::Similar { .. } => Vec::new(),
         }
     }
 }
@@ -149,6 +162,9 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::DecorateEpisodes(uris) => ctx
             .tasks
             .spawn_keyed("your-episodes-decorate", decorate(ctx.api.clone(), uris)),
+        Command::Similar { uri, kind } => ctx
+            .tasks
+            .spawn_keyed("show-similar", similar_shows(ctx.api.clone(), uri, kind)),
     }
 }
 
@@ -233,6 +249,13 @@ async fn your_episode_list(api: Api, user: User) -> crate::worker::Event {
         Err(error) => Err(error),
     };
     Event::YourEpisodes(result.map_err(|_| "Couldn’t load Your Episodes.".to_owned())).into()
+}
+
+async fn similar_shows(api: Api, uri: String, kind: ShowKind) -> crate::worker::Event {
+    let result = similar::similar(&api, &uri, kind)
+        .await
+        .map_err(|error| error.to_string());
+    Event::Similar { uri, result }.into()
 }
 
 async fn decorate(api: Api, uris: Vec<String>) -> crate::worker::Event {

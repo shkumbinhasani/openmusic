@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use spotify_client::{
     catalog::Lyrics,
     engine::NowPlaying,
+    entity::{Card, Kind},
     podcast::{
         self, Availability, Episode, Played, Show, ShowKind,
         your_episodes::{Filter, Sort},
@@ -60,6 +61,8 @@ pub struct State {
     pub wanted: HashMap<String, (bool, Instant)>,
     pub yours: Yours,
     pub transcript: Option<TranscriptView>,
+    pub similar: Option<(String, Result<Vec<Card>, String>)>,
+    pub kinds: HashMap<String, ShowKind>,
 }
 
 impl State {
@@ -76,6 +79,9 @@ impl State {
             urls.extend(episode.large_cover.clone());
         }
         self.yours.covers(urls);
+        if let Some((_, Ok(cards))) = &self.similar {
+            urls.extend(cards.iter().filter_map(|card| card.image.clone()));
+        }
     }
 
     pub fn loaded_show(&self) -> Option<&Show> {
@@ -96,7 +102,32 @@ impl State {
             .or_else(|| self.yours.episodes.get(uri))
     }
 
+    fn note_kinds(&mut self, episodes: &[Episode]) {
+        for episode in episodes {
+            if let Some(show) = &episode.show_uri {
+                let kind = if episode.chapter {
+                    ShowKind::Audiobook
+                } else {
+                    ShowKind::Podcast
+                };
+                self.kinds.insert(show.clone(), kind);
+            }
+        }
+    }
+
+    fn note_cards(&mut self, cards: &[Card]) {
+        for card in cards {
+            let kind = match card.kind {
+                Kind::Audiobook => ShowKind::Audiobook,
+                Kind::Show => ShowKind::Podcast,
+                _ => continue,
+            };
+            self.kinds.insert(card.uri.clone(), kind);
+        }
+    }
+
     fn note(&mut self, episodes: &[Episode]) {
+        self.note_kinds(episodes);
         for episode in episodes {
             if episode.playable() {
                 self.unavailable.remove(&episode.uri);
@@ -431,6 +462,14 @@ impl OpenMusic {
         })
     }
 
+    pub fn show_kind(&self, uri: &str) -> Option<ShowKind> {
+        self.content
+            .loaded_show()
+            .filter(|show| show.uri == uri)
+            .map(|show| show.kind)
+            .or_else(|| self.content.kinds.get(uri).copied())
+    }
+
     pub fn saving(&self, uri: &str) -> bool {
         self.saved.pending.contains_key(uri) || self.content.wanted.contains_key(uri)
     }
@@ -549,6 +588,7 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
                 app.content.show_loading = false;
                 app.content.show_error = None;
                 app.content.about_open = false;
+                app.content.similar = None;
                 app.send(Command::Show(uri.clone()));
             }
             app.lookup_saved([uri.clone()]);
@@ -604,7 +644,12 @@ pub fn on_event(
             }
             if let Ok(show) = &result {
                 app.content.note(&show.episodes);
+                app.content.kinds.insert(show.uri.clone(), show.kind);
                 app.lookup_episodes(&show.episodes);
+                app.send(Command::Similar {
+                    uri: show.uri.clone(),
+                    kind: show.kind,
+                });
             }
             app.content.show = Some((uri, result.map(|show| *show)));
             app.content.show_loading = false;
@@ -678,6 +723,18 @@ pub fn on_event(
                 app.your_episodes_tick();
             }
         }
+        Event::Similar { uri, result } => {
+            if let Ok(cards) = &result {
+                app.content.note_cards(cards);
+            }
+            if app
+                .content
+                .loaded_show()
+                .is_some_and(|show| show.uri == uri)
+            {
+                app.content.similar = Some((uri, result));
+            }
+        }
         Event::Marked { uris, error } => {
             let mut settled = Vec::new();
             for uri in &uris {
@@ -736,6 +793,22 @@ fn describe_show(app: &OpenMusic, show: &Show, lines: &mut String) {
         app.content.show_error,
         show.name,
     );
+    match &app.content.similar {
+        Some((uri, Ok(cards))) if *uri == show.uri => {
+            let _ = writeln!(lines, "similar {}", cards.len());
+            for card in cards {
+                let _ = writeln!(
+                    lines,
+                    "  similar {} {:?} {:?}",
+                    card.uri, card.kind, card.title
+                );
+            }
+        }
+        Some((uri, Err(error))) if *uri == show.uri => {
+            let _ = writeln!(lines, "similar error={error:?}");
+        }
+        _ => lines.push_str("similar loading\n"),
+    }
     for (index, episode) in show.episodes.iter().enumerate() {
         let _ = writeln!(
             lines,
@@ -1138,6 +1211,65 @@ mod tests {
         state.marks.insert("spotify:episode:a".into(), false);
         state.patch(&fresh);
         assert_eq!(state.marks.get("spotify:episode:a"), Some(&false));
+    }
+
+    #[test]
+    fn remembers_which_shows_are_books() {
+        let mut state = State::default();
+        let chapter = Episode {
+            chapter: true,
+            show_uri: Some("spotify:show:book".into()),
+            ..episode(
+                "spotify:episode:c",
+                Played::NotStarted,
+                Availability::PaymentRequired,
+            )
+        };
+        let podcast_episode = Episode {
+            show_uri: Some("spotify:show:podcast".into()),
+            ..episode(
+                "spotify:episode:p",
+                Played::NotStarted,
+                Availability::Playable,
+            )
+        };
+        state.note(&[chapter, podcast_episode]);
+        assert_eq!(
+            state.kinds.get("spotify:show:book"),
+            Some(&ShowKind::Audiobook)
+        );
+        assert_eq!(
+            state.kinds.get("spotify:show:podcast"),
+            Some(&ShowKind::Podcast)
+        );
+        assert!(state.unavailable.contains("spotify:episode:c"));
+
+        let card = |uri: &str, kind: Kind| Card {
+            uri: uri.into(),
+            kind,
+            title: uri.into(),
+            subtitle: String::new(),
+            image: None,
+            format: None,
+            color: None,
+            reason: None,
+            explicit: false,
+            playable: true,
+        };
+        state.note_cards(&[
+            card("spotify:show:other-book", Kind::Audiobook),
+            card("spotify:show:other-show", Kind::Show),
+            card("spotify:album:x", Kind::Album),
+        ]);
+        assert_eq!(
+            state.kinds.get("spotify:show:other-book"),
+            Some(&ShowKind::Audiobook)
+        );
+        assert_eq!(
+            state.kinds.get("spotify:show:other-show"),
+            Some(&ShowKind::Podcast)
+        );
+        assert!(!state.kinds.contains_key("spotify:album:x"));
     }
 
     #[test]
