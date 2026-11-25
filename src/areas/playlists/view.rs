@@ -1115,7 +1115,6 @@ fn add_submenu(title: &str, app: &OpenMusic, source: &AddSource) -> MenuItem {
     MenuItem::submenu(title, add_menu(app, source))
         .symbol("plus")
         .search("Find a playlist")
-        .id(ADD_MENU)
 }
 
 fn track_items(target: &TrackTarget, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
@@ -1132,7 +1131,10 @@ fn track_items(target: &TrackTarget, app: &OpenMusic) -> Vec<(Group, MenuItem)> 
     if target.surface != Surface::NowPlaying {
         app.playlists.wanted.replace(Some(source.clone()));
     }
-    let mut items = vec![(Group::Edit, add_submenu("Add to playlist", app, &source))];
+    let mut items = vec![(
+        Group::Edit,
+        add_submenu("Add to playlist", app, &source).id(ADD_MENU),
+    )];
     if let (Some(uid), Some(context)) = (&target.uid, &target.context)
         && !matches!(target.provider.as_deref(), Some("autoplay" | "queue"))
         && app
