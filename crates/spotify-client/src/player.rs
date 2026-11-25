@@ -237,6 +237,7 @@ struct Licensing {
     certificate: Arc<Vec<u8>>,
     license_url: String,
     token: String,
+    generation: u64,
 }
 
 struct Item {
@@ -413,6 +414,19 @@ fn playlist_key(host: &str, path: &str) -> String {
     format!("{host}/{}", path.trim_start_matches('/'))
 }
 
+fn forget(key: &str, file_id: Option<&str>, generation: u64) {
+    let prefix = format!("{key}/");
+    if let Ok(mut map) = playlists().lock() {
+        map.retain(|name, _| !name.starts_with(&prefix));
+    }
+    if let (Some(file_id), Ok(files)) = (file_id, files().lock())
+        && files.get(file_id) == Some(&generation)
+        && let Ok(mut licenses) = licensing().lock()
+    {
+        licenses.remove(file_id);
+    }
+}
+
 fn generation_for(file_id: &str) -> u64 {
     files()
         .lock()
@@ -521,16 +535,23 @@ fn content_id(request: &AVContentKeyRequest) -> String {
 
 fn provide_key(request: &AVContentKeyRequest) {
     let identifier = content_id(request);
-    let Some((certificate, license_url, token)) = licensing().lock().ok().and_then(|licenses| {
-        licenses.find(&identifier).map(|licensing| {
-            (
-                licensing.certificate.clone(),
-                licensing.license_url.clone(),
-                licensing.token.clone(),
-            )
+    let Some((certificate, license_url, token, generation)) =
+        licensing().lock().ok().and_then(|licenses| {
+            licenses.find(&identifier).map(|licensing| {
+                (
+                    licensing.certificate.clone(),
+                    licensing.license_url.clone(),
+                    licensing.token.clone(),
+                    licensing.generation,
+                )
+            })
         })
-    }) else {
+    else {
         return;
+    };
+    let generation = match generation_for(&identifier) {
+        0 => generation,
+        known => known,
     };
     let Some(shared) = shared() else {
         return;
@@ -539,7 +560,11 @@ fn provide_key(request: &AVContentKeyRequest) {
     let handler = RcBlock::new(move |spc: *mut NSData, _error: *mut NSError| {
         let request = Sendable(captured.0.clone());
         let Some(spc) = (unsafe { spc.as_ref() }) else {
-            fail_key(&request.0, "FairPlay could not create a license request.");
+            fail_key(
+                &request.0,
+                generation,
+                "FairPlay could not create a license request.",
+            );
             return;
         };
         let spc = spc.to_vec();
@@ -565,13 +590,18 @@ fn provide_key(request: &AVContentKeyRequest) {
                             );
                         request.0.processContentKeyResponse(&response);
                     },
-                    Err(_) => fail_key(&request.0, "Spotify's license was unreadable."),
+                    Err(_) => fail_key(&request.0, generation, "Spotify's license was unreadable."),
                 },
                 Ok(response) => fail_key(
                     &request.0,
+                    generation,
                     &format!("Spotify refused the license ({}).", response.status()),
                 ),
-                Err(_) => fail_key(&request.0, "Could not reach Spotify's license service."),
+                Err(_) => fail_key(
+                    &request.0,
+                    generation,
+                    "Could not reach Spotify's license service.",
+                ),
             }
         });
     });
@@ -586,11 +616,11 @@ fn provide_key(request: &AVContentKeyRequest) {
     }
 }
 
-fn fail_key(request: &AVContentKeyRequest, message: &str) {
+fn fail_key(request: &AVContentKeyRequest, generation: u64, message: &str) {
     let error = NSError::new(-1, &NSString::from_str("OpenMusicLicense"));
     unsafe { request.processContentKeyResponseError(&error) };
     emit(PlayerEvent::Failed {
-        generation: generation_for(&content_id(request)),
+        generation,
         message: message.to_owned(),
     });
 }
@@ -858,6 +888,7 @@ impl MainState {
                         certificate: fairplay.certificate.clone(),
                         license_url: fairplay.license_url.clone(),
                         token: fairplay.token.clone(),
+                        generation,
                     },
                 );
                 (
@@ -880,6 +911,7 @@ impl MainState {
                             certificate: protection.certificate.clone(),
                             license_url: protection.license_url.clone(),
                             token: protection.token.clone(),
+                            generation,
                         },
                     );
                 }
@@ -947,18 +979,7 @@ impl MainState {
     }
 
     fn forget(&self, key: &str, file_id: Option<&str>, generation: u64) {
-        let prefix = format!("{key}/");
-        if let Ok(mut map) = playlists().lock() {
-            map.retain(|name, _| !name.starts_with(&prefix));
-        }
-        if let (Some(file_id), Ok(mut files)) = (file_id, files().lock())
-            && files.get(file_id) == Some(&generation)
-        {
-            files.remove(file_id);
-            if let Ok(mut licenses) = licensing().lock() {
-                licenses.remove(file_id);
-            }
-        }
+        forget(key, file_id, generation);
     }
 
     fn release(&self, item: Item) {
@@ -1735,7 +1756,28 @@ mod tests {
             certificate: Arc::new(Vec::new()),
             license_url: url.into(),
             token: "old".into(),
+            generation: 4,
         }
+    }
+
+    #[test]
+    fn keeps_the_generation_of_a_released_file() {
+        let file = "released-file-0000";
+        files().lock().unwrap().insert(file.into(), 9);
+        licensing().lock().unwrap().insert(
+            file,
+            Licensing {
+                generation: 9,
+                ..service("https://spclient.example/audio")
+            },
+        );
+        forget("track9", Some(file), 9);
+        assert_eq!(generation_for(file), 9);
+        assert!(!licensing().lock().unwrap().by_content.contains_key(file));
+        files().lock().unwrap().insert(file.into(), 12);
+        forget("track9", Some(file), 9);
+        assert_eq!(generation_for(file), 12);
+        files().lock().unwrap().remove(file);
     }
 
     #[test]
@@ -1751,6 +1793,7 @@ mod tests {
             licenses.find("6f5cc32c").unwrap().license_url,
             "https://spclient.example/audio"
         );
+        assert_eq!(licenses.find("6f5cc32c").unwrap().generation, 4);
         assert_eq!(
             licenses.find("0000eeee").unwrap().license_url,
             "https://spclient.example/video/0000eeee?mpegTs=true"
