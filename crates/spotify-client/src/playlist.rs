@@ -34,10 +34,6 @@ pub const EDITABLE_PLAYLISTS: Operation = Operation::query(
     "editablePlaylists",
     "d5c4b8096437dcc2ac9528c91dfcd299e35b747cda2f8f75d28f41f49c5092ba",
 );
-pub const IS_CURATED: Operation = Operation::query(
-    "isCurated",
-    "e4ed1f91a2cc5415befedb85acf8671dc1a4bf3ca1a5b945a6386101a22e28a6",
-);
 pub const APPLY_CURATIONS: Operation = Operation::mutation(
     "applyCurations",
     "05b739a3a73091c213385233b9d3ed8a857c2ca29d2eebadb3d04ed12e288697",
@@ -1480,24 +1476,6 @@ pub async fn delete_folder(api: &Api, user: &str, hash: &str) -> Result<String> 
     apply_indexed(api, user, |list| delete_folder_changes(list, hash)).await
 }
 
-pub async fn move_folder(api: &Api, user: &str, hash: &str, to: usize) -> Result<String> {
-    apply_indexed(api, user, |list| move_folder_changes(list, hash, to)).await
-}
-
-pub async fn move_playlists(
-    api: &Api,
-    user: &str,
-    uris: &[String],
-    position: &Position,
-) -> Result<String> {
-    let list = rootlist(api, user).await?;
-    let keys = place_keys(&list, uris);
-    if keys.is_empty() {
-        bail!("These playlists are not in Your Library.");
-    }
-    rootlist_apply(api, user, &move_playlists_changes(&keys, position), None).await
-}
-
 fn permission_path(uri: &str, rest: &str) -> Result<String> {
     Ok(format!(
         "/playlist-permission/v1/playlist/{}/{rest}",
@@ -1847,20 +1825,6 @@ pub fn editable_tree(items: &[EditTarget]) -> Vec<(usize, &EditTarget)> {
     let mut out = Vec::new();
     walk(items, None, 0, &mut HashSet::new(), &mut out);
     out
-}
-
-pub fn parse_is_curated(data: &Value) -> Vec<Option<bool>> {
-    data["lookup"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|item| item["data"]["isCurated"].as_bool())
-        .collect()
-}
-
-pub async fn is_curated(api: &Api, uris: &[String]) -> Result<Vec<Option<bool>>> {
-    let data = pathfinder::query(api, IS_CURATED, json!({ "uris": uris })).await?;
-    Ok(parse_is_curated(&data))
 }
 
 pub fn curation_variables(items: &[String], changes: &[(String, bool)]) -> Value {
@@ -2609,14 +2573,8 @@ mod tests {
 
     #[test]
     fn builds_curation_requests() {
-        assert_eq!(IS_CURATED.kind, pathfinder::Kind::Query);
         assert_eq!(APPLY_CURATIONS.kind, pathfinder::Kind::Mutation);
         assert_eq!(EDITABLE_PLAYLISTS.kind, pathfinder::Kind::Query);
-        let lookup = json!({"lookup":[
-            {"__typename":"TrackResponseWrapper","data":{"__typename":"Track","isCurated":true}},
-            {"__typename":"TrackResponseWrapper","data":{"__typename":"Track","isCurated":false}},
-            {"__typename":"NotFound"}]});
-        assert_eq!(parse_is_curated(&lookup), [Some(true), Some(false), None]);
         assert_eq!(
             curation_variables(
                 &["spotify:track:a".into()],

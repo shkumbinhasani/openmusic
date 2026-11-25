@@ -93,12 +93,6 @@ impl Home {
         self.sections.iter().flat_map(Section::images).collect()
     }
 
-    pub fn chip_parent(&self, facet: &str) -> Option<&Chip> {
-        self.chips
-            .iter()
-            .find(|chip| chip.id == facet || chip.sub.iter().any(|sub| sub.id == facet))
-    }
-
     pub fn section(&self, uri: &str) -> Option<&Section> {
         self.sections.iter().find(|section| section.uri == uri)
     }
@@ -552,12 +546,6 @@ mod tests {
             [("music-chip", "Music", 1), ("podcasts-chip", "Podcasts", 0)]
         );
         assert_eq!(home.chips[0].sub[0].label, "Following");
-        assert_eq!(
-            home.chip_parent("music-following-chip")
-                .map(|chip| chip.id.as_str()),
-            Some("music-chip")
-        );
-        assert_eq!(home.chip_parent("unknown"), None);
     }
 
     #[test]

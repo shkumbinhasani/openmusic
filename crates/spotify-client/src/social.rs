@@ -512,8 +512,6 @@ pub enum PrivacyField {
 }
 
 impl PrivacyField {
-    pub const FIELDS: [Self; 3] = [Self::AllowFollows, Self::ShowFollows, Self::ShowPlaylists];
-
     pub fn path(self) -> &'static str {
         match self {
             Self::AllowFollows => "allow_follows",
@@ -1138,7 +1136,11 @@ mod tests {
         assert_eq!(update.allow_follows, None);
 
         let mut privacy = Privacy::default();
-        for field in PrivacyField::FIELDS {
+        for field in [
+            PrivacyField::AllowFollows,
+            PrivacyField::ShowFollows,
+            PrivacyField::ShowPlaylists,
+        ] {
             field.set(&mut privacy, true);
             assert!(field.get(&privacy));
         }

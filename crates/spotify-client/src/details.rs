@@ -548,10 +548,6 @@ fn artist_ban(uri: &str, banned: bool) -> collection::Write {
     }
 }
 
-pub fn artist_ban_body(user: &str, uri: &str, banned: bool) -> Value {
-    collection::write_body(user, ARTIST_BAN, &[artist_ban(uri, banned)])
-}
-
 pub async fn banned_artists(api: &Api, user: &str) -> Result<Vec<String>> {
     Ok(collection::all(api, user, ARTIST_BAN)
         .await?
@@ -1442,13 +1438,21 @@ mod tests {
     #[test]
     fn bans_artists_like_the_web_client() {
         assert_eq!(
-            artist_ban_body("someone", "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", true),
+            collection::write_body(
+                "someone",
+                ARTIST_BAN,
+                &[artist_ban("spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", true)]
+            ),
             json!({"username": "someone", "set": "artistban", "items": [
                 {"uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb"}
             ]})
         );
         assert_eq!(
-            artist_ban_body("someone", "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", false),
+            collection::write_body(
+                "someone",
+                ARTIST_BAN,
+                &[artist_ban("spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", false)]
+            ),
             json!({"username": "someone", "set": "artistban", "items": [
                 {"uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", "is_removed": true}
             ]})

@@ -24,7 +24,6 @@ pub const REFERRER: &str = "home";
 pub const JUMP: &str = "jump";
 pub const CONTEXT_URL: &str = "lexicon_context_url";
 pub const LEXICON: &str = "your_dj";
-pub const NARRATION_COLOR: &str = "#0A59B8";
 const DELIMITERS: [&str; 2] = ["spotify:delimiter", "spotify:meta:delimiter"];
 const NARRATION_KEYS: [&str; 2] = ["narration.intro.ssml", "narration.jump.ssml"];
 

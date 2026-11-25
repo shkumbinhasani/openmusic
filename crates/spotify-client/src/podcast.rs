@@ -32,22 +32,6 @@ pub const EPISODE_OR_CHAPTER: Operation = Operation::query(
     "getEpisodeOrChapter",
     "5f77db47e5a2ce6680330bb61317aa09e17ddd1d189513cb218e7cd3e43288be",
 );
-pub const SHOW_PLAYED_STATE: Operation = Operation::query(
-    "showItemsPlayedState",
-    "4a070b9bfab2e8537a5271e6839bc3ef51501dcac8170b5fb69a98f967c5fb60",
-);
-pub const DECORATE_EPISODES: Operation = Operation::query(
-    "decorateContextEpisodesOrChapters",
-    "383de00240775c39a6afe0b1055dc562b2a3930894201f9762f3fc32a74971c7",
-);
-pub const AUDIOBOOKS_METADATA: Operation = Operation::query(
-    "getAudiobooksMetadata",
-    "523c71c64749a628f83e6b31a122c76663243730bf02df01fd64abf0f62f572f",
-);
-pub const NPV_EPISODE: Operation = Operation::query(
-    "queryNpvEpisode",
-    "5704293e4a52b987c87bc11afe210aaca52813405c85ff8d0632e7587ebc6e18",
-);
 
 pub const PAGE_SIZE: u32 = 50;
 pub const HEADER_IMAGE: u32 = 640;
@@ -754,18 +738,6 @@ pub fn parse_show(data: &Value) -> Result<Show> {
     })
 }
 
-pub fn parse_played_states(data: &Value) -> Vec<Played> {
-    let union = &data["lookup"][0]["data"];
-    ["episodesV2", "chaptersV2"]
-        .iter()
-        .map(|key| &union[*key]["items"])
-        .find_map(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|item| played(&item["entity"]["data"]))
-        .collect()
-}
-
 pub fn show_variables(uri: &str) -> Value {
     json!({
         "uri": uri,
@@ -825,16 +797,6 @@ pub async fn show(api: &Api, uri: &str) -> Result<Show> {
 pub async fn episode(api: &Api, uri: &str) -> Result<Episode> {
     let data = pathfinder::query(api, EPISODE_OR_CHAPTER, episode_variables(uri)).await?;
     parse_episode(&data)
-}
-
-pub async fn played_states(api: &Api, uri: &str, limit: u32) -> Result<Vec<Played>> {
-    let data = pathfinder::query(
-        api,
-        SHOW_PLAYED_STATE,
-        json!({ "uri": uri, "limit": limit }),
-    )
-    .await?;
-    Ok(parse_played_states(&data))
 }
 
 pub fn played_writes(uris: &[String], played: bool) -> Vec<Write> {
@@ -1368,29 +1330,6 @@ mod tests {
                 .downcast_ref::<Unavailable>(),
             Some(&Unavailable::Missing)
         );
-    }
-
-    #[test]
-    fn reads_played_states_in_order() {
-        let reply = json!({"lookup": [{"__typename": "PodcastOrAudiobookResponseWrapper", "data": {
-            "__typename": "Podcast",
-            "episodesV2": {"__typename": "ContextEpisodePage", "items": [
-                {"entity": {"data": {"__typename": "Episode", "playedState": {"playPositionMilliseconds": 0, "state": "NOT_STARTED"}}}},
-                {"entity": {"data": {"__typename": "Episode", "playedState": {"playPositionMilliseconds": 70_000, "state": "IN_PROGRESS"}}}},
-                {"entity": {"data": {"__typename": "Episode", "playedState": {"playPositionMilliseconds": 0, "state": "COMPLETED"}}}},
-                {"entity": {"data": {"__typename": "RestrictedContent"}}}
-            ]}
-        }}]});
-        assert_eq!(
-            parse_played_states(&reply),
-            vec![
-                Played::NotStarted,
-                Played::InProgress(70_000),
-                Played::Completed,
-                Played::NotStarted
-            ]
-        );
-        assert!(parse_played_states(&json!({})).is_empty());
     }
 
     #[test]

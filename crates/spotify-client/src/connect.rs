@@ -1028,14 +1028,6 @@ pub fn stepped_volume(current: u16, up: bool, steps: u32) -> u16 {
         .clamp(0., f64::from(u16::MAX)) as u16
 }
 
-pub fn update_context_command(context_uri: &str, session_id: &str) -> Value {
-    json!({
-        "endpoint": "update_context",
-        "context": { "url": format!("context://{context_uri}") },
-        "session_id": session_id,
-    })
-}
-
 fn same_item(track: &ProvidedTrack, key: &QueueKey) -> bool {
     if !track.uid.is_empty() && !key.uid.is_empty() {
         let iteration = track.metadata.get("iteration").map_or("", String::as_str);
@@ -2043,10 +2035,6 @@ mod tests {
                 {"uri": "spotify:track:1", "uid": "", "metadata": {}},
                 {"uri": "spotify:track:2", "uid": "", "metadata": {}},
             ]})
-        );
-        assert_eq!(
-            update_context_command("spotify:playlist:1", "session"),
-            json!({"endpoint": "update_context", "context": {"url": "context://spotify:playlist:1"}, "session_id": "session"})
         );
         assert_eq!(
             shuffle_play_command(

@@ -312,11 +312,6 @@ pub async fn write_content(api: &Api, content_id: &str, settings: &[Setting]) ->
     write(api, "WriteContentValue", body).await
 }
 
-pub async fn write_show_speed(api: &Api, show: &str, speed: f32) -> Result<()> {
-    let speed = valid_speed(round_speed(speed)).context("Speed must be between 0.5× and 3.5×.")?;
-    write_content(api, show, &[Setting::Speed(speed)]).await
-}
-
 pub fn by_scope(settings: &[Setting]) -> [(Scope, Vec<Setting>); 3] {
     [Scope::User, Scope::Device, Scope::Content].map(|scope| {
         (

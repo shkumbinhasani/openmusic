@@ -9,9 +9,7 @@ use crate::api::Api;
 pub const PROTOBUF: &str = "application/vnd.collection-v2.spotify.proto";
 pub const PAGE_LIMIT: u32 = 300;
 
-pub const COLLECTION: &str = "collection";
 pub const ARTIST: &str = "artist";
-pub const SHOW: &str = "show";
 pub const LISTEN_LATER: &str = "listenlater";
 pub const IGNORE_IN_RECS: &str = "ignoreinrecs";
 pub const PLAY_CONTEXT_BANS: &str = "playcontextbans";
@@ -212,7 +210,7 @@ mod tests {
     #[test]
     fn builds_paging_bodies() {
         assert_eq!(
-            page_body("someone", COLLECTION, None, 2),
+            page_body("someone", "collection", None, 2),
             json!({"username": "someone", "set": "collection", "limit": 2})
         );
         assert_eq!(
