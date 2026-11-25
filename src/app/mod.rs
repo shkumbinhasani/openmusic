@@ -431,8 +431,7 @@ impl OpenMusic {
             }
             overlay::Action::Volume(fraction) => {
                 let volume = (fraction.clamp(0., 1.) * f32::from(u16::MAX)).round() as u16;
-                self.playback.now.volume = volume;
-                self.send(playback::worker::Command::Volume(volume));
+                self.set_volume(volume, cx);
             }
         }
         cx.notify();
