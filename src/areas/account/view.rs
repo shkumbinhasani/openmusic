@@ -8,8 +8,8 @@ use spotify_client::{
 };
 
 use super::state::{
-    CHIP, CHIP_ROW, CLEAR_CACHE_KEY, LANGUAGE_KEY, LANGUAGES, ProfileListKind, cache_label,
-    language_name,
+    CHIP, CHIP_ROW, CLEAR_CACHE_KEY, FREE_MESSAGE, FREE_NOTICE, LANGUAGE_KEY, LANGUAGES,
+    PREMIUM_KEY, PREMIUM_URL, ProfileListKind, cache_label, language_name,
 };
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
@@ -194,47 +194,93 @@ impl OpenMusic {
                     .into_any_element(),
             );
         };
-        Some(
-            chip.cursor_pointer()
-                .when(self.menu_row(CHIP_ROW), |chip| chip.bg(rgba(palette.press)))
-                .hover(move |chip| chip.bg(rgba(palette.press)))
-                .child(self.avatar(&info.name, info.avatar.as_deref(), px(30.), palette))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .truncate()
-                                .child(info.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(palette.muted))
-                                .truncate()
-                                .child(info.plan()),
-                        ),
-                )
-                .child(overlay::anchor(CHIP))
-                .on_click(cx.listener(|this, _, _, cx| {
+        let chip = chip
+            .cursor_pointer()
+            .when(self.menu_row(CHIP_ROW), |chip| chip.bg(rgba(palette.press)))
+            .hover(move |chip| chip.bg(rgba(palette.press)))
+            .child(self.avatar(&info.name, info.avatar.as_deref(), px(30.), palette))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(info.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(palette.muted))
+                            .truncate()
+                            .child(info.plan()),
+                    ),
+            )
+            .child(overlay::anchor(CHIP))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.open_account_menu();
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
                     this.open_account_menu();
                     cx.notify();
-                }))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.open_account_menu();
-                        cx.notify();
-                    }),
-                )
+                }),
+            );
+        if info.premium() {
+            return Some(chip.into_any_element());
+        }
+        Some(
+            div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.free_note(palette, cx))
+                .child(chip)
                 .into_any_element(),
         )
+    }
+
+    fn free_note(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2p5()
+            .rounded(px(ROW_RADIUS + 4.))
+            .bg(rgba(palette.press))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(FREE_NOTICE),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(palette.muted))
+                    .child("You can still browse your library and control Spotify on your other devices."),
+            )
+            .child(
+                div()
+                    .id("account-free-premium")
+                    .mt_0p5()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(palette.accent))
+                    .cursor_pointer()
+                    .hover(|link| link.underline())
+                    .child("Get Premium")
+                    .on_click(cx.listener(|_, _, _, cx| cx.open_url(PREMIUM_URL))),
+            )
     }
 
     pub fn right_panel(&self, _palette: Palette, _cx: &mut Context<Self>) -> Option<Panel> {
@@ -248,49 +294,51 @@ impl OpenMusic {
                 if info.plan_manager() {
                     plan.push_str(" · Plan manager");
                 }
-                vec![
-                    setting_row(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(self.avatar(
-                                &info.name,
-                                info.avatar.as_deref(),
-                                px(44.),
-                                palette,
-                            ))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .child(
-                                        div()
-                                            .text_size(px(15.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .truncate()
-                                            .child(info.name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(palette.muted))
-                                            .child(plan),
-                                    ),
-                            ),
-                        None,
-                        self.text_control("account-manage", "Manage Account", false, palette, cx),
+                let mut rows = vec![setting_row(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(self.avatar(&info.name, info.avatar.as_deref(), px(44.), palette))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_size(px(15.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(info.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(palette.muted))
+                                        .child(plan),
+                                ),
+                        ),
+                    None,
+                    self.text_control("account-manage", "Manage Account", false, palette, cx),
+                    palette,
+                )];
+                if !info.premium() {
+                    rows.push(setting_row(
+                        "Playback on this Mac",
+                        Some(FREE_MESSAGE.into()),
+                        self.text_control(PREMIUM_KEY, "Get Premium", true, palette, cx),
                         palette,
-                    ),
-                    setting_row(
-                        "Sign out",
-                        Some("Signs out of Spotify on this Mac. Playback here stops.".into()),
-                        self.text_control("account-sign-out", "Sign Out", false, palette, cx),
-                        palette,
-                    ),
-                ]
+                    ));
+                }
+                rows.push(setting_row(
+                    "Sign out",
+                    Some("Signs out of Spotify on this Mac. Playback here stops.".into()),
+                    self.text_control("account-sign-out", "Sign Out", false, palette, cx),
+                    palette,
+                ));
+                rows
             }
             (None, Some(error)) if !self.account.loading => vec![setting_row(
                 error.clone(),

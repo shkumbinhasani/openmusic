@@ -176,6 +176,10 @@ pub const CACHE_DETAIL: &str =
 pub const CHIP_ROW: Row = (CHIP, 0);
 pub const ACCOUNT_URL: &str = "https://www.spotify.com/account/overview/";
 pub const FAMILY_URL: &str = "https://www.spotify.com/account/family/";
+pub const PREMIUM_URL: &str = "https://www.spotify.com/premium/";
+pub const PREMIUM_KEY: &str = "account-premium";
+pub const FREE_NOTICE: &str = "Playing on this Mac needs Spotify Premium.";
+pub const FREE_MESSAGE: &str = "Playing on this Mac needs Spotify Premium. You can still browse your library and control Spotify on your other devices.";
 
 #[derive(Default)]
 pub struct State {
@@ -200,6 +204,16 @@ impl OpenMusic {
         self.account.info.as_ref()
     }
 
+    pub fn needs_premium_here(&mut self, resume: bool, cx: &mut Context<Self>) -> bool {
+        let elsewhere = self.playback.now.device.is_some() && !self.playback.now.local;
+        if !blocks_playback(self.account(), resume, elsewhere) {
+            return false;
+        }
+        self.show_toast(FREE_NOTICE, None);
+        cx.notify();
+        true
+    }
+
     pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_main_window(window, cx);
         if matches!(self.session, Session::Connected) {
@@ -218,7 +232,8 @@ impl OpenMusic {
             return;
         };
         let profile = Page::Profile(info.uri.clone());
-        let items = vec![
+        let premium = info.premium();
+        let mut items = vec![
             MenuItem::action("Profile", move |app, _, _| app.navigate(profile.clone()))
                 .symbol("person.crop.circle"),
             MenuItem::action("Settings…", |app, window, cx| {
@@ -228,10 +243,19 @@ impl OpenMusic {
             .key("cmd-,"),
             MenuItem::action("Manage Account", |_, _, cx| cx.open_url(ACCOUNT_URL))
                 .symbol("arrow.up.forward.square"),
+        ];
+        if !premium {
+            items.push(
+                MenuItem::action("Get Premium", |_, _, cx| cx.open_url(PREMIUM_URL))
+                    .symbol("sparkles")
+                    .subtitle(FREE_NOTICE),
+            );
+        }
+        items.extend([
             MenuItem::Separator,
             MenuItem::action("Sign Out", |app, _, _| app.send(worker::Command::SignOut))
                 .symbol("rectangle.portrait.and.arrow.right"),
-        ];
+        ]);
         if !self.show_menu(items, Place::Under(CHIP), Some(CHIP_ROW)) {
             self.navigate(Page::Settings);
         }
@@ -329,6 +353,10 @@ impl OpenMusic {
     }
 }
 
+pub fn blocks_playback(account: Option<&AccountInfo>, resume: bool, elsewhere: bool) -> bool {
+    account.is_some_and(|account| !account.premium()) && !(resume && elsewhere)
+}
+
 pub fn describe_account(info: &AccountInfo) -> String {
     [
         format!("username={}", info.username),
@@ -346,6 +374,7 @@ pub fn describe_account(info: &AccountInfo) -> String {
             info.family_role.as_deref().unwrap_or("none")
         ),
         format!("avatar={}", info.avatar.is_some()),
+        format!("premium={}", info.premium()),
     ]
     .join("\n")
 }
@@ -456,8 +485,16 @@ pub fn debug(
         }
         "open-settings" => app.open_settings(window, cx),
         "account" => {
-            if rest == "refresh" {
-                app.refresh_account();
+            match rest {
+                "refresh" => app.refresh_account(),
+                "free" => {
+                    if let Some(info) = app.account.info.as_mut() {
+                        info.product = "free".into();
+                        info.catalogue = "free".into();
+                        info.ads = true;
+                    }
+                }
+                _ => {}
             }
             let text = match (&app.account.info, &app.account.error) {
                 (Some(info), error) => {
@@ -554,6 +591,7 @@ pub fn on_press(
         "account-sign-out" => app.send(worker::Command::SignOut),
         "account-retry" => app.refresh_account(),
         "account-family" => cx.open_url(FAMILY_URL),
+        PREMIUM_KEY => cx.open_url(PREMIUM_URL),
         LANGUAGE_KEY => app.open_language_menu(),
         CLEAR_CACHE_KEY => app.confirm_clear_cache(window, cx),
         _ => return false,
@@ -625,6 +663,26 @@ mod tests {
         for (tag, _) in LANGUAGES {
             assert!(valid_language(tag), "{tag}");
         }
+    }
+
+    #[test]
+    fn keeps_free_accounts_from_playing_here() {
+        let free = AccountInfo {
+            product: "free".into(),
+            catalogue: "free".into(),
+            ads: true,
+            ..AccountInfo::default()
+        };
+        let premium = AccountInfo {
+            product: "premium".into(),
+            ..AccountInfo::default()
+        };
+        assert!(blocks_playback(Some(&free), false, false));
+        assert!(blocks_playback(Some(&free), false, true));
+        assert!(blocks_playback(Some(&free), true, false));
+        assert!(!blocks_playback(Some(&free), true, true));
+        assert!(!blocks_playback(Some(&premium), false, false));
+        assert!(!blocks_playback(None, false, false));
     }
 
     #[test]
