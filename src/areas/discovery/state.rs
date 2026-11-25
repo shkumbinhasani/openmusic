@@ -129,6 +129,12 @@ impl State {
         }
     }
 
+    pub fn receive_artist(&mut self, page: &Page, uri: String, result: Result<Artist, String>) {
+        if matches!(page, Page::Artist(shown) if *shown == uri) {
+            self.artist = Some((uri, result));
+        }
+    }
+
     pub fn covers(&self, urls: &mut HashSet<String>) {
         self.search_covers(urls);
         urls.extend(self.feed.images());
@@ -217,7 +223,7 @@ pub fn on_event(
             offset,
             result,
         } => app.on_section(uri, source, offset, result),
-        Event::Artist { uri, result } => app.discovery.artist = Some((uri, result)),
+        Event::Artist { uri, result } => app.discovery.receive_artist(&app.page, uri, result),
         event => app.on_search_event(event, cx),
     }
 }
@@ -311,5 +317,35 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     }
     if app.discovery.more_sentinel.take() && app.more_page_results() {
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artist(uri: &str) -> Result<Artist, String> {
+        Ok(Artist {
+            uri: uri.to_owned(),
+            name: uri.to_owned(),
+            image: None,
+            biography: None,
+            top_tracks: Vec::new(),
+            releases: Vec::new(),
+            related: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn keeps_only_the_artist_the_page_shows() {
+        let (a, b) = ("spotify:artist:a", "spotify:artist:b");
+        let page = Page::Artist(b.to_owned());
+        let mut state = State::default();
+        state.receive_artist(&page, b.to_owned(), artist(b));
+        state.receive_artist(&page, a.to_owned(), artist(a));
+        assert!(matches!(&state.artist, Some((uri, Ok(_))) if uri == b));
+        state.artist = None;
+        state.receive_artist(&Page::Home, b.to_owned(), artist(b));
+        assert!(state.artist.is_none());
     }
 }

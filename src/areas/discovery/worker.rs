@@ -220,7 +220,7 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::BrowseSection { uri, offset } => ctx
             .tasks
             .spawn_keyed(format!("section:{uri}"), browse_section(api, uri, offset)),
-        Command::Artist(uri) => ctx.tasks.spawn(artist(api, uri)),
+        Command::Artist(uri) => ctx.tasks.spawn_keyed("artist", artist(api, uri)),
     }
 }
 
