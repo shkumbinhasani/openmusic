@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::{
-    AudioSettings, Playing, ReportPrepared,
+    AudioSettings, Ending, Playing, ReportPrepared,
     gain::{fetch_loudness, linear},
     narration::is_narration,
     quality::{choose, reported_quality},
@@ -191,7 +191,7 @@ impl Engine {
     }
 
     pub(super) fn wanted_join(&self) -> Option<(Target, Join)> {
-        if self.audio.sleep.ends_track() {
+        if self.audio.sleep.ends_track() || self.ending("advance") != Ending::Continue {
             return None;
         }
         let playing = self.playing.as_ref()?;

@@ -55,6 +55,7 @@ pub struct AudioPrefs {
     pub normalize: bool,
     pub level: LoudnessLevel,
     pub quality: Quality,
+    pub autoplay: bool,
     pub device_names: BTreeMap<String, String>,
 }
 
@@ -68,6 +69,7 @@ impl Default for AudioPrefs {
             normalize: settings.normalize,
             level: settings.level,
             quality: settings.quality,
+            autoplay: settings.autoplay,
             device_names: BTreeMap::new(),
         }
     }
@@ -82,6 +84,7 @@ impl AudioPrefs {
             normalize: self.normalize,
             level: self.level,
             quality: self.quality,
+            autoplay: self.autoplay,
         }
     }
 
@@ -330,6 +333,10 @@ impl OpenMusic {
         self.update_settings(|current| current.audio.quality = quality);
     }
 
+    pub fn set_autoplay(&mut self, on: bool) {
+        self.update_settings(|current| current.audio.autoplay = on);
+    }
+
     pub fn device_name(&self) -> String {
         self.settings.audio.device_name(&base_device_name())
     }
@@ -367,13 +374,14 @@ impl OpenMusic {
         let prefs = &self.settings.audio;
         let mut lines = vec![
             format!(
-                "prefs gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} device=\"{}\"",
+                "prefs gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} autoplay={} device=\"{}\"",
                 prefs.gapless,
                 prefs.crossfade,
                 prefs.crossfade_ms,
                 prefs.normalize,
                 prefs.level.name(),
                 prefs.quality.name(),
+                prefs.autoplay,
                 self.device_name()
             ),
             format!(
@@ -541,6 +549,11 @@ pub fn debug(
                 app.set_quality(quality);
             }
         }
+        "autoplay" => {
+            if let Some(on) = switch(rest) {
+                app.set_autoplay(on);
+            }
+        }
         "rename" => {
             let text = rest.trim().trim_matches('"');
             let text = if text.is_empty() {
@@ -560,13 +573,14 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let prefs = &app.settings.audio;
     format!(
-        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} speed={} sleep={} device=\"{}\"",
+        "gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} autoplay={} speed={} sleep={} device=\"{}\"",
         prefs.gapless,
         prefs.crossfade,
         prefs.crossfade_ms,
         prefs.normalize,
         prefs.level.name(),
         prefs.quality.name(),
+        prefs.autoplay,
         app.current_speed(),
         match app.sleep_state() {
             SleepState::Off => "off".to_owned(),
@@ -805,14 +819,17 @@ mod tests {
     }
 
     #[test]
-    fn keeps_quality_local() {
+    fn keeps_quality_and_autoplay_local() {
         let settings: Settings =
             serde_json::from_str(r#"{"audio":{"gapless":false,"level":"Loud"}}"#).unwrap();
         assert_eq!(settings.audio.quality, Quality::Automatic);
+        assert!(settings.audio.autoplay);
         assert!(settings.audio.device_names.is_empty());
-        let settings: Settings = serde_json::from_str(r#"{"audio":{"quality":"Normal"}}"#).unwrap();
+        let settings: Settings =
+            serde_json::from_str(r#"{"audio":{"quality":"Normal","autoplay":false}}"#).unwrap();
         let engine = settings.audio.engine();
         assert_eq!(engine.quality, Quality::Normal);
+        assert!(!engine.autoplay);
         let mut remote_only = settings.audio.clone();
         remote_only.merge(&Remote {
             user: Some(UserAudio::default()),
@@ -820,6 +837,7 @@ mod tests {
             speeds: HashMap::new(),
         });
         assert_eq!(remote_only.quality, Quality::Normal);
+        assert!(!remote_only.autoplay);
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::{
     playback_settings::LoudnessLevel,
     player::{FairPlay, Join, Media, PlayerEvent, Snapshot, Source},
 };
+use autoplay::Ending;
 pub use device::{MAX_NAME, device_name};
 use gain::{Gains, fetch_loudness, linear, state_options};
 use join::{Joins, Taken};
@@ -28,6 +29,7 @@ pub use sleep::{FADE_MS, SleepChoice};
 pub use source::MANIFEST_FORMATS;
 use speed::{Shows, read_show_speed, show_of, starting_speed, state_speed};
 
+mod autoplay;
 mod device;
 mod gain;
 mod join;
@@ -80,6 +82,7 @@ pub struct AudioSettings {
     pub normalize: bool,
     pub level: LoudnessLevel,
     pub quality: Quality,
+    pub autoplay: bool,
 }
 
 impl Default for AudioSettings {
@@ -91,6 +94,7 @@ impl Default for AudioSettings {
             normalize: true,
             level: LoudnessLevel::Normal,
             quality: Quality::Automatic,
+            autoplay: true,
         }
     }
 }
@@ -145,13 +149,14 @@ impl fmt::Display for AudioReport {
         let settings = &self.settings;
         writeln!(
             f,
-            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={}",
+            "settings gapless={} crossfade={} crossfade_ms={} normalize={} level={} quality={} autoplay={}",
             settings.gapless,
             settings.crossfade,
             settings.crossfade_ms,
             settings.normalize,
             settings.level.name(),
-            settings.quality.name()
+            settings.quality.name(),
+            settings.autoplay
         )?;
         writeln!(f, "device name=\"{}\"", self.device_name)?;
         match &self.playing {
@@ -1065,6 +1070,9 @@ impl Engine {
     }
 
     pub(super) async fn advance(&mut self, transition: &str) {
+        if self.ending(transition) != Ending::Continue {
+            self.discard_prepared();
+        }
         let how = if transition == "advance" {
             "promote"
         } else {
@@ -1081,6 +1089,13 @@ impl Engine {
     }
 
     async fn advance_cold(&mut self, transition: &str) {
+        if self.playing.is_none() {
+            return;
+        }
+        let ending = self.ending(transition);
+        if ending == Ending::Autoplay && self.start_autoplay().await {
+            return;
+        }
         let Some(playing) = self.playing.as_ref() else {
             return;
         };
@@ -1097,7 +1112,12 @@ impl Engine {
         };
         let machine = playing.machine.clone();
         let old = playing.generation;
-        let paused = paused || (transition == "advance" && self.sleep_after_track());
+        if ending == Ending::Hold {
+            self.audio.note(format!("held before autoplay at {old}"));
+        }
+        let paused = paused
+            || ending == Ending::Hold
+            || (transition == "advance" && self.sleep_after_track());
         if transition == "advance"
             && let Some(playing) = self.playing.as_mut()
         {
