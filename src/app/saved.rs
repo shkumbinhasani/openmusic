@@ -52,16 +52,6 @@ impl OpenMusic {
         self.send(saved::Command::Set { uris, saved });
     }
 
-    pub fn toggle_like(&mut self) {
-        let Some(uri) = self.track().map(|track| track.uri.clone()) else {
-            return;
-        };
-        match self.is_saved(&uri) {
-            Some(saved) => self.set_saved(vec![uri], !saved),
-            None => self.lookup_saved([uri]),
-        }
-    }
-
     pub(super) fn on_saved(&mut self, event: saved::Event) {
         match event {
             saved::Event::Known(found) => {

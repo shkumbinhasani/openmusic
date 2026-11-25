@@ -87,7 +87,7 @@ impl OpenMusic {
             }
             Intent::ToggleShuffle => self.toggle_shuffle(cx),
             Intent::CycleRepeat => self.cycle_repeat(cx),
-            Intent::ToggleLike => self.toggle_like(),
+            Intent::ToggleLike => self.like_current(),
             Intent::PlayContext(uri) => {
                 if !self.needs_premium_here(false, cx) {
                     self.send(Command::PlayContext {
