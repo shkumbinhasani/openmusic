@@ -1,15 +1,12 @@
-use std::sync::Arc;
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnimationExt, Context, Div, FontWeight, Image, MouseButton, ObjectFit, Pixels, Stateful, div,
-    img, prelude::*, px, rgb, rgba, svg,
+    AnimationExt, Context, Div, ElementId, FontWeight, Image, ObjectFit, Pixels, Stateful, canvas,
+    div, img, prelude::*, px, rgb, rgba, svg,
 };
 use spotify_client::Track;
 
-use super::{
-    Palette,
-    menu::{Surface, Target},
-};
+use super::Palette;
 use crate::{
     app::{OpenMusic, Page},
     icons,
@@ -25,7 +22,7 @@ pub fn icon(path: &'static str, size: f32, color: u32) -> impl IntoElement {
 }
 
 pub fn link(
-    id: (&'static str, usize),
+    id: impl Into<ElementId>,
     text: String,
     target: Option<Page>,
     size: f32,
@@ -33,10 +30,7 @@ pub fn link(
     cx: &mut Context<OpenMusic>,
 ) -> impl IntoElement {
     let label = div()
-        .id(gpui::ElementId::NamedInteger(
-            format!("{}-link", id.0).into(),
-            id.1 as u64,
-        ))
+        .id(id)
         .min_w_0()
         .truncate()
         .text_size(px(size))
@@ -203,15 +197,70 @@ pub fn skeleton_header(key: &'static str, round: bool, palette: Palette) -> Div 
         )
 }
 
-fn fallback_icon(symbol: &str) -> &'static str {
-    match symbol {
-        "backward.fill" => icons::PREVIOUS,
-        "forward.fill" => icons::NEXT,
-        "pause.fill" => icons::PAUSE,
-        "quote.bubble" | "quote.bubble.fill" => icons::LYRICS,
+pub fn fallback_icon(symbol: &str) -> &'static str {
+    match symbol.trim_end_matches(".fill") {
+        "backward" => icons::PREVIOUS,
+        "forward" => icons::NEXT,
+        "pause" => icons::PAUSE,
+        "quote.bubble" => icons::LYRICS,
         "chevron.left" => icons::BACK,
+        "house" => icons::HOME,
+        "magnifyingglass" => icons::SEARCH,
+        "music.note" => icons::NOTE,
+        "shuffle" => icons::SHUFFLE,
+        "sparkles" => icons::SHUFFLE_SMART,
+        "repeat" => icons::REPEAT,
+        "repeat.1" => icons::REPEAT_ONE,
+        "list.bullet" | "text.line.first.and.arrowtriangle.forward" => icons::QUEUE,
+        "hifispeaker.and.homepod" | "laptopcomputer.and.iphone" | "airplay.audio" => icons::DEVICES,
+        "laptopcomputer" | "desktopcomputer" => icons::DEVICE,
+        "iphone" | "ipad" | "tv" | "gamecontroller" | "car" | "applewatch" => icons::DEVICES,
+        "hifispeaker" | "hifispeaker.2" | "hifireceiver" | "speaker.wave.2" | "speaker.wave.3" => {
+            icons::SPEAKER
+        }
+        "heart" if symbol.ends_with(".fill") => icons::HEART_FILL,
+        "heart" => icons::HEART,
+        "plus" | "plus.circle" => icons::PLUS,
+        "checkmark" | "checkmark.circle" => icons::CHECK,
+        "folder" => icons::FOLDER,
+        "pin" => icons::PIN,
+        "lock" => icons::LOCK,
+        "ellipsis" | "ellipsis.circle" => icons::MORE,
+        "moon" | "moon.zzz" => icons::MOON,
+        "gauge.with.dots.needle.67percent" | "speedometer" => icons::SPEED,
+        "pip" | "pip.enter" | "pip.exit" => icons::PIP,
+        "person" | "person.crop.circle" | "person.2" => icons::PERSON,
+        "e.square" => icons::EXPLICIT,
+        "doc" | "music.note.house" => icons::LOCAL,
         _ => icons::PLAY,
     }
+}
+
+pub fn explicit_badge(palette: Palette) -> impl IntoElement {
+    icon(icons::EXPLICIT, 14., palette.muted)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Sentinel(Rc<Cell<bool>>);
+
+impl Sentinel {
+    pub fn take(&self) -> bool {
+        self.0.replace(false)
+    }
+}
+
+pub fn scroll_sentinel(sentinel: &Sentinel) -> impl IntoElement {
+    let seen = sentinel.0.clone();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if window.content_mask().bounds.contains(&bounds.origin) {
+                seen.set(true);
+            }
+        },
+    )
+    .w_full()
+    .h(px(0.))
 }
 
 pub fn timestamp(ms: u32) -> String {
@@ -334,136 +383,6 @@ impl OpenMusic {
         track.cover.as_ref().and_then(|url| self.covers.get(url))
     }
 
-    pub fn rows(
-        &self,
-        tracks: &[Track],
-        prefix: &'static str,
-        start: usize,
-        context: Option<&str>,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        self.track_list(tracks, prefix, start, context, false, palette, cx)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn track_list(
-        &self,
-        tracks: &[Track],
-        prefix: &'static str,
-        start: usize,
-        context: Option<&str>,
-        numbered: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let queue: Arc<[Track]> = tracks.into();
-        let context: Option<Arc<str>> = context.map(Into::into);
-        div()
-            .flex()
-            .flex_col()
-            .children(tracks.iter().enumerate().skip(start).map(|(index, track)| {
-                let queue = queue.clone();
-                let context = context.clone();
-                let menu_queue = queue.clone();
-                let menu_context = context.clone();
-                let selected = self.is_current(&track.uri);
-                let artist_uri = track.artist_uri.clone();
-                let album_uri = track.album_uri.clone();
-                div()
-                    .id((prefix, index))
-                    .h(px(56.))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_2()
-                    .rounded(px(10.))
-                    .cursor_pointer()
-                    .when(selected || self.menu_row((prefix, index)), |row| {
-                        row.bg(rgba(palette.press))
-                    })
-                    .hover(move |row| row.bg(rgba(palette.press)))
-                    .on_click(cx.listener(move |this, _, _, cx| match &context {
-                        Some(context) => this.play_context(context, &queue, index, cx),
-                        None => this.play(&queue, index, cx),
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_menu(
-                            Some((prefix, index)),
-                            move |_| {
-                                let track = menu_queue.get(index)?.clone();
-                                let context = menu_context.as_deref().map(str::to_owned);
-                                Some(Target::track(track, context, Surface::Row))
-                            },
-                            cx,
-                        ),
-                    )
-                    .map(|row| {
-                        if numbered {
-                            row.child(
-                                div()
-                                    .w(px(40.))
-                                    .flex_shrink_0()
-                                    .text_center()
-                                    .text_size(px(13.))
-                                    .text_color(rgb(if selected {
-                                        palette.accent
-                                    } else {
-                                        palette.muted
-                                    }))
-                                    .child(if selected {
-                                        "♪".to_owned()
-                                    } else {
-                                        (index + 1).to_string()
-                                    }),
-                            )
-                        } else {
-                            row.child(artwork(self.cover_for(track), px(40.), px(6.), palette))
-                        }
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .when(selected, |title| title.text_color(rgb(palette.accent)))
-                                    .truncate()
-                                    .child(track.title.clone()),
-                            )
-                            .child(div().flex().min_w_0().child(link(
-                                (prefix, index * 2),
-                                track.artist.clone(),
-                                artist_uri.map(Page::Artist),
-                                12.,
-                                palette,
-                                cx,
-                            ))),
-                    )
-                    .when(!numbered, |row| {
-                        row.child(div().w_1_4().flex().min_w_0().child(link(
-                            (prefix, index * 2 + 1),
-                            track.album.clone(),
-                            album_uri.map(Page::Collection),
-                            12.5,
-                            palette,
-                            cx,
-                        )))
-                    })
-                    .child(
-                        div()
-                            .w(px(48.))
-                            .text_size(px(12.5))
-                            .text_color(rgb(palette.muted))
-                            .text_right()
-                            .child(timestamp(track.duration_ms)),
-                    )
-            }))
-    }
-
     pub fn back_button(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         self.control("back", Label::Symbol("chevron.left"), false, palette, cx)
             .size(px(40.))
@@ -475,60 +394,60 @@ impl OpenMusic {
             .text_color(rgb(palette.muted))
             .child(text.into())
     }
+}
 
-    #[allow(clippy::type_complexity)]
-    pub fn grid(
-        &self,
-        items: Vec<(String, String, String, Option<String>, Page)>,
-        prefix: &'static str,
-        card_side: Pixels,
-        round: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_wrap()
-            .gap_4()
-            .children(items.into_iter().enumerate().map(
-                move |(index, (uri, title, subtitle, cover, page))| {
-                    let image = cover.as_ref().and_then(|url| self.covers.get(url));
-                    let radius = if round { card_side / 2. } else { px(12.) };
-                    div()
-                        .id((prefix, index))
-                        .w(card_side)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .cursor_pointer()
-                        .child(artwork(image, card_side, radius, palette).shadow_md())
-                        .child(
-                            div()
-                                .w_full()
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .truncate()
-                                        .child(title),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(palette.muted))
-                                        .truncate()
-                                        .child(subtitle),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.navigate(page.clone());
-                            cx.notify();
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            self.on_menu(None, move |_| Target::for_uri(&uri), cx),
-                        )
-                },
-            ))
+#[cfg(test)]
+mod tests {
+    use gpui::AssetSource;
+    use spotify_client::connect::DeviceKind;
+
+    use super::fallback_icon;
+    use crate::icons::{self, Icons};
+
+    #[test]
+    fn every_fallback_icon_has_artwork() {
+        let kinds = [
+            DeviceKind::Computer,
+            DeviceKind::Smartphone,
+            DeviceKind::Tablet,
+            DeviceKind::Speaker,
+            DeviceKind::Tv,
+            DeviceKind::Receiver,
+            DeviceKind::GameConsole,
+            DeviceKind::Car,
+            DeviceKind::Watch,
+            DeviceKind::Group,
+            DeviceKind::Other,
+        ];
+        for kind in kinds {
+            assert_ne!(fallback_icon(kind.symbol()), icons::PLAY, "{kind:?}");
+        }
+        let symbols = [
+            "play.fill",
+            "pause.fill",
+            "backward.fill",
+            "forward.fill",
+            "quote.bubble",
+            "quote.bubble.fill",
+            "chevron.left",
+            "ellipsis",
+            "shuffle",
+            "repeat",
+            "repeat.1",
+            "heart",
+            "heart.fill",
+            "e.square",
+        ];
+        for symbol in symbols.into_iter().chain(kinds.map(DeviceKind::symbol)) {
+            let path = fallback_icon(symbol);
+            assert!(
+                Icons.load(path).is_ok_and(|svg| svg.is_some()),
+                "{symbol} → {path}"
+            );
+        }
+        assert_eq!(fallback_icon("heart"), icons::HEART);
+        assert_eq!(fallback_icon("heart.fill"), icons::HEART_FILL);
+        assert_eq!(fallback_icon("ellipsis"), icons::MORE);
+        assert_eq!(fallback_icon("laptopcomputer"), icons::DEVICE);
     }
 }

@@ -113,6 +113,31 @@ pub(crate) fn container() -> Option<Retained<NSView>> {
 }
 
 pub(crate) fn right_click(x: f64, y: f64) -> bool {
+    post_mouse(
+        &[
+            (NSEventType::RightMouseDown, x, y),
+            (NSEventType::RightMouseUp, x, y),
+        ],
+        1,
+    )
+}
+
+pub(crate) fn drag(from: (f64, f64), to: (f64, f64)) -> bool {
+    const STEPS: usize = 8;
+    let mut events = vec![(NSEventType::LeftMouseDown, from.0, from.1)];
+    events.extend((1..=STEPS).map(|step| {
+        let progress = step as f64 / STEPS as f64;
+        (
+            NSEventType::LeftMouseDragged,
+            from.0 + (to.0 - from.0) * progress,
+            from.1 + (to.1 - from.1) * progress,
+        )
+    }));
+    events.push((NSEventType::LeftMouseUp, to.0, to.1));
+    post_mouse(&events, 0)
+}
+
+fn post_mouse(events: &[(NSEventType, f64, f64)], button: i64) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
@@ -122,7 +147,7 @@ pub(crate) fn right_click(x: f64, y: f64) -> bool {
     let Some(window) = view.window() else {
         return false;
     };
-    let location = NSPoint::new(x, view.bounds().size.height - y);
+    let height = view.bounds().size.height;
     let number = window.windowNumber();
     let Some(process) = AnyClass::get(c"NSProcessInfo") else {
         return false;
@@ -132,7 +157,8 @@ pub(crate) fn right_click(x: f64, y: f64) -> bool {
         msg_send![&*info, systemUptime]
     };
     let application = NSApplication::sharedApplication(mtm);
-    for kind in [NSEventType::RightMouseDown, NSEventType::RightMouseUp] {
+    for &(kind, x, y) in events {
+        let location = NSPoint::new(x, height - y);
         let event: Option<Retained<NSEvent>> = unsafe {
             msg_send![
                 NSEvent::class(),
@@ -150,7 +176,11 @@ pub(crate) fn right_click(x: f64, y: f64) -> bool {
         let Some(event) = event.and_then(|event| event.CGEvent()) else {
             return false;
         };
-        CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventButtonNumber, 1);
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventButtonNumber,
+            button,
+        );
         let Some(event) = NSEvent::eventWithCGEvent(&event) else {
             return false;
         };

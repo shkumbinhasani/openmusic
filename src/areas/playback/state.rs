@@ -10,8 +10,9 @@ use spotify_client::{
 
 use super::worker::{Command, Event};
 use crate::{
-    app::{OpenMusic, Page},
+    app::{OpenMusic, Page, intent::Intent},
     menus::Handle,
+    ui::tracks::{RowDrag, RowDrop},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -186,3 +187,31 @@ pub fn state_fragment(app: &OpenMusic) -> String {
 }
 
 pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
+
+pub fn on_press(
+    app: &mut OpenMusic,
+    key: &'static str,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> bool {
+    match key {
+        "previous" => app.perform(Intent::Previous, window, cx),
+        "next" => app.perform(Intent::Next, window, cx),
+        "toggle-playback" => app.perform(Intent::PlayPause, window, cx),
+        "play-here" => app.send(Command::PlayHere),
+        _ => return false,
+    }
+    true
+}
+
+pub fn row_dropped(
+    _app: &mut OpenMusic,
+    _drag: &RowDrag,
+    _at: RowDrop,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) -> bool {
+    false
+}
+
+pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}

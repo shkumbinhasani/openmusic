@@ -1,15 +1,23 @@
 use std::sync::Arc;
 
 use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
-use spotify_client::Track;
+use spotify_client::{
+    Track,
+    entity::{Card, Kind},
+};
 
 use super::state::{SearchTab, SectionSource};
 use crate::{
     app::{OpenMusic, Page},
+    icons,
     ui::{
         Palette,
+        cards::card,
         components::{artwork, bone, skeleton_header, skeleton_rows},
-        menu::{Group, MenuItem, Surface, Target},
+        dock::DockItem,
+        menu::{Group, MenuItem, Row, Surface, Target},
+        sidebar::NavEntry,
+        tracks::RowOptions,
     },
 };
 
@@ -424,8 +432,40 @@ impl OpenMusic {
                             }),
                     ),
             );
-        let releases = artist.releases.clone();
-        let related = artist.related.clone();
+        let releases: Vec<Card> = artist
+            .releases
+            .iter()
+            .map(|release| {
+                let subtitle = [
+                    release.year.map(|year| year.to_string()),
+                    Some(release.kind.clone()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+                card(
+                    &release.uri,
+                    Kind::Album,
+                    &release.name,
+                    subtitle,
+                    release.cover.clone(),
+                )
+            })
+            .collect();
+        let related: Vec<Card> = artist
+            .related
+            .iter()
+            .map(|related| {
+                card(
+                    &related.uri,
+                    Kind::Artist,
+                    &related.name,
+                    "Artist",
+                    related.image.clone(),
+                )
+            })
+            .collect();
         page.child(header)
             .when(!artist.top_tracks.is_empty(), |page| {
                 page.child(
@@ -461,34 +501,7 @@ impl OpenMusic {
                                 .font_weight(FontWeight::BOLD)
                                 .child("Releases"),
                         )
-                        .child(
-                            self.grid(
-                                releases
-                                    .iter()
-                                    .map(|release| {
-                                        (
-                                            release.uri.clone(),
-                                            release.name.clone(),
-                                            [
-                                                release.year.map(|year| year.to_string()),
-                                                Some(release.kind.clone()),
-                                            ]
-                                            .into_iter()
-                                            .flatten()
-                                            .collect::<Vec<_>>()
-                                            .join(" · "),
-                                            release.cover.clone(),
-                                            Page::Collection(release.uri.clone()),
-                                        )
-                                    })
-                                    .collect(),
-                                "release",
-                                card_side,
-                                false,
-                                palette,
-                                cx,
-                            ),
-                        ),
+                        .child(self.card_grid(&releases, "release", card_side, palette, cx)),
                 )
             })
             .when_some(artist.biography.clone(), |page, biography| {
@@ -531,27 +544,7 @@ impl OpenMusic {
                                 .font_weight(FontWeight::BOLD)
                                 .child("Fans Also Like"),
                         )
-                        .child(
-                            self.grid(
-                                related
-                                    .iter()
-                                    .map(|related| {
-                                        (
-                                            related.uri.clone(),
-                                            related.name.clone(),
-                                            "Artist".to_owned(),
-                                            related.image.clone(),
-                                            Page::Artist(related.uri.clone()),
-                                        )
-                                    })
-                                    .collect(),
-                                "related",
-                                card_side,
-                                true,
-                                palette,
-                                cx,
-                            ),
-                        ),
+                        .child(self.card_grid(&related, "related", card_side, palette, cx)),
                 )
             })
     }
@@ -581,5 +574,52 @@ impl OpenMusic {
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
+}
+
+pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
+    vec![
+        NavEntry::new(
+            "nav-home",
+            100,
+            icons::HOME,
+            "Listen Now",
+            app.page == Page::Home,
+            |app, _, _| app.navigate(Page::Home),
+        ),
+        NavEntry::new(
+            "nav-search",
+            200,
+            icons::SEARCH,
+            "Search",
+            matches!(app.page, Page::Search(_)),
+            |app, window, cx| {
+                if app.discovery.search_query.is_empty() {
+                    app.input.update(cx, |input, cx| input.focus(window, cx));
+                } else {
+                    app.navigate(Page::Search(SearchTab::All));
+                }
+            },
+        ),
+    ]
+}
+
+pub fn dock_items(
+    _app: &OpenMusic,
+    _roomy: bool,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<DockItem> {
+    Vec::new()
+}
+
+pub fn row_accessories(
+    _app: &OpenMusic,
+    _track: &Track,
+    _row: Row,
+    _options: &RowOptions,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<AnyElement> {
     Vec::new()
 }

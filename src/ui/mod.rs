@@ -1,7 +1,12 @@
+pub mod cards;
 pub mod components;
-mod dock;
+pub mod dock;
+pub mod gallery;
 pub mod menu;
-mod sidebar;
+pub mod sidebar;
+pub mod tracks;
+
+use std::path::Path;
 
 use gpui::{
     AnyElement, App, Context, Div, FontWeight, Pixels, Window, WindowAppearance, div, prelude::*,
@@ -14,6 +19,7 @@ use crate::{
     glass, icons, overlay,
 };
 use components::icon;
+use dock::BAR_WEIGHT;
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -64,7 +70,7 @@ impl Palette {
         }
     }
 
-    fn glass(self, key: impl Into<String>, radius: f32) -> Div {
+    pub fn glass(self, key: impl Into<String>, radius: f32) -> Div {
         let pane = div().relative().rounded(px(radius));
         if glass::available() {
             pane.child(glass::surface(key, radius))
@@ -132,6 +138,79 @@ pub(super) fn apply_theme(appearance: WindowAppearance, cx: &mut App) {
 
 const WINDOW_INSET: f32 = 8.;
 const DOCK_HEIGHT: f32 = 60.;
+const SIDEBAR_SPACE: f32 = 248.;
+pub const ROOMY_WIDTH: f32 = 1060.;
+
+pub struct Panel {
+    pub width: f32,
+    pub element: AnyElement,
+}
+
+struct Layout {
+    roomy: bool,
+    dock_roomy: bool,
+    card_side: Pixels,
+    panel: Option<Panel>,
+}
+
+pub fn debug(
+    app: &mut OpenMusic,
+    verb: &str,
+    rest: &str,
+    directory: &Path,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> bool {
+    match verb {
+        "layout" => {
+            let palette = Palette::for_window(window.appearance());
+            let width = window.viewport_size().width;
+            let layout = app.layout(width, palette, cx);
+            let mut lines = vec![format!(
+                "width={} roomy={} dock_roomy={} card_side={}",
+                f32::from(width),
+                layout.roomy,
+                layout.dock_roomy,
+                f32::from(layout.card_side),
+            )];
+            for entry in app.nav_entries() {
+                let selected = if entry.selected { " selected" } else { "" };
+                lines.push(format!(
+                    "nav {} {} {}{selected}",
+                    entry.key, entry.weight, entry.label
+                ));
+            }
+            let mut bar = false;
+            for item in app.dock_items(layout.dock_roomy, palette, cx) {
+                if !bar && item.weight >= BAR_WEIGHT {
+                    lines.push(format!("bar {BAR_WEIGHT}"));
+                    bar = true;
+                }
+                lines.push(format!("dock {} {} {}", item.key, item.weight, item.width));
+            }
+            if !bar {
+                lines.push(format!("bar {BAR_WEIGHT}"));
+            }
+            lines.push(match &layout.panel {
+                Some(panel) => format!("panel {}", panel.width),
+                None => "panel none".to_owned(),
+            });
+            let _ = std::fs::write(directory.join("layout.txt"), lines.join("\n"));
+        }
+        "drag" => {
+            let numbers: Vec<f64> = rest
+                .split_whitespace()
+                .filter_map(|part| part.parse().ok())
+                .collect();
+            if let [x1, y1, x2, y2] = numbers[..] {
+                overlay::drag((x1, y1), (x2, y2));
+            }
+        }
+        "gallery" => gallery::debug(app, rest, directory),
+        _ => return false,
+    }
+    true
+}
 
 impl OpenMusic {
     fn sign_in(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
@@ -208,7 +287,31 @@ impl OpenMusic {
             .child(div().mt_2().child(controls))
     }
 
+    fn layout(&self, width: Pixels, palette: Palette, cx: &mut Context<Self>) -> Layout {
+        let roomy = width >= px(ROOMY_WIDTH);
+        let connected = matches!(self.session, Session::Connected);
+        let panel = if roomy && connected {
+            self.right_panel(palette, cx)
+                .or_else(|| gallery::panel(self, palette))
+        } else {
+            None
+        };
+        let panel_width = px(panel.as_ref().map_or(0., |panel| panel.width));
+        let content_width = width - px(SIDEBAR_SPACE) - panel_width;
+        let card_side =
+            ((content_width.min(px(1060.)) - px(80.) - px(48.)) / 4.).clamp(px(110.), px(200.));
+        Layout {
+            roomy,
+            dock_roomy: width - panel_width >= px(ROOMY_WIDTH),
+            card_side,
+            panel,
+        }
+    }
+
     fn page_body(&self, card_side: Pixels, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        if self.gallery.is_some() {
+            return gallery::page(self, card_side, palette, cx);
+        }
         match self.page.clone() {
             Page::Home => self.discover(card_side, palette, cx).into_any_element(),
             Page::Search(tab) => self
@@ -294,20 +397,23 @@ impl Render for OpenMusic {
         self.modal = window.has_active_dialog(cx) || window.has_active_sheet(cx);
         self.refresh_bar_menu();
         let palette = Palette::for_window(window.appearance());
-        let content_width = window.viewport_size().width - px(248.);
-        let card_side =
-            ((content_width.min(px(1060.)) - px(80.) - px(48.)) / 4.).clamp(px(110.), px(200.));
+        let Layout {
+            dock_roomy,
+            card_side,
+            panel,
+            ..
+        } = self.layout(window.viewport_size().width, palette, cx);
         let connected = matches!(self.session, Session::Connected);
-        let roomy = window.viewport_size().width >= px(1060.);
 
         let content = div().flex_1().min_h_0().map(|content| {
             if !connected {
                 return content.child(self.sign_in(palette, cx));
             }
-            if self.page.fills_content() {
+            if self.page.fills_content() && self.gallery.is_none() {
                 return content.child(self.page_body(card_side, palette, cx));
             }
             let scroll_id = match &self.page {
+                _ if self.gallery.is_some() => "gallery".to_owned(),
                 Page::Home => "home".to_owned(),
                 Page::Search(_) => format!("search-{}", self.discovery.search_query),
                 Page::Artist(uri) | Page::Collection(uri) => format!("page-{uri}"),
@@ -370,10 +476,17 @@ impl Render for OpenMusic {
                                         ),
                                     )),
                             )
-                            .child(self.dock(roomy, palette, cx))
+                            .child(self.dock(dock_roomy, palette, cx))
                             .children(self.toast_layer(palette, cx))
                     }),
             )
+            .children(panel.map(|panel| {
+                div()
+                    .w(px(panel.width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(panel.element)
+            }))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))

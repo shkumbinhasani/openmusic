@@ -1,11 +1,15 @@
 use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px};
+use spotify_client::Track;
 
 use super::state::ProfileListKind;
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
     ui::{
-        Palette,
-        menu::{Group, MenuItem, Target},
+        Palette, Panel,
+        dock::DockItem,
+        menu::{Group, MenuItem, Row, Target},
+        sidebar::NavEntry,
+        tracks::RowOptions,
     },
 };
 
@@ -70,6 +74,14 @@ impl OpenMusic {
         self.page_status("Coming soon", palette).into_any_element()
     }
 
+    pub fn account_chip(&self, _palette: Palette, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        None
+    }
+
+    pub fn right_panel(&self, _palette: Palette, _cx: &mut Context<Self>) -> Option<Panel> {
+        None
+    }
+
     pub fn account_section(
         &self,
         _palette: Palette,
@@ -116,5 +128,29 @@ impl OpenMusic {
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
+}
+
+pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
+    Vec::new()
+}
+
+pub fn dock_items(
+    _app: &OpenMusic,
+    _roomy: bool,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<DockItem> {
+    Vec::new()
+}
+
+pub fn row_accessories(
+    _app: &OpenMusic,
+    _track: &Track,
+    _row: Row,
+    _options: &RowOptions,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<AnyElement> {
     Vec::new()
 }

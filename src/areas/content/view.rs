@@ -1,11 +1,17 @@
 use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb, rgba};
+use spotify_client::Track;
 
 use crate::{
-    app::OpenMusic,
+    app::{OpenMusic, Page},
+    icons,
+    overlay::Label,
     ui::{
         Palette,
         components::bone,
-        menu::{Group, MenuItem, Surface, Target},
+        dock::DockItem,
+        menu::{Group, MenuItem, Row, Surface, Target},
+        sidebar::NavEntry,
+        tracks::RowOptions,
     },
 };
 
@@ -189,5 +195,47 @@ impl OpenMusic {
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
+}
+
+pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
+    vec![NavEntry::new(
+        "nav-lyrics",
+        300,
+        icons::LYRICS,
+        "Lyrics",
+        app.page == Page::Lyrics,
+        |app, _, _| app.show_lyrics(true),
+    )]
+}
+
+pub fn dock_items(
+    app: &OpenMusic,
+    _roomy: bool,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
+) -> Vec<DockItem> {
+    let symbol = if app.page == Page::Lyrics {
+        "quote.bubble.fill"
+    } else {
+        "quote.bubble"
+    };
+    vec![DockItem::new(
+        "lyrics",
+        700,
+        48.,
+        app.dock_control("lyrics", Label::Symbol(symbol), false, palette, cx)
+            .size(px(48.)),
+    )]
+}
+
+pub fn row_accessories(
+    _app: &OpenMusic,
+    _track: &Track,
+    _row: Row,
+    _options: &RowOptions,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<AnyElement> {
     Vec::new()
 }

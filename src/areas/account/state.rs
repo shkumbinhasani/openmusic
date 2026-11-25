@@ -8,6 +8,7 @@ use super::worker::Event;
 use crate::{
     app::{OpenMusic, Page},
     menus::{self, Handle, SignOut},
+    ui::tracks::{RowDrag, RowDrop},
     worker,
 };
 
@@ -99,3 +100,24 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.send(worker::Command::SignOut)
     });
 }
+
+pub fn on_press(
+    _app: &mut OpenMusic,
+    _key: &'static str,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) -> bool {
+    false
+}
+
+pub fn row_dropped(
+    _app: &mut OpenMusic,
+    _drag: &RowDrag,
+    _at: RowDrop,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) -> bool {
+    false
+}
+
+pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}

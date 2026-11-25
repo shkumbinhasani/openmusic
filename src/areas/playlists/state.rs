@@ -7,6 +7,10 @@ use super::worker::{Command, Event};
 use crate::{
     app::{OpenMusic, Page},
     menus::Handle,
+    ui::{
+        menu::Target,
+        tracks::{RowDrag, RowDrop},
+    },
 };
 
 #[derive(Default)]
@@ -74,3 +78,40 @@ pub fn state_fragment(_app: &OpenMusic) -> String {
 }
 
 pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
+
+pub fn on_press(
+    app: &mut OpenMusic,
+    key: &'static str,
+    _window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> bool {
+    match key {
+        "play-collection" => {
+            if let Some((uri, Ok(collection))) = &app.playlists.collection {
+                let (uri, tracks) = (uri.clone(), collection.tracks.clone());
+                app.play_context(&uri, &tracks, 0, cx);
+            }
+        }
+        "more-collection" => {
+            if let Page::Collection(uri) = &app.page
+                && let Some(target) = Target::for_uri(uri)
+            {
+                app.open_menu_under(target, key);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+pub fn row_dropped(
+    _app: &mut OpenMusic,
+    _drag: &RowDrag,
+    _at: RowDrop,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) -> bool {
+    false
+}
+
+pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}

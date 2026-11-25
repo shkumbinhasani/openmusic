@@ -1,11 +1,15 @@
 use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb, rgba};
+use spotify_client::Track;
 
 use crate::{
     app::{OpenMusic, Page},
     ui::{
         Palette,
         components::{ROW_RADIUS, artwork, bone},
-        menu::{Group, MenuItem, Target},
+        dock::DockItem,
+        menu::{Group, MenuItem, Row, Target},
+        sidebar::NavEntry,
+        tracks::RowOptions,
     },
 };
 
@@ -138,5 +142,29 @@ impl OpenMusic {
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
+}
+
+pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
+    Vec::new()
+}
+
+pub fn dock_items(
+    _app: &OpenMusic,
+    _roomy: bool,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<DockItem> {
+    Vec::new()
+}
+
+pub fn row_accessories(
+    _app: &OpenMusic,
+    _track: &Track,
+    _row: Row,
+    _options: &RowOptions,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<AnyElement> {
     Vec::new()
 }

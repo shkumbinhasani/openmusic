@@ -1,12 +1,17 @@
 use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb, rgba};
+use spotify_client::Track;
 
 use crate::{
     app::OpenMusic,
     icons,
+    overlay::{self, Label},
     ui::{
         Palette,
         components::{ROW_RADIUS, icon},
-        menu::{Group, MenuItem, Target},
+        dock::DockItem,
+        menu::{Group, MenuItem, Row, Target},
+        sidebar::NavEntry,
+        tracks::RowOptions,
     },
 };
 
@@ -111,5 +116,75 @@ impl OpenMusic {
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
+}
+
+pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
+    Vec::new()
+}
+
+pub fn dock_items(
+    app: &OpenMusic,
+    roomy: bool,
+    palette: Palette,
+    cx: &mut Context<OpenMusic>,
+) -> Vec<DockItem> {
+    let toggle = if app.playback.now.playing {
+        "pause.fill"
+    } else {
+        "play.fill"
+    };
+    let mut items = vec![
+        DockItem::new(
+            "previous",
+            200,
+            48.,
+            app.dock_control(
+                "previous",
+                Label::Symbol("backward.fill"),
+                false,
+                palette,
+                cx,
+            )
+            .size(px(48.)),
+        ),
+        DockItem::new(
+            "toggle-playback",
+            300,
+            60.,
+            app.dock_control("toggle-playback", Label::Symbol(toggle), false, palette, cx)
+                .size(px(60.)),
+        ),
+        DockItem::new(
+            "next",
+            400,
+            48.,
+            app.dock_control("next", Label::Symbol("forward.fill"), false, palette, cx)
+                .size(px(48.)),
+        ),
+    ];
+    if overlay::available() && roomy {
+        let volume = f32::from(app.playback.now.volume) / f32::from(u16::MAX);
+        items.push(DockItem::new(
+            "volume",
+            900,
+            168.,
+            div()
+                .relative()
+                .size_full()
+                .child(overlay::volume(volume, f32::MAX)),
+        ));
+    }
+    items
+}
+
+pub fn row_accessories(
+    _app: &OpenMusic,
+    _track: &Track,
+    _row: Row,
+    _options: &RowOptions,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<AnyElement> {
     Vec::new()
 }

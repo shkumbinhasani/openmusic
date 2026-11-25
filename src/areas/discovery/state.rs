@@ -7,6 +7,10 @@ use super::worker::{Command, Discovery, Event, Mix};
 use crate::{
     app::{OpenMusic, Page, Session, intent::Intent},
     menus::{self, FocusSearch, Handle},
+    ui::{
+        menu::Target,
+        tracks::{RowDrag, RowDrop},
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -250,3 +254,46 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.perform(Intent::FocusSearch, window, cx)
     });
 }
+
+pub fn on_press(
+    app: &mut OpenMusic,
+    key: &'static str,
+    _window: &mut Window,
+    cx: &mut Context<OpenMusic>,
+) -> bool {
+    match key {
+        "play-station" => {
+            if let Some(mix) = app.discovery.station() {
+                let tracks = mix.tracks.clone();
+                app.play(&tracks, 0, cx);
+            }
+        }
+        "play-artist" => {
+            if let Some((uri, Ok(artist))) = &app.discovery.artist {
+                let (uri, tracks) = (uri.clone(), artist.top_tracks.clone());
+                app.play_context(&uri, &tracks, 0, cx);
+            }
+        }
+        "more-artist" => {
+            if let Page::Artist(uri) = &app.page
+                && let Some(target) = Target::for_uri(uri)
+            {
+                app.open_menu_under(target, key);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+pub fn row_dropped(
+    _app: &mut OpenMusic,
+    _drag: &RowDrag,
+    _at: RowDrop,
+    _window: &mut Window,
+    _cx: &mut Context<OpenMusic>,
+) -> bool {
+    false
+}
+
+pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}

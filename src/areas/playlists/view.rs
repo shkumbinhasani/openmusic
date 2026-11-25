@@ -1,11 +1,15 @@
 use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
+use spotify_client::Track;
 
 use crate::{
     app::{OpenMusic, Page},
     ui::{
         Palette,
         components::{artwork, link, skeleton_header, skeleton_rows},
-        menu::{Group, MenuItem, Target},
+        dock::DockItem,
+        menu::{Group, MenuItem, Row, Target},
+        sidebar::NavEntry,
+        tracks::RowOptions,
     },
 };
 
@@ -77,7 +81,7 @@ impl OpenMusic {
                                 .child(collection.name.clone()),
                         )
                         .child(div().w_full().flex().min_w_0().child(link(
-                            ("collection-subtitle", 0),
+                            ("collection-subtitle", 0usize),
                             collection.subtitle.clone(),
                             artist_page,
                             13.5,
@@ -105,12 +109,18 @@ impl OpenMusic {
         .child(if collection.tracks.is_empty() {
             self.page_status("This is empty.", palette)
         } else {
+            let album = collection.kind == "ALBUM";
+            let options = RowOptions {
+                numbered: album,
+                context: Some(loaded.clone()),
+                show_album: !album,
+                ..RowOptions::default()
+            };
             self.track_list(
                 &collection.tracks,
                 "collection-track",
                 0,
-                Some(loaded),
-                collection.kind == "ALBUM",
+                &options,
                 palette,
                 cx,
             )
@@ -131,5 +141,29 @@ impl OpenMusic {
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    Vec::new()
+}
+
+pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
+    Vec::new()
+}
+
+pub fn dock_items(
+    _app: &OpenMusic,
+    _roomy: bool,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<DockItem> {
+    Vec::new()
+}
+
+pub fn row_accessories(
+    _app: &OpenMusic,
+    _track: &Track,
+    _row: Row,
+    _options: &RowOptions,
+    _palette: Palette,
+    _cx: &mut Context<OpenMusic>,
+) -> Vec<AnyElement> {
     Vec::new()
 }

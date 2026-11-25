@@ -1,13 +1,62 @@
-use gpui::{Context, FontWeight, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px, rgb, rgba};
 
 use super::{DOCK_HEIGHT, Palette, WINDOW_INSET};
 use crate::{
-    app::{OpenMusic, Page},
-    overlay::{self, Label, NowPlaying as NowPlayingBar},
+    app::OpenMusic,
+    areas::{account, audio, content, details, discovery, library, playback, playlists, system},
+    overlay::{self, NowPlaying as NowPlayingBar},
 };
 
+pub const BAR_WEIGHT: u32 = 500;
+
+pub struct DockItem {
+    pub key: &'static str,
+    pub weight: u32,
+    pub width: f32,
+    pub element: AnyElement,
+}
+
+impl DockItem {
+    pub fn new(key: &'static str, weight: u32, width: f32, element: impl IntoElement) -> Self {
+        Self {
+            key,
+            weight,
+            width,
+            element: element.into_any_element(),
+        }
+    }
+}
+
+pub type DockItems = fn(&OpenMusic, bool, Palette, &mut Context<OpenMusic>) -> Vec<DockItem>;
+
+pub const DOCK_ITEMS: &[DockItems] = &[
+    account::view::dock_items,
+    audio::view::dock_items,
+    content::view::dock_items,
+    details::view::dock_items,
+    discovery::view::dock_items,
+    library::view::dock_items,
+    playback::view::dock_items,
+    playlists::view::dock_items,
+    system::view::dock_items,
+];
+
 impl OpenMusic {
-    pub fn dock(&self, roomy: bool, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    pub fn dock_items(
+        &self,
+        roomy: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Vec<DockItem> {
+        let mut items: Vec<DockItem> = DOCK_ITEMS
+            .iter()
+            .flat_map(|items| items(self, roomy, palette, cx))
+            .collect();
+        items.sort_by_key(|item| item.weight);
+        items
+    }
+
+    fn now_playing_bar(&self, palette: Palette) -> impl IntoElement {
         let track = self.track();
         let title = track
             .map(|track| track.title.clone())
@@ -19,11 +68,6 @@ impl OpenMusic {
             .clone()
             .or_else(|| track.map(|track| track.artist.clone()))
             .unwrap_or_default();
-        let toggle = if self.playback.now.playing {
-            "pause.fill"
-        } else {
-            "play.fill"
-        };
         let state = NowPlayingBar {
             title: title.clone(),
             subtitle: subtitle.clone(),
@@ -36,7 +80,49 @@ impl OpenMusic {
             position_ms: self.playback.now.position(),
             duration_ms: self.duration().unwrap_or(0),
         };
-        let volume = f32::from(self.playback.now.volume) / f32::from(u16::MAX);
+        div().relative().flex_1().min_w_0().h_full().map(|bar| {
+            if overlay::available() {
+                bar.child(overlay::now_playing(state))
+            } else {
+                bar.flex()
+                    .flex_col()
+                    .justify_center()
+                    .px_5()
+                    .rounded_full()
+                    .bg(rgba(palette.fill))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(palette.muted))
+                            .truncate()
+                            .child(subtitle),
+                    )
+            }
+        })
+    }
+
+    pub fn dock(&self, roomy: bool, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let slot = |item: DockItem| {
+            div()
+                .w(px(item.width))
+                .h_full()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(item.element)
+        };
+        let (leading, trailing): (Vec<DockItem>, Vec<DockItem>) = self
+            .dock_items(roomy, palette, cx)
+            .into_iter()
+            .partition(|item| item.weight < BAR_WEIGHT);
 
         div()
             .id("dock")
@@ -49,73 +135,8 @@ impl OpenMusic {
             .flex()
             .items_center()
             .gap_2p5()
-            .child(
-                self.dock_control(
-                    "previous",
-                    Label::Symbol("backward.fill"),
-                    false,
-                    palette,
-                    cx,
-                )
-                .size(px(48.)),
-            )
-            .child(
-                self.dock_control("toggle-playback", Label::Symbol(toggle), false, palette, cx)
-                    .size(px(60.)),
-            )
-            .child(
-                self.dock_control("next", Label::Symbol("forward.fill"), false, palette, cx)
-                    .size(px(48.)),
-            )
-            .child(div().relative().flex_1().min_w_0().h_full().map(|bar| {
-                if overlay::available() {
-                    bar.child(overlay::now_playing(state))
-                } else {
-                    bar.flex()
-                        .flex_col()
-                        .justify_center()
-                        .px_5()
-                        .rounded_full()
-                        .bg(rgba(palette.fill))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .truncate()
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(palette.muted))
-                                .truncate()
-                                .child(subtitle),
-                        )
-                }
-            }))
-            .child(
-                self.dock_control(
-                    "lyrics",
-                    Label::Symbol(if self.page == Page::Lyrics {
-                        "quote.bubble.fill"
-                    } else {
-                        "quote.bubble"
-                    }),
-                    false,
-                    palette,
-                    cx,
-                )
-                .size(px(48.)),
-            )
-            .when(overlay::available() && roomy, |dock| {
-                dock.child(
-                    div()
-                        .relative()
-                        .w(px(168.))
-                        .h_full()
-                        .flex_shrink_0()
-                        .child(overlay::volume(volume, f32::MAX)),
-                )
-            })
+            .children(leading.into_iter().map(slot))
+            .child(self.now_playing_bar(palette))
+            .children(trailing.into_iter().map(slot))
     }
 }

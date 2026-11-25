@@ -21,10 +21,7 @@ use gpui_component::{
 use crate::{
     areas::{account, audio, content, details, discovery, library, playback, playlists, system},
     debug, menus, overlay,
-    ui::{
-        self,
-        menu::{Menus, Target},
-    },
+    ui::{self, gallery::Gallery, menu::Menus},
     worker::{Command, Event},
 };
 use intent::Intent;
@@ -56,6 +53,7 @@ pub struct OpenMusic {
     pub settings: Settings,
     pub saved: Saved,
     pub menus: Menus,
+    pub gallery: Option<Gallery>,
     pub account: account::state::State,
     pub content: content::state::State,
     pub discovery: discovery::state::State,
@@ -101,6 +99,7 @@ impl OpenMusic {
             settings: settings::load(),
             saved: Saved::default(),
             menus: Menus::default(),
+            gallery: None,
             account: Default::default(),
             content: Default::default(),
             discovery: Default::default(),
@@ -120,6 +119,7 @@ impl OpenMusic {
         let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
         let _ = self.shared_debug(verb, rest, directory, window, cx)
+            || ui::debug(self, verb, rest, directory, window, cx)
             || ui::menu::debug(self, verb, rest, directory, window, cx)
             || menus::debug(self, verb, rest, directory, window, cx)
             || account::state::debug(self, verb, rest, directory, window, cx)
@@ -351,6 +351,16 @@ impl OpenMusic {
         if self.expire_toast() {
             cx.notify();
         }
+        ui::gallery::tick(self, cx);
+        account::state::tick(self, cx);
+        audio::state::tick(self, cx);
+        content::state::tick(self, cx);
+        details::state::tick(self, cx);
+        discovery::state::tick(self, cx);
+        library::state::tick(self, cx);
+        playback::state::tick(self, cx);
+        playlists::state::tick(self, cx);
+        system::state::tick(self, cx);
         if !self.playback.now.playing {
             return;
         }
@@ -367,17 +377,6 @@ impl OpenMusic {
         cx: &mut Context<Self>,
     ) {
         match action {
-            overlay::Action::Press("previous") => self.perform(Intent::Previous, window, cx),
-            overlay::Action::Press("next") => self.perform(Intent::Next, window, cx),
-            overlay::Action::Press("toggle-playback") => {
-                self.perform(Intent::PlayPause, window, cx)
-            }
-            overlay::Action::Press("play-station") => {
-                if let Some(mix) = self.discovery.station() {
-                    let tracks = mix.tracks.clone();
-                    self.play(&tracks, 0, cx);
-                }
-            }
             overlay::Action::Press("sign-in") => {
                 self.session_error = None;
                 self.session = Session::Connecting;
@@ -394,31 +393,19 @@ impl OpenMusic {
                     cx.open_url(url);
                 }
             }
-            overlay::Action::Press("play-here") => self.send(playback::worker::Command::PlayHere),
-            overlay::Action::Press("lyrics") => self.show_lyrics(self.page != Page::Lyrics),
             overlay::Action::Press("back") => self.perform(Intent::Back, window, cx),
-            overlay::Action::Press("play-artist") => {
-                if let Some((uri, Ok(artist))) = &self.discovery.artist {
-                    let (uri, tracks) = (uri.clone(), artist.top_tracks.clone());
-                    self.play_context(&uri, &tracks, 0, cx);
-                }
+            overlay::Action::Press(key) => {
+                let _ = ui::gallery::on_press(self, key)
+                    || account::state::on_press(self, key, window, cx)
+                    || audio::state::on_press(self, key, window, cx)
+                    || content::state::on_press(self, key, window, cx)
+                    || details::state::on_press(self, key, window, cx)
+                    || discovery::state::on_press(self, key, window, cx)
+                    || library::state::on_press(self, key, window, cx)
+                    || playback::state::on_press(self, key, window, cx)
+                    || playlists::state::on_press(self, key, window, cx)
+                    || system::state::on_press(self, key, window, cx);
             }
-            overlay::Action::Press("play-collection") => {
-                if let Some((uri, Ok(collection))) = &self.playlists.collection {
-                    let (uri, tracks) = (uri.clone(), collection.tracks.clone());
-                    self.play_context(&uri, &tracks, 0, cx);
-                }
-            }
-            overlay::Action::Press(key @ ("more-collection" | "more-artist")) => {
-                let target = match &self.page {
-                    Page::Collection(uri) | Page::Artist(uri) => Target::for_uri(uri),
-                    _ => None,
-                };
-                if let Some(target) = target {
-                    self.open_menu_under(target, key);
-                }
-            }
-            overlay::Action::Press(_) => {}
             overlay::Action::Menu(_)
             | overlay::Action::MenuClosed
             | overlay::Action::BarMenu(_) => self.menu_action(action, window, cx),

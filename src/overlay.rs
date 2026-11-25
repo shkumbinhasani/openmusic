@@ -68,7 +68,7 @@ thread_local! {
 #[cfg(target_os = "macos")]
 pub use native::dock_artwork;
 pub use native::{
-    available, bar_menu, bar_menu_tree, close_menu, filter_menu, menu_bar_tree, menu_tree,
+    available, bar_menu, bar_menu_tree, close_menu, drag, filter_menu, menu_bar_tree, menu_tree,
     nudge_window, pick, progress, right_click, set_handler, update_menu,
 };
 
@@ -1364,6 +1364,10 @@ mod native {
         appkit::right_click(x, y)
     }
 
+    pub fn drag(from: (f64, f64), to: (f64, f64)) -> bool {
+        appkit::drag(from, to)
+    }
+
     pub fn nudge_window(dx: f64, dy: f64) -> bool {
         appkit::nudge_window(dx, dy)
     }
@@ -1468,6 +1472,10 @@ mod native {
     }
 
     pub fn right_click(_: f64, _: f64) -> bool {
+        false
+    }
+
+    pub fn drag(_: (f64, f64), _: (f64, f64)) -> bool {
         false
     }
 

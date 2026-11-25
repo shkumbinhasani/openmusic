@@ -178,14 +178,11 @@ impl Covers {
                     return (url, Some(bytes));
                 }
                 let jpeg = async {
-                    let parsed = url::Url::parse(&url).ok()?;
-                    if parsed.scheme() != "https"
-                        || !parsed.host_str().is_some_and(trusted_image_host)
-                    {
+                    if !trusted_image(&url) {
                         return None;
                     }
                     let bytes = http
-                        .get(parsed)
+                        .get(&url)
                         .send()
                         .await
                         .ok()?
@@ -469,6 +466,11 @@ fn apply_settings(settings: &Settings, ctx: &mut Ctx) {
     system::worker::apply_settings(&settings.system, ctx);
 }
 
-fn trusted_image_host(host: &str) -> bool {
-    host.ends_with(".scdn.co") || host.ends_with(".spotifycdn.com")
+pub fn trusted_image(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|parsed| {
+        parsed.scheme() == "https"
+            && parsed
+                .host_str()
+                .is_some_and(|host| host.ends_with(".scdn.co") || host.ends_with(".spotifycdn.com"))
+    })
 }
