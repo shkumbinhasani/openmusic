@@ -7,7 +7,8 @@ use gpui::{App, Context, Entity, ScrollHandle, Window};
 use gpui_component::WindowExt;
 use spotify_client::{
     catalog::Link,
-    details::{Ban, BanProvider, hide_context},
+    dealer::Message,
+    details::{self, Ban, BanProvider, SetPush, hide_context},
     share,
 };
 
@@ -61,6 +62,12 @@ fn load_sets(app: &mut OpenMusic) {
     app.send(Command::LoadSets);
 }
 
+fn take_push(app: &mut OpenMusic, push: &SetPush) {
+    if app.details.sets.push(push) {
+        load_sets(app);
+    }
+}
+
 fn lookup_editable(app: &mut OpenMusic) {
     let Some(context) = app
         .playback
@@ -88,6 +95,7 @@ pub fn on_event(
 ) {
     match event {
         Event::Sets(result) => app.details.sets.apply(result),
+        Event::Pushed(push) => take_push(app, &push),
         Event::Excluded {
             uri,
             excluded,
@@ -163,12 +171,14 @@ pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<Op
 fn sets_report(app: &OpenMusic) -> String {
     let sets = &app.details.sets;
     let mut lines = vec![format!(
-        "load={} excluded={} hidden={} banned={} format={}",
+        "load={} excluded={} hidden={} banned={} format={} pushes={} reloading={}",
         sets.load.name(),
         sets.excluded.len(),
         sets.hidden_count(),
         sets.banned.len(),
         sets.last_format.map_or("none", |format| format.name()),
+        sets.pushes,
+        sets.loading_now(),
     )];
     let mut excluded: Vec<&String> = sets.excluded.iter().collect();
     excluded.sort();
@@ -308,6 +318,28 @@ pub fn debug(
         }
         ("sets", []) => write("sets.txt", sets_report(app)),
         ("sets", ["reload"]) => load_sets(app),
+        ("setpush", [uri, payload @ ..]) if !payload.is_empty() => {
+            let message = serde_json::from_str(&payload.join(" "))
+                .ok()
+                .map(|payload| Message {
+                    uri: (*uri).to_owned(),
+                    headers: HashMap::new(),
+                    payloads: vec![payload],
+                });
+            let line = match message.as_ref().and_then(details::set_push) {
+                Some(push) => {
+                    take_push(app, &push);
+                    format!(
+                        "set={} items={} unreadable={}",
+                        push.set.name(),
+                        push.items.len(),
+                        push.unreadable
+                    )
+                }
+                None => "ignored".to_owned(),
+            };
+            write("setpush.txt", line);
+        }
         ("exclude", [uri, value]) => {
             if let Some(excluded) = switch(value) {
                 app.set_excluded((*uri).to_owned(), excluded);

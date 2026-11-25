@@ -2,7 +2,7 @@ use spotify_client::{
     Api,
     catalog::Link,
     dealer::Message,
-    details::{self, Ban, BanProvider, Credits, NoRadio, Unavailable, WriteFormat},
+    details::{self, Ban, BanProvider, Credits, NoRadio, SetPush, Unavailable, WriteFormat},
     pathfinder::PathfinderError,
 };
 
@@ -47,6 +47,7 @@ pub enum Event {
         color: Option<u32>,
     },
     Sets(Result<Snapshot, String>),
+    Pushed(SetPush),
     Excluded {
         uri: String,
         excluded: bool,
@@ -82,6 +83,7 @@ impl Event {
             Self::Credits { .. }
             | Self::CoverColor { .. }
             | Self::Sets(_)
+            | Self::Pushed(_)
             | Self::Excluded { .. }
             | Self::Hidden { .. }
             | Self::Banned { .. }
@@ -176,7 +178,11 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
     }
 }
 
-pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
+pub fn on_push(message: &Message, ctx: &mut Ctx) {
+    if let Some(push) = details::set_push(message) {
+        ctx.publish(Event::Pushed(push));
+    }
+}
 
 async fn credits(api: Api, uri: String) -> crate::worker::Event {
     let result = details::credits(&api, &uri)

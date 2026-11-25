@@ -7,7 +7,7 @@ use std::{
 use gpui::Context;
 use spotify_client::{
     Track,
-    details::{Ban, BanProvider, WriteFormat, hide_context},
+    details::{Ban, BanProvider, FeedbackSet, SetPush, WriteFormat, hide_context},
     entity,
 };
 
@@ -22,6 +22,7 @@ use crate::{
 };
 
 pub const RETRY_AFTER: Duration = Duration::from_secs(30);
+pub const REFRESH_EVERY: Duration = Duration::from_secs(600);
 
 pub const EXCLUDE: &str = "Exclude from your taste profile";
 pub const INCLUDE: &str = "Include in your taste profile";
@@ -64,7 +65,11 @@ pub struct Sets {
     pub hidden: HashMap<String, HashSet<String>>,
     pub editable: HashMap<String, Option<bool>>,
     pub last_format: Option<WriteFormat>,
+    pub pushes: usize,
     writing: HashMap<Entry, usize>,
+    touched: HashMap<Entry, Instant>,
+    requested: Option<Instant>,
+    next: Option<Instant>,
 }
 
 impl Sets {
@@ -124,23 +129,44 @@ impl Sets {
         if self.load != Load::Ready {
             self.load = Load::Loading;
         }
+        self.requested = Some(Instant::now());
+    }
+
+    pub fn loading_now(&self) -> bool {
+        self.requested.is_some()
+    }
+
+    fn newer_than_request(&self, entry: &Entry) -> bool {
+        self.writing.contains_key(entry)
+            || self
+                .touched
+                .get(entry)
+                .is_some_and(|at| self.requested.is_none_or(|requested| *at >= requested))
     }
 
     pub fn apply(&mut self, result: Result<Snapshot, String>) {
+        let now = Instant::now();
         let snapshot = match result {
             Ok(snapshot) => snapshot,
             Err(_) => {
                 if self.load != Load::Ready {
-                    self.load = Load::Failed(Instant::now());
+                    self.load = Load::Failed(now);
                 }
+                self.requested = None;
+                self.next = Some(now + RETRY_AFTER);
                 return;
             }
         };
         let local: Vec<(Entry, bool)> = self
             .writing
             .keys()
+            .chain(self.touched.keys())
+            .filter(|entry| self.newer_than_request(entry))
             .map(|entry| (entry.clone(), self.contains(entry)))
             .collect();
+        self.touched.clear();
+        self.requested = None;
+        self.next = Some(now + REFRESH_EVERY);
         self.excluded = snapshot.excluded.into_iter().collect();
         self.banned = snapshot.banned.into_iter().collect();
         self.hidden.clear();
@@ -154,7 +180,32 @@ impl Sets {
     }
 
     pub fn due(&self) -> bool {
-        matches!(self.load, Load::Failed(at) if at.elapsed() >= RETRY_AFTER)
+        self.requested.is_none() && self.next.is_some_and(|next| Instant::now() >= next)
+    }
+
+    pub fn push(&mut self, push: &SetPush) -> bool {
+        self.pushes += 1;
+        let mut reload = push.unreadable > 0;
+        for item in &push.items {
+            let entry = match (push.set, &item.context) {
+                (FeedbackSet::Excluded, _) => Entry::Excluded(item.uri.clone()),
+                (FeedbackSet::Banned, _) => Entry::Banned(item.uri.clone()),
+                (FeedbackSet::Hidden, Some(context)) => Entry::Hidden(Ban {
+                    track: item.uri.clone(),
+                    context: context.clone(),
+                }),
+                (FeedbackSet::Hidden, None) => {
+                    reload = true;
+                    continue;
+                }
+            };
+            if self.writing.contains_key(&entry) {
+                continue;
+            }
+            self.mark(&entry, !item.removed);
+            self.touched.insert(entry, Instant::now());
+        }
+        reload && self.load != Load::Idle
     }
 
     fn begin(&mut self, entry: Entry, on: bool) {
@@ -169,6 +220,7 @@ impl Sets {
             .map_or(0, |count| count.saturating_sub(1));
         if left == 0 {
             self.writing.remove(entry);
+            self.touched.insert(entry.clone(), Instant::now());
         } else if let Some(count) = self.writing.get_mut(entry) {
             *count = left;
         }
@@ -485,18 +537,88 @@ mod tests {
     #[test]
     fn retries_a_failed_load_later() {
         let mut sets = Sets::default();
+        assert!(!sets.due());
         sets.loading();
         assert_eq!(sets.load, Load::Loading);
+        assert!(sets.loading_now());
         sets.apply(Err("offline".into()));
         assert_eq!(sets.load.name(), "failed");
         assert!(!sets.due());
-        sets.load = Load::Failed(Instant::now() - RETRY_AFTER);
+        let next = sets.next.unwrap();
+        assert!(next >= Instant::now() + RETRY_AFTER - Duration::from_secs(1));
+        sets.next = Some(Instant::now());
         assert!(sets.due());
+        sets.loading();
+        assert!(!sets.due());
         sets.apply(Ok(Snapshot::default()));
+        assert!(!sets.loading_now());
+        assert!(sets.next.unwrap() >= Instant::now() + REFRESH_EVERY - Duration::from_secs(1));
         sets.apply(Err("offline".into()));
         assert!(sets.ready());
         sets.loading();
         assert!(sets.ready());
+    }
+
+    #[test]
+    fn keeps_writes_that_land_after_a_reload_was_asked_for() {
+        let mut sets = Sets::default();
+        sets.apply(Ok(Snapshot::default()));
+        sets.begin(Entry::Excluded(RADIO.into()), true);
+        sets.loading();
+        sets.excluded_written(RADIO, true, true);
+        sets.apply(Ok(Snapshot::default()));
+        assert!(sets.is_excluded(RADIO));
+        sets.loading();
+        sets.apply(Ok(Snapshot::default()));
+        assert!(!sets.is_excluded(RADIO));
+    }
+
+    fn pushed(set: FeedbackSet, uri: &str, context: Option<&str>, removed: bool) -> SetPush {
+        SetPush {
+            set,
+            items: vec![spotify_client::details::Pushed {
+                uri: uri.into(),
+                context: context.map(str::to_owned),
+                removed,
+            }],
+            unreadable: 0,
+        }
+    }
+
+    #[test]
+    fn applies_pushes_one_entry_at_a_time() {
+        let mut sets = Sets::default();
+        sets.apply(Ok(Snapshot {
+            excluded: vec!["spotify:playlist:other".into()],
+            ..Snapshot::default()
+        }));
+        assert!(!sets.push(&pushed(FeedbackSet::Excluded, RADIO, None, false)));
+        assert!(sets.is_excluded(RADIO));
+        assert!(sets.is_excluded("spotify:playlist:other"));
+        assert!(!sets.push(&pushed(FeedbackSet::Banned, RADIOHEAD, None, false)));
+        assert!(sets.is_banned(RADIOHEAD));
+        assert!(!sets.push(&pushed(FeedbackSet::Banned, RADIOHEAD, None, true)));
+        assert!(!sets.is_banned(RADIOHEAD));
+        assert!(!sets.push(&pushed(FeedbackSet::Hidden, SONG, Some(RADIO), false)));
+        assert!(sets.is_hidden(SONG, RADIO));
+        assert!(sets.push(&pushed(FeedbackSet::Hidden, SONG, None, true)));
+        assert!(sets.is_hidden(SONG, RADIO));
+        assert_eq!(sets.pushes, 5);
+
+        sets.begin(Entry::Banned(BOWIE.into()), true);
+        sets.push(&pushed(FeedbackSet::Banned, BOWIE, None, true));
+        assert!(sets.is_banned(BOWIE));
+
+        sets.loading();
+        sets.push(&pushed(FeedbackSet::Excluded, SONG, None, false));
+        sets.apply(Ok(Snapshot::default()));
+        assert!(sets.is_excluded(SONG));
+        assert!(!sets.is_excluded(RADIO));
+
+        let mut unread = pushed(FeedbackSet::Excluded, RADIO, None, false);
+        unread.unreadable = 1;
+        assert!(sets.push(&unread));
+        assert!(!Sets::default().push(&unread));
     }
 
     #[test]

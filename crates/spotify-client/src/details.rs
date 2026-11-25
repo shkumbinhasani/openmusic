@@ -20,6 +20,7 @@ use crate::{
     api::{Api, Body, HttpStatus},
     catalog::{self, Capabilities, Link},
     collection::{self, IGNORE_IN_RECS, PAGE_LIMIT, PLAY_CONTEXT_BANS},
+    dealer::Message as Push,
     entity,
     pathfinder::{self, Operation},
 };
@@ -551,6 +552,104 @@ pub async fn set_artist_banned(api: &Api, user: &str, uri: &str, banned: bool) -
     collection::write(api, user, ARTIST_BAN, &[artist_ban(uri, banned)]).await
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedbackSet {
+    Excluded,
+    Banned,
+    Hidden,
+}
+
+impl FeedbackSet {
+    pub fn of(set: &str) -> Option<Self> {
+        match set {
+            IGNORE_IN_RECS => Some(Self::Excluded),
+            ARTIST_BAN => Some(Self::Banned),
+            PLAY_CONTEXT_BANS => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Excluded => IGNORE_IN_RECS,
+            Self::Banned => ARTIST_BAN,
+            Self::Hidden => PLAY_CONTEXT_BANS,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pushed {
+    pub uri: String,
+    pub context: Option<String>,
+    pub removed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetPush {
+    pub set: FeedbackSet,
+    pub items: Vec<Pushed>,
+    pub unreadable: usize,
+}
+
+pub fn set_push(message: &Push) -> Option<SetPush> {
+    let mut path = message.uri.strip_prefix("hm://collection/")?.split('/');
+    let set = FeedbackSet::of(path.next()?)?;
+    path.next().filter(|user| !user.is_empty())?;
+    if path.next() != Some("json") {
+        return None;
+    }
+    let decoded;
+    let payload = match message.json() {
+        Some(payload) => payload,
+        None => {
+            decoded = serde_json::from_slice::<Value>(&message.bytes()?).ok()?;
+            &decoded
+        }
+    };
+    let rows = payload["items"].as_array()?;
+    let items: Vec<Pushed> = rows.iter().filter_map(pushed).collect();
+    Some(SetPush {
+        set,
+        unreadable: rows.len() - items.len(),
+        items,
+    })
+}
+
+fn pushed(item: &Value) -> Option<Pushed> {
+    let uri = pushed_uri(item["type"].as_str()?, item["identifier"].as_str()?)?;
+    let context = ["context_uri", "contextUri", "context"]
+        .iter()
+        .find_map(|key| item[*key].as_str())
+        .and_then(hide_context);
+    Some(Pushed {
+        uri,
+        context,
+        removed: item["removed"].as_bool().unwrap_or(false),
+    })
+}
+
+fn pushed_uri(kind: &str, id: &str) -> Option<String> {
+    if id.starts_with("spotify:") {
+        return Some(id.to_owned());
+    }
+    if kind.is_empty()
+        || !kind
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    {
+        return None;
+    }
+    if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let gid = (0..16)
+            .map(|index| u8::from_str_radix(&id[index * 2..index * 2 + 2], 16).ok())
+            .collect::<Option<Vec<u8>>>()?;
+        return catalog::uri_from_gid(kind, &gid);
+    }
+    (id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .then(|| format!("spotify:{kind}:{id}"))
+}
+
 pub async fn excluded(api: &Api, user: &str) -> Result<Vec<String>> {
     Ok(collection::all(api, user, IGNORE_IN_RECS)
         .await?
@@ -994,6 +1093,86 @@ mod tests {
             json!({"username": "someone", "set": "artistban", "items": [
                 {"uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", "is_removed": true}
             ]})
+        );
+    }
+
+    fn push(uri: &str, payload: Value) -> Push {
+        Push {
+            uri: uri.to_owned(),
+            headers: std::collections::HashMap::new(),
+            payloads: vec![payload],
+        }
+    }
+
+    #[test]
+    fn reads_feedback_set_pushes() {
+        use base64::Engine;
+
+        let body = json!({"items": [
+            {"type": "playlist", "identifier": "37i9dQZF1E8Redacted001", "removed": false},
+            {"type": "track", "identifier": "70LcF31zb1H0PyJoS1Sx1r", "removed": true},
+            {"type": "artist", "identifier": "00000000000000000000000000000001"},
+            {"type": "track", "identifier": "short"},
+            {"identifier": "70LcF31zb1H0PyJoS1Sx1r"}
+        ]});
+        let encoded = base64::engine::general_purpose::STANDARD.encode(body.to_string());
+        let pushed = set_push(&push(
+            "hm://collection/ignoreinrecs/someone/json",
+            Value::String(encoded),
+        ))
+        .unwrap();
+        assert_eq!(pushed.set, FeedbackSet::Excluded);
+        assert_eq!(pushed.unreadable, 2);
+        assert_eq!(
+            pushed.items,
+            [
+                Pushed {
+                    uri: RADIO.into(),
+                    context: None,
+                    removed: false,
+                },
+                Pushed {
+                    uri: SONG.into(),
+                    context: None,
+                    removed: true,
+                },
+                Pushed {
+                    uri: "spotify:artist:0000000000000000000001".into(),
+                    context: None,
+                    removed: false,
+                },
+            ]
+        );
+        let banned = set_push(&push(
+            "hm://collection/artistban/someone/json",
+            json!({"items": [{"type": "artist", "identifier": "4Z8W4fKeB5YxbusRsdQVPb"}]}),
+        ))
+        .unwrap();
+        assert_eq!(banned.set, FeedbackSet::Banned);
+        assert_eq!(banned.items[0].uri, RADIOHEAD);
+        let hidden = set_push(&push(
+            "hm://collection/playcontextbans/someone/json",
+            json!({"items": [
+                {"type": "track", "identifier": "70LcF31zb1H0PyJoS1Sx1r",
+                 "context_uri": "spotify:user:someone:playlist:37i9dQZF1E8Redacted001"},
+                {"type": "track", "identifier": "70LcF31zb1H0PyJoS1Sx1r", "removed": true}
+            ]}),
+        ))
+        .unwrap();
+        assert_eq!(hidden.set, FeedbackSet::Hidden);
+        assert_eq!(hidden.items[0].context.as_deref(), Some(RADIO));
+        assert_eq!(hidden.items[1].context, None);
+        for uri in [
+            "hm://collection/collection/someone/json",
+            "hm://collection/artistban/someone",
+            "hm://collection/artistban//json",
+            "hm://playlist/v2/user/someone/rootlist",
+        ] {
+            assert_eq!(set_push(&push(uri, json!({"items": []}))), None, "{uri}");
+        }
+        assert_eq!(
+            FeedbackSet::of("artistban").map(FeedbackSet::name),
+            Some("artistban")
         );
     }
 
