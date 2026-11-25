@@ -13,6 +13,8 @@ use crate::{
     },
 };
 
+const SETTINGS_WIDTH: f32 = 720.;
+
 impl OpenMusic {
     pub fn settings_page(
         &self,
@@ -25,9 +27,11 @@ impl OpenMusic {
             .filter_map(|section| section(self, palette, cx))
             .collect();
         div()
+            .w_full()
+            .max_w(px(SETTINGS_WIDTH))
             .flex()
             .flex_col()
-            .gap_7()
+            .gap(px(28.))
             .child(
                 div()
                     .text_size(px(30.))
@@ -36,7 +40,7 @@ impl OpenMusic {
             )
             .map(|page| {
                 if sections.is_empty() {
-                    page.child(self.page_status("Coming soon", palette))
+                    page.child(self.page_status("Nothing to set up yet.", palette))
                 } else {
                     page.children(sections)
                 }
