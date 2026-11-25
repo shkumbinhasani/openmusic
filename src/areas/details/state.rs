@@ -2,11 +2,16 @@ use std::{collections::HashSet, path::Path};
 
 use gpui::{App, Context, Window};
 
-use super::worker::Event;
+use spotify_client::share;
+
+use super::{menu, worker::Event};
 use crate::{
     app::{OpenMusic, Page},
     menus::Handle,
-    ui::tracks::{RowDrag, RowDrop},
+    ui::{
+        menu::Surface,
+        tracks::{RowDrag, RowDrop},
+    },
 };
 
 #[derive(Default)]
@@ -32,14 +37,36 @@ pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<O
 pub fn signed_out(_app: &mut OpenMusic) {}
 
 pub fn debug(
-    _app: &mut OpenMusic,
-    _verb: &str,
-    _rest: &str,
-    _directory: &Path,
+    app: &mut OpenMusic,
+    verb: &str,
+    rest: &str,
+    directory: &Path,
     _window: &mut Window,
     _cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let write = |name: &str, text: String| {
+        let _ = std::fs::write(directory.join(name), text);
+    };
+    match (verb, words.as_slice()) {
+        ("barmenu", []) => {
+            let lines = match app.now_playing_target(Surface::NowPlaying) {
+                Some(target) => {
+                    let mut lines = vec![format!("target {}", target.describe())];
+                    menu::describe(&app.menu_items(&target), 0, &mut lines);
+                    lines
+                }
+                None => vec!["none".to_owned()],
+            };
+            write("barmenu.txt", lines.join("\n"));
+        }
+        ("share", ["link", uri]) => write(
+            "share.txt",
+            share::link(uri, &share::share_id()).unwrap_or_else(|| "none".into()),
+        ),
+        _ => return false,
+    }
+    true
 }
 
 pub fn state_fragment(_app: &OpenMusic) -> String {

@@ -1,6 +1,7 @@
 use gpui::{AnyElement, Context, Pixels, prelude::*};
 use spotify_client::Track;
 
+use super::menu::{self, Facts};
 use crate::{
     app::OpenMusic,
     ui::{
@@ -24,8 +25,8 @@ impl OpenMusic {
     }
 }
 
-pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    Vec::new()
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    menu::items(target, &Facts::of(app))
 }
 
 pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
