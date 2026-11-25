@@ -30,7 +30,10 @@ pub enum Command {
     PlayHere,
     Shuffle(Shuffle),
     Repeat(Repeat),
-    ShufflePlay(String),
+    ShufflePlay {
+        uri: String,
+        options: PlayOptions,
+    },
     AddToQueue(Vec<String>),
     PlayNext(Vec<String>),
     RemoveFromQueue(Vec<QueueKey>),
@@ -269,10 +272,10 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::PlayHere => Control::PlayHere,
         Command::Shuffle(mode) => remote(remote::Control::SetShuffle(mode)),
         Command::Repeat(mode) => remote(remote::Control::SetRepeat(mode)),
-        Command::ShufflePlay(uri) => remote(remote::Control::ShufflePlay {
+        Command::ShufflePlay { uri, options } => remote(remote::Control::ShufflePlay {
             uri,
             origin: connect::ORIGIN,
-            options: PlayOptions::default(),
+            options,
         }),
         Command::AddToQueue(uris) => remote(remote::Control::AddToQueue(uris)),
         Command::PlayNext(uris) => remote(remote::Control::PlayNext(uris)),

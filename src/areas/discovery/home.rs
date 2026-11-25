@@ -273,9 +273,13 @@ impl OpenMusic {
                 self.play(&[track], 0, cx);
             }
             Kind::LikedSongs => {
-                self.play_context_from(LIKED_SONGS, &[], 0, origin, PlayOptions::default(), cx)
+                let options = PlayOptions::titled(&card.title);
+                self.play_context_from(LIKED_SONGS, &[], 0, origin, options, cx)
             }
-            _ => self.play_context_from(&card.uri, &[], 0, origin, PlayOptions::default(), cx),
+            _ => {
+                let options = PlayOptions::titled(&card.title);
+                self.play_context_from(&card.uri, &[], 0, origin, options, cx)
+            }
         }
     }
 

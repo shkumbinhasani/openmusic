@@ -847,6 +847,23 @@ pub struct PlayOptions {
     pub shuffle_override: Option<Shuffle>,
 }
 
+impl PlayOptions {
+    pub fn titled(title: &str) -> Self {
+        let title = title.trim();
+        Self {
+            description: (!title.is_empty()).then(|| title.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    pub fn or(self, fallback: Self) -> Self {
+        Self {
+            description: self.description.or(fallback.description),
+            shuffle_override: self.shuffle_override.or(fallback.shuffle_override),
+        }
+    }
+}
+
 pub fn player_options(shuffle: Shuffle) -> Value {
     json!({
         "shuffling_context": shuffle != Shuffle::Off,
@@ -2062,6 +2079,32 @@ mod tests {
                 }
             )["options"]["player_options_override"]["modes"]["context_enhancement"],
             "RECOMMENDATION"
+        );
+    }
+
+    #[test]
+    fn fills_missing_play_options_from_a_fallback() {
+        assert_eq!(PlayOptions::titled("  "), PlayOptions::default());
+        assert_eq!(
+            PlayOptions::titled(" Mix ").description.as_deref(),
+            Some("Mix")
+        );
+        let fallback = PlayOptions {
+            description: Some("Album".into()),
+            shuffle_override: Some(Shuffle::On),
+        };
+        assert_eq!(PlayOptions::default().or(fallback.clone()), fallback);
+        let given = PlayOptions {
+            description: Some("Mix".into()),
+            shuffle_override: Some(Shuffle::Off),
+        };
+        assert_eq!(given.clone().or(fallback.clone()), given);
+        assert_eq!(
+            PlayOptions::titled("Mix").or(fallback),
+            PlayOptions {
+                description: Some("Mix".into()),
+                shuffle_override: Some(Shuffle::On),
+            }
         );
     }
 

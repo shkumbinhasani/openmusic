@@ -604,15 +604,9 @@ impl OpenMusic {
             return;
         }
         let uri = hit.uri().to_owned();
+        let options = spotify_client::connect::PlayOptions::titled(&hit.card.title);
         self.remember_search(hit);
-        self.play_context_from(
-            &uri,
-            &[],
-            0,
-            SEARCH_ORIGIN,
-            spotify_client::connect::PlayOptions::default(),
-            cx,
-        );
+        self.play_context_from(&uri, &[], 0, SEARCH_ORIGIN, options, cx);
     }
 
     pub fn move_suggestion(&mut self, down: bool) {

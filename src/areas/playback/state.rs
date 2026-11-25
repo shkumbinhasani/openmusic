@@ -583,7 +583,10 @@ impl OpenMusic {
             return;
         }
         self.playback.notice = None;
-        self.send(Command::ShufflePlay(uri.to_owned()));
+        self.send(Command::ShufflePlay {
+            uri: uri.to_owned(),
+            options: self.titled_options(uri, PlayOptions::default()),
+        });
         cx.notify();
     }
 
@@ -713,9 +716,16 @@ impl OpenMusic {
             index,
             track_uri: tracks.get(index).map(|track| track.uri.clone()),
             origin,
-            options,
+            options: self.titled_options(uri, options),
         });
         cx.notify();
+    }
+
+    fn titled_options(&self, uri: &str, options: PlayOptions) -> PlayOptions {
+        match self.context_title(uri) {
+            Some(title) => options.or(PlayOptions::titled(&title)),
+            None => options,
+        }
     }
 
     pub fn set_now_playing(&mut self, now: NowPlaying) {
@@ -1049,26 +1059,43 @@ impl OpenMusic {
         if let Some(title) = &model.context_title {
             return Some(title.clone());
         }
-        let uri = model.context_uri.as_deref()?;
-        if let Some((loaded, Ok(collection))) = &self.playlists.collection
-            && loaded == uri
-        {
-            return Some(collection.name.clone());
-        }
-        if let Some(playlist) = self
+        self.context_title(model.context_uri.as_deref()?)
+    }
+
+    pub fn context_title(&self, uri: &str) -> Option<String> {
+        let collection = self
+            .playlists
+            .collection
+            .as_ref()
+            .filter(|(loaded, _)| loaded == uri)
+            .and_then(|(_, collection)| collection.as_ref().ok())
+            .map(|collection| collection.name.as_str());
+        let sidebar = self
             .library
             .playlists
             .iter()
             .find(|playlist| playlist.uri == uri)
-        {
-            return Some(playlist.name.clone());
-        }
-        if let Some((loaded, Ok(artist))) = &self.discovery.artist
-            && loaded == uri
-        {
-            return Some(artist.name.clone());
-        }
-        entity::is_liked_songs(uri).then(|| "Liked Songs".to_owned())
+            .map(|playlist| playlist.name.as_str());
+        let artist = self
+            .discovery
+            .artist
+            .as_ref()
+            .filter(|(loaded, _)| loaded == uri)
+            .and_then(|(_, artist)| artist.as_ref().ok())
+            .map(|artist| artist.name.as_str());
+        let liked = entity::is_liked_songs(uri).then_some("Liked Songs");
+        let library = self.library_item(uri).map(|item| item.name.as_str());
+        let recent = self
+            .recent_contexts()
+            .iter()
+            .find(|recent| recent.uri == uri)
+            .map(|recent| recent.name.as_str());
+        [collection, sidebar, artist, liked, library, recent]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|name| !name.is_empty())
+            .map(str::to_owned)
     }
 
     pub fn active_device(&self) -> Option<&ConnectDevice> {

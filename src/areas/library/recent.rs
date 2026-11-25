@@ -8,7 +8,9 @@ use gpui::{
     rgba,
 };
 use spotify_client::{
-    Track, entity,
+    Track,
+    connect::PlayOptions,
+    entity,
     library::{
         RecentDay, RecentEntry, RecentGroup, RecentKind, RecentsPage, context_uri, day_label,
         day_of, merge_played, recent_contexts, recent_days,
@@ -318,13 +320,14 @@ impl OpenMusic {
             self.set_playing(!playing, cx);
             return;
         }
+        let options = PlayOptions::titled(&entry.name);
         match entry.kind {
             RecentKind::Track => self.play(&[track_of(entry)], 0, cx),
             RecentKind::Episode => {
                 let episode = [track_of(entry)];
-                self.play_context_from(&entry.uri, &episode, 0, "recents", Default::default(), cx);
+                self.play_context_from(&entry.uri, &episode, 0, "recents", options, cx);
             }
-            _ => self.play_context_from(&entry.uri, &[], 0, "recents", Default::default(), cx),
+            _ => self.play_context_from(&entry.uri, &[], 0, "recents", options, cx),
         }
     }
 
