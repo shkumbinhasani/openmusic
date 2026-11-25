@@ -289,7 +289,7 @@ mod tests {
                 {"height": 64, "url": "https://i.scdn.co/image/small", "width": 64},
                 {"height": 300, "url": "https://i.scdn.co/image/large", "width": 300}
             ]},
-            "avatarBackgroundColor": 13139285,
+            "avatarBackgroundColor": 1234567,
             "name": "Someone Example",
             "socialHandle": null,
             "uri": "spotify:user:someone",
@@ -300,7 +300,7 @@ mod tests {
     fn account_attributes(attributes: Value, product: &str) -> Value {
         json!({"me": {"account": {
             "attributes": attributes,
-            "country": "XK",
+            "country": "SE",
             "features": {"personalizedRecommendations": "PERMITTED"},
             "product": product
         }}})
@@ -355,7 +355,7 @@ mod tests {
                 explicit_filtered: false,
                 explicit_locked: false,
                 family_role: Some("FAMILY_MANAGER".into()),
-                country: "XK".into(),
+                country: "SE".into(),
             }
         );
         let info = combine(Profile::from_graphql(&profile_attributes()).unwrap(), plan);
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn reads_the_product_state_fallback() {
         let state = json!({
-            "ads": "0", "catalogue": "premium", "country": "XK", "is-standalone-audiobooks": "0",
+            "ads": "0", "catalogue": "premium", "country": "SE", "is-standalone-audiobooks": "0",
             "multiuserplan-current-size": "6", "multiuserplan-member-type": "FAMILY_MANAGER",
             "on-demand": "1", "preferred-locale": "en", "product": "premium", "selected-language": ""
         });
@@ -420,7 +420,7 @@ mod tests {
                 explicit_filtered: false,
                 explicit_locked: false,
                 family_role: Some("FAMILY_MANAGER".into()),
-                country: "XK".into(),
+                country: "SE".into(),
             }
         );
         let filtered = Plan::from_product_state(&json!({

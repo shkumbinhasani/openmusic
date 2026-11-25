@@ -816,7 +816,7 @@ mod tests {
             "is_current_user": true,
             "has_spotify_name": true,
             "has_spotify_image": true,
-            "color": 13139285,
+            "color": 1234567,
             "allow_follows": true,
             "show_follows": true,
             "account_id": "abcdefghij"
@@ -832,7 +832,7 @@ mod tests {
             profile.image.as_deref(),
             Some("https://i.scdn.co/image/ab6775700000ee85aaaa")
         );
-        assert_eq!(profile.color, Some(13139285));
+        assert_eq!(profile.color, Some(1234567));
         assert_eq!((profile.followers, profile.following), (1, 20));
         assert!(profile.is_current_user);
         assert!(!profile.is_following);
@@ -864,9 +864,9 @@ mod tests {
             "is_following": true,
             "recently_played_artists": [
                 {"uri": "spotify:artist:0000000000000000000001", "name": "Band",
-                 "image_url": "https://i.scdn.co/image/band", "followers_count": 246741}
+                 "image_url": "https://i.scdn.co/image/band", "followers_count": 1000}
             ],
-            "color": 1697420
+            "color": 7654321
         });
         let profile = parse_profile(&reply).unwrap();
         assert!(!profile.is_current_user);
@@ -877,7 +877,7 @@ mod tests {
         assert!(profile.playlists.is_empty());
         assert_eq!(profile.total_playlists, 0);
         assert_eq!(profile.recent_artists.len(), 1);
-        assert_eq!(profile.recent_artists[0].followers, 246741);
+        assert_eq!(profile.recent_artists[0].followers, 1000);
         assert_eq!(profile.recent_artists[0].kind(), RefKind::Artist);
 
         let bare = parse_profile(&json!({"uri": "spotify:user:quiet"})).unwrap();

@@ -812,7 +812,7 @@ mod tests {
         assert_eq!(language_name("de"), Some("Deutsch"));
         assert_eq!(language_name("pt-br"), Some("Português do Brasil"));
         assert_eq!(language_name("en-US"), Some("English"));
-        assert_eq!(language_name("sq-XK"), Some("Shqip"));
+        assert_eq!(language_name("nl-BE"), Some("Nederlands"));
         assert_eq!(language_name("zh-Hant-TW"), Some("繁體中文"));
         assert_eq!(language_name("zh-HK"), Some("繁體中文"));
         assert_eq!(language_name("zh-Hans-CN"), Some("简体中文"));
@@ -857,12 +857,12 @@ mod tests {
 
     #[test]
     fn falls_back_to_the_system_language() {
-        let system = || "sq-XK".to_owned();
-        assert_eq!(chosen_language(None, system), "sq-XK");
+        let system = || "nl-BE".to_owned();
+        assert_eq!(chosen_language(None, system), "nl-BE");
         assert_eq!(chosen_language(Some("de"), system), "de");
-        assert_eq!(chosen_language(Some(""), system), "sq-XK");
-        assert_eq!(chosen_language(Some("de\r\nX: y"), system), "sq-XK");
-        assert_eq!(chosen_language(Some("-de"), system), "sq-XK");
+        assert_eq!(chosen_language(Some(""), system), "nl-BE");
+        assert_eq!(chosen_language(Some("de\r\nX: y"), system), "nl-BE");
+        assert_eq!(chosen_language(Some("-de"), system), "nl-BE");
         assert!(valid_language("zh-Hans-CN"));
         assert!(!valid_language("en US"));
         assert!(!valid_language(&"a".repeat(36)));
