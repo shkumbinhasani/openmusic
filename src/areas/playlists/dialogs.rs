@@ -900,8 +900,17 @@ fn header(text: &'static str, color: Hsla) -> impl IntoElement {
         .child(text)
 }
 
+fn dialog_top(window: &Window) -> f32 {
+    (f32::from(window.viewport_size().height) * 0.1).clamp(36., 96.)
+}
+
+fn sheet_list_height(window: &Window) -> f32 {
+    let height = f32::from(window.viewport_size().height);
+    (height - dialog_top(window) - 296.).clamp(120., 360.)
+}
+
 impl Render for SaveTo {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (text, border, danger) = (theme.foreground, theme.border, theme.danger);
         let colors = Colors {
@@ -930,7 +939,7 @@ impl Render for SaveTo {
             .unwrap_or_default();
         let list = div()
             .id("save-to-list")
-            .max_h(px(340.))
+            .max_h(px(sheet_list_height(window)))
             .overflow_y_scroll()
             .flex()
             .flex_col();
@@ -1046,11 +1055,12 @@ impl Render for SaveTo {
 }
 
 pub fn open_save_to(window: &mut Window, cx: &mut App, sheet: Entity<SaveTo>) {
-    window.open_dialog(cx, move |dialog, _, cx| {
+    window.open_dialog(cx, move |dialog, window, cx| {
         let done = sheet.clone();
         dialog
             .title("Add to playlist")
             .w(px(420.))
+            .margin_top(px(dialog_top(window)))
             .bg(cx.theme().popover)
             .child(sheet.clone())
             .button_props(

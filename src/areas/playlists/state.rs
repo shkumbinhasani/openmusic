@@ -1517,6 +1517,14 @@ pub fn describe_playlist(app: &OpenMusic) -> String {
             flag(collection.picture.is_some()),
             collection.description,
         ),
+        format!(
+            "folder={:?} pending_rows={}",
+            app.playlists.parent_folder(&collection.uri),
+            app.playlists
+                .snapshots
+                .get(&collection.uri)
+                .map_or(0, |snapshot| snapshot.pending),
+        ),
     ];
     lines.extend(collection.tracks.iter().enumerate().map(|(index, track)| {
         format!(
