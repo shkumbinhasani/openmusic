@@ -1,13 +1,14 @@
-use gpui::{AnyElement, Context, Pixels, prelude::*};
+use gpui::{AnyElement, Context, prelude::*};
 use spotify_client::{Track, details::hide_context};
 
 use super::{
     feedback::first_artist,
     go,
     menu::{self, Facts},
+    track::ALBUM_ROWS,
 };
 use crate::{
-    app::OpenMusic,
+    app::{OpenMusic, Page},
     ui::{
         Palette,
         dock::DockItem,
@@ -16,18 +17,6 @@ use crate::{
         tracks::RowOptions,
     },
 };
-
-impl OpenMusic {
-    pub fn track_page(
-        &self,
-        _uri: &str,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-}
 
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     menu::items(target, &Facts::of(app))
@@ -78,6 +67,12 @@ pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, options: &RowOption
     track.is_track() && (hidden() || banned())
 }
 
-pub fn row_highlighted(app: &OpenMusic, track: &Track) -> bool {
+pub fn row_highlighted(app: &OpenMusic, track: &Track, row: Row) -> bool {
     app.highlights(track)
+        || (row.0 == ALBUM_ROWS && matches!(&app.page, Page::Track(uri) if *uri == track.uri))
+}
+
+pub fn title_page(app: &OpenMusic, track: &Track) -> Option<Page> {
+    let page = Page::Track(track.uri.clone());
+    (track.is_track() && app.page != page).then_some(page)
 }

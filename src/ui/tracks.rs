@@ -328,7 +328,7 @@ impl OpenMusic {
                     .when(selected || self.menu_row(id), |row| {
                         row.bg(rgba(palette.press))
                     })
-                    .when(details::view::row_highlighted(self, track), |row| {
+                    .when(details::view::row_highlighted(self, track, id), |row| {
                         row.bg(rgba(palette.accent << 8 | 0x33))
                     })
                     .hover(move |row| row.bg(rgba(palette.press)))
@@ -398,12 +398,31 @@ impl OpenMusic {
                             .flex_1()
                             .min_w_0()
                             .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .when(selected, |title| title.text_color(rgb(palette.accent)))
-                                    .truncate()
-                                    .child(track.title.clone()),
+                                div().flex().min_w_0().child(
+                                    div()
+                                        .id(("title", 0usize))
+                                        .min_w_0()
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .when(selected, |title| {
+                                            title.text_color(rgb(palette.accent))
+                                        })
+                                        .truncate()
+                                        .child(track.title.clone())
+                                        .when_some(
+                                            details::view::title_page(self, track),
+                                            |title, page| {
+                                                title
+                                                    .cursor_pointer()
+                                                    .hover(|title| title.underline())
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.navigate(page.clone());
+                                                        cx.notify();
+                                                    }))
+                                            },
+                                        ),
+                                ),
                             )
                             .child(
                                 div()

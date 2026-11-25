@@ -18,13 +18,14 @@ use super::{
     feedback::Sets,
     go::{ContentScroll, Highlight},
     menu,
+    track::TrackView,
     worker::{Command, Event},
 };
 use crate::{
     app::{OpenMusic, Page, Session},
     menus::Handle,
     ui::{
-        menu::Surface,
+        menu::{Surface, Target},
         tracks::{RowDrag, RowDrop},
     },
 };
@@ -39,10 +40,15 @@ pub struct State {
     pub highlight: Option<Highlight>,
     pub radio: Option<String>,
     pub scroll: ContentScroll,
+    pub track: Option<TrackView>,
 }
 
 impl State {
-    pub fn covers(&self, _urls: &mut HashSet<String>) {}
+    pub fn covers(&self, urls: &mut HashSet<String>) {
+        if let Some(page) = self.track.as_ref().and_then(TrackView::page) {
+            urls.extend(page.images());
+        }
+    }
 
     pub fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<OpenMusic>) {
         window.close_all_dialogs(cx);
@@ -55,7 +61,21 @@ impl State {
     }
 }
 
-pub fn load(_app: &mut OpenMusic, _page: &Page) {}
+pub fn load(app: &mut OpenMusic, page: &Page) {
+    let Page::Track(uri) = page else {
+        return;
+    };
+    let fresh = app
+        .details
+        .track
+        .as_ref()
+        .is_some_and(|view| view.uri == *uri && !matches!(view.result, Some(Err(_))));
+    if fresh {
+        return;
+    }
+    app.details.track = Some(TrackView::new(uri.clone()));
+    app.send(Command::TrackPage(uri.clone()));
+}
 
 fn load_sets(app: &mut OpenMusic) {
     app.details.sets.loading();
@@ -137,6 +157,14 @@ pub fn on_event(
             app.details.artists.insert(uri, artists);
         }
         Event::Radio { seed, result } => app.radio_ready(&seed, result),
+        Event::TrackPage { uri, result } => {
+            if let Some(credits) = result.as_ref().ok().and_then(|page| page.credits.clone()) {
+                app.details.credits.insert(credits);
+            }
+            if let Some(view) = app.details.track.as_mut().filter(|view| view.uri == uri) {
+                view.result = Some(result);
+            }
+        }
         Event::Credits { uri, result } => {
             if let Ok(credits) = &result {
                 app.details.credits.insert(credits.clone());
@@ -359,6 +387,24 @@ pub fn debug(
                 app.set_hidden(ban, BanProvider::Context, hidden);
             }
         }
+        ("trackpage", []) => write(
+            "trackpage.txt",
+            app.details
+                .track
+                .as_ref()
+                .map(TrackView::describe)
+                .unwrap_or_else(|| "none".into()),
+        ),
+        ("trackpage", [part]) => {
+            if let Some(view) = app.details.track.as_mut() {
+                match *part {
+                    "lyrics" => view.lyrics_open = !view.lyrics_open,
+                    "more" => view.more_tracks = !view.more_tracks,
+                    "artists" => view.all_artists = !view.all_artists,
+                    _ => {}
+                }
+            }
+        }
         ("radio", [seed]) => app.start_radio((*seed).to_owned()),
         ("goalbum", [album, track]) => app.go_to_album((*album).to_owned(), (*track).to_owned()),
         ("artists", [uri]) => {
@@ -404,7 +450,12 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         .as_ref()
         .map(|highlight| format!("highlight={}", highlight.track));
     let radio = details.radio.as_ref().map(|seed| format!("radio={seed}"));
-    [credits, embed, sets, highlight, radio]
+    let track = details
+        .track
+        .as_ref()
+        .filter(|view| matches!(&app.page, Page::Track(uri) if *uri == view.uri))
+        .map(|view| format!("trackpage={}", view.state()));
+    [credits, embed, sets, highlight, radio, track]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -414,12 +465,29 @@ pub fn state_fragment(app: &OpenMusic) -> String {
 pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
 
 pub fn on_press(
-    _app: &mut OpenMusic,
-    _key: &'static str,
+    app: &mut OpenMusic,
+    key: &'static str,
     _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    match key {
+        "track-play" => {
+            if let Some(track) = app.track_page_track() {
+                if app.is_current(&track.uri) {
+                    app.toggle(cx);
+                } else {
+                    app.play(&[track], 0, cx);
+                }
+            }
+        }
+        "more-track" => {
+            if let Some(track) = app.track_page_track() {
+                app.open_menu_under(Target::track(track, None, Surface::Header), key);
+            }
+        }
+        _ => return false,
+    }
+    true
 }
 
 pub fn row_dropped(

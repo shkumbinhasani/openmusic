@@ -2,7 +2,10 @@ use spotify_client::{
     Api,
     catalog::Link,
     dealer::Message,
-    details::{self, Ban, BanProvider, Credits, NoRadio, SetPush, Unavailable, WriteFormat},
+    details::{
+        self, Ban, BanProvider, Credits, NoRadio, SetPush, TrackMissing, TrackPage, Unavailable,
+        WriteFormat,
+    },
     pathfinder::PathfinderError,
 };
 
@@ -28,6 +31,7 @@ pub enum Command {
     Editable(String),
     TrackArtists(String),
     Radio(String),
+    TrackPage(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -75,6 +79,10 @@ pub enum Event {
         seed: String,
         result: Result<String, String>,
     },
+    TrackPage {
+        uri: String,
+        result: Result<Box<TrackPage>, String>,
+    },
 }
 
 impl Event {
@@ -90,6 +98,10 @@ impl Event {
             | Self::Editable { .. }
             | Self::TrackArtists { .. }
             | Self::Radio { .. } => Vec::new(),
+            Self::TrackPage { result, .. } => result
+                .as_ref()
+                .map(|page| page.images())
+                .unwrap_or_default(),
         }
     }
 }
@@ -175,6 +187,7 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             Event::TrackArtists { uri, artists }.into()
         }),
         Command::Radio(seed) => ctx.tasks.spawn_keyed("radio", radio(api, seed)),
+        Command::TrackPage(uri) => ctx.tasks.spawn_keyed("track-page", track_page(api, uri)),
     }
 }
 
@@ -189,6 +202,20 @@ async fn credits(api: Api, uri: String) -> crate::worker::Event {
         .await
         .map_err(|error| failure(&error, "Couldn’t load the credits. Try again."));
     Event::Credits { uri, result }.into()
+}
+
+async fn track_page(api: Api, uri: String) -> crate::worker::Event {
+    let result = details::track_page(&api, &uri)
+        .await
+        .map(Box::new)
+        .map_err(|error| {
+            if error.downcast_ref::<TrackMissing>().is_some() {
+                error.to_string()
+            } else {
+                failure(&error, "Couldn’t load this song. Try again.")
+            }
+        });
+    Event::TrackPage { uri, result }.into()
 }
 
 async fn cover_color(api: Api, uri: String) -> crate::worker::Event {

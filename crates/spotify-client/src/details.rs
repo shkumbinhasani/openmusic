@@ -17,8 +17,9 @@ use spotify_proto::{
 };
 
 use crate::{
+    Track,
     api::{Api, Body, HttpStatus},
-    catalog::{self, Capabilities, Link},
+    catalog::{self, Capabilities, Link, Lyrics},
     collection::{self, IGNORE_IN_RECS, PAGE_LIMIT, PLAY_CONTEXT_BANS},
     dealer::Message as Push,
     entity,
@@ -34,6 +35,18 @@ pub const TRACK_ARTISTS: Operation = Operation::query(
     "queryTrackArtists",
     "ee2b038198f5e62c679c3996584d9249bbee55fe69fc212271c56492a022c798",
 );
+
+pub const GET_TRACK: Operation = Operation::query(
+    "getTrack",
+    "e7b1bf4e95cb3d733d48b442f93006e9712fd504e8b88d7a82e6e3bac9306a6b",
+);
+
+pub const TRACK_RECOMMENDATIONS: Operation = Operation::query(
+    "internalLinkRecommenderTrack",
+    "642923b2e705fceb9984697c1620fecd42615fd8b116b8a9faf2786b389d3e4a",
+);
+
+pub const RECOMMENDED: usize = 5;
 
 const EXTRACTED_COLOR: &str = "b2d6d99fb6237952dfa6638385f9c6085f1b1fb9d0468753ca6ad98ff45adc6f";
 
@@ -688,6 +701,352 @@ pub async fn playlist_editable(api: &Api, uri: &str) -> Result<bool> {
     Ok(Capabilities::from_playlist(&value["capabilities"]).edit_items)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct TrackMissing;
+
+impl std::fmt::Display for TrackMissing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Couldn’t find that song")
+    }
+}
+
+impl std::error::Error for TrackMissing {}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReleaseDate {
+    pub iso: String,
+    pub precision: String,
+    pub year: Option<i64>,
+}
+
+impl ReleaseDate {
+    pub fn long(&self) -> Option<String> {
+        let mut parts = self.iso.get(..10).unwrap_or(&self.iso).split('-');
+        let year = parts
+            .next()
+            .and_then(|year| year.parse::<i64>().ok())
+            .or(self.year)?;
+        let month = parts
+            .next()
+            .and_then(|month| month.parse::<usize>().ok())
+            .and_then(|month| MONTHS.get(month.checked_sub(1)?));
+        let day = parts.next().and_then(|day| day.parse::<u32>().ok());
+        Some(match (self.precision.as_str(), month, day) {
+            ("YEAR", _, _) | (_, None, _) => year.to_string(),
+            ("MONTH", Some(month), _) | (_, Some(month), None) => format!("{month} {year}"),
+            (_, Some(month), Some(day)) => format!("{month} {day}, {year}"),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackAlbum {
+    pub uri: String,
+    pub name: String,
+    pub kind: String,
+    pub cover: Option<String>,
+    pub date: Option<ReleaseDate>,
+    pub copyrights: Vec<String>,
+    pub playable: bool,
+    pub tracks: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackArtist {
+    pub uri: String,
+    pub name: String,
+    pub image: Option<String>,
+    pub top_tracks: Vec<Track>,
+    pub popular: Vec<entity::Card>,
+    pub albums: Vec<entity::Card>,
+    pub singles: Vec<entity::Card>,
+    pub related: Vec<entity::Card>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrackPage {
+    pub track: Track,
+    pub playable: bool,
+    pub playcount: Option<u64>,
+    pub album: Option<TrackAlbum>,
+    pub artists: Vec<TrackArtist>,
+    pub recommended: Vec<Track>,
+    pub album_tracks: Vec<Track>,
+    pub lyrics: Option<Lyrics>,
+    pub credits: Option<Credits>,
+}
+
+impl TrackPage {
+    pub fn images(&self) -> Vec<String> {
+        let tracks = std::iter::once(&self.track)
+            .chain(&self.recommended)
+            .chain(&self.album_tracks)
+            .chain(self.artists.iter().flat_map(|artist| &artist.top_tracks))
+            .filter_map(|track| track.cover.clone());
+        let cards = self
+            .artists
+            .iter()
+            .flat_map(|artist| {
+                artist
+                    .popular
+                    .iter()
+                    .chain(&artist.albums)
+                    .chain(&artist.singles)
+                    .chain(&artist.related)
+            })
+            .filter_map(|card| card.image.clone());
+        let mut images: Vec<String> = tracks
+            .chain(cards)
+            .chain(
+                self.artists
+                    .iter()
+                    .filter_map(|artist| artist.image.clone()),
+            )
+            .chain(self.album.iter().filter_map(|album| album.cover.clone()))
+            .collect();
+        let mut seen = HashSet::new();
+        images.retain(|url| seen.insert(url.clone()));
+        images
+    }
+}
+
+pub fn track_variables(uri: &str) -> Value {
+    json!({ "uri": uri })
+}
+
+pub fn recommendations_variables(uri: &str) -> Value {
+    json!({ "uri": uri, "limit": RECOMMENDED })
+}
+
+fn links(items: &Value) -> Vec<Link> {
+    items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|artist| {
+            Some(Link {
+                uri: text(&artist["uri"])?,
+                name: text(&artist["profile"]["name"])?,
+            })
+        })
+        .collect()
+}
+
+fn song(data: &Value) -> Option<Track> {
+    let artists = links(&data["artists"]["items"]);
+    let album = &data["albumOfTrack"];
+    Some(Track {
+        uri: text(&data["uri"]).filter(|uri| uri.starts_with("spotify:track:"))?,
+        title: text(&data["name"])?,
+        artist: artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        album: text(&album["name"]).unwrap_or_default(),
+        duration_ms: data["duration"]["totalMilliseconds"]
+            .as_u64()
+            .unwrap_or_default()
+            .min(u64::from(u32::MAX)) as u32,
+        cover: entity::pick_image(&album["coverArt"]["sources"], entity::CARD_IMAGE),
+        artist_uri: artists.first().map(|artist| artist.uri.clone()),
+        album_uri: text(&album["uri"]),
+        artists,
+        explicit: entity::explicit(data),
+        ..Track::default()
+    })
+}
+
+fn release_kind(kind: &str) -> &'static str {
+    match kind {
+        "SINGLE" => "Single",
+        "EP" => "EP",
+        "COMPILATION" => "Compilation",
+        _ => "Album",
+    }
+}
+
+fn release_card(data: &Value) -> Option<entity::Card> {
+    let kind = release_kind(data["type"].as_str().unwrap_or_default());
+    let subtitle = match data["date"]["year"].as_i64() {
+        Some(year) => format!("{year} • {kind}"),
+        None => kind.to_owned(),
+    };
+    Some(entity::Card {
+        uri: text(&data["uri"]).filter(|uri| uri.starts_with("spotify:album:"))?,
+        kind: entity::Kind::Album,
+        title: text(&data["name"])?,
+        subtitle,
+        image: entity::pick_image(&data["coverArt"]["sources"], entity::CARD_IMAGE),
+        format: None,
+        color: None,
+        reason: None,
+        explicit: false,
+        playable: entity::playable(data),
+    })
+}
+
+fn artist_card(data: &Value) -> Option<entity::Card> {
+    Some(entity::Card {
+        uri: text(&data["uri"]).filter(|uri| uri.starts_with("spotify:artist:"))?,
+        kind: entity::Kind::Artist,
+        title: text(&data["profile"]["name"])?,
+        subtitle: "Artist".into(),
+        image: avatar(data),
+        format: None,
+        color: None,
+        reason: None,
+        explicit: false,
+        playable: true,
+    })
+}
+
+fn avatar(data: &Value) -> Option<String> {
+    entity::pick_image(
+        &data["visuals"]["avatarImage"]["sources"],
+        entity::CARD_IMAGE,
+    )
+}
+
+fn items(value: &Value) -> impl Iterator<Item = &Value> {
+    value["items"].as_array().into_iter().flatten()
+}
+
+fn track_artist(data: &Value) -> Option<TrackArtist> {
+    let discography = &data["discography"];
+    let first_release = |group: &Value| -> Vec<entity::Card> {
+        items(group)
+            .filter_map(|release| release_card(&release["releases"]["items"][0]))
+            .collect()
+    };
+    Some(TrackArtist {
+        uri: text(&data["uri"]).filter(|uri| uri.starts_with("spotify:artist:"))?,
+        name: text(&data["profile"]["name"])?,
+        image: avatar(data),
+        top_tracks: items(&discography["topTracks"])
+            .filter_map(|item| song(&item["track"]))
+            .collect(),
+        popular: items(&discography["popularReleasesAlbums"])
+            .filter_map(release_card)
+            .collect(),
+        albums: first_release(&discography["albums"]),
+        singles: first_release(&discography["singles"]),
+        related: items(&data["relatedContent"]["relatedArtists"])
+            .filter_map(artist_card)
+            .collect(),
+    })
+}
+
+fn copyright(item: &Value) -> Option<String> {
+    let line = text(&item["text"])?;
+    let symbol = match item["type"].as_str() {
+        Some("C") => "©",
+        Some("P") => "℗",
+        _ => return Some(line),
+    };
+    Some(if line.starts_with(symbol) {
+        line
+    } else {
+        format!("{symbol} {line}")
+    })
+}
+
+fn track_album(data: &Value) -> Option<TrackAlbum> {
+    let date = &data["date"];
+    Some(TrackAlbum {
+        uri: text(&data["uri"]).filter(|uri| uri.starts_with("spotify:album:"))?,
+        name: text(&data["name"])?,
+        kind: text(&data["type"]).unwrap_or_else(|| "ALBUM".into()),
+        cover: entity::pick_image(&data["coverArt"]["sources"], entity::CARD_IMAGE),
+        date: text(&date["isoString"]).map(|iso| ReleaseDate {
+            iso,
+            precision: text(&date["precision"]).unwrap_or_default(),
+            year: date["year"].as_i64(),
+        }),
+        copyrights: items(&data["copyright"]).filter_map(copyright).collect(),
+        playable: entity::playable(data),
+        tracks: items(&data["tracks"])
+            .filter_map(|item| text(&item["track"]["uri"]))
+            .filter(|uri| uri.starts_with("spotify:track:"))
+            .collect(),
+    })
+}
+
+pub fn parse_track_page(data: &Value) -> Result<TrackPage> {
+    let union = &data["trackUnion"];
+    if union["__typename"].as_str() != Some("Track") {
+        bail!(TrackMissing);
+    }
+    let Some(track) = entity::track(union) else {
+        bail!(TrackMissing);
+    };
+    let artists = items(&union["firstArtist"])
+        .chain(items(&union["otherArtists"]))
+        .filter_map(track_artist)
+        .collect();
+    Ok(TrackPage {
+        track,
+        playable: entity::playable(union),
+        playcount: union["playcount"]
+            .as_str()
+            .and_then(|count| count.parse().ok())
+            .or_else(|| union["playcount"].as_u64()),
+        album: track_album(&union["albumOfTrack"]),
+        artists,
+        ..TrackPage::default()
+    })
+}
+
+pub fn parse_recommendations(data: &Value) -> Vec<Track> {
+    items(&data["seoRecommendedTrack"])
+        .map(|item| &item["data"])
+        .filter(|data| data["__typename"].as_str() == Some("Track"))
+        .filter_map(song)
+        .take(RECOMMENDED)
+        .collect()
+}
+
+pub async fn track_page(api: &Api, uri: &str) -> Result<TrackPage> {
+    let (track, recommended, credits, lyrics) = futures::join!(
+        pathfinder::query(api, GET_TRACK, track_variables(uri)),
+        pathfinder::query(api, TRACK_RECOMMENDATIONS, recommendations_variables(uri)),
+        credits(api, uri),
+        catalog::lyrics(api, uri),
+    );
+    let mut page = parse_track_page(&track?)?;
+    page.recommended = recommended
+        .map(|data| parse_recommendations(&data))
+        .unwrap_or_default();
+    page.credits = credits.ok();
+    page.lyrics = lyrics
+        .ok()
+        .flatten()
+        .filter(|lyrics| !lyrics.lines.is_empty());
+    if let Some(album) = &page.album
+        && !album.tracks.is_empty()
+    {
+        page.album_tracks = catalog::tracks(api, &album.tracks)
+            .await
+            .unwrap_or_default();
+    }
+    Ok(page)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1173,6 +1532,198 @@ mod tests {
         assert_eq!(
             FeedbackSet::of("artistban").map(FeedbackSet::name),
             Some("artistban")
+        );
+    }
+
+    fn sources(name: &str) -> Value {
+        json!({"sources": [
+            {"url": format!("https://i.scdn.co/image/{name}-64"), "width": 64, "height": 64},
+            {"url": format!("https://i.scdn.co/image/{name}-300"), "width": 300, "height": 300},
+            {"url": format!("https://i.scdn.co/image/{name}-640"), "width": 640, "height": 640}
+        ]})
+    }
+
+    fn release(uri: &str, name: &str, kind: &str, year: i64) -> Value {
+        json!({"uri": uri, "name": name, "type": kind, "date": {"year": year},
+            "coverArt": sources(name), "playability": {"playable": true}})
+    }
+
+    fn counting_stars() -> Value {
+        json!({"trackUnion": {
+            "__typename": "Track",
+            "uri": "spotify:track:2tpWsVSb9UEmDRxAl1zhX1",
+            "name": "Counting Stars",
+            "duration": {"totalMilliseconds": 257265},
+            "playcount": "3742266181",
+            "contentRating": {"label": "NONE"},
+            "playability": {"playable": true, "reason": "PLAYABLE"},
+            "albumOfTrack": {
+                "uri": "spotify:album:20lOt6G8MHv8ZO7ViOmiP7",
+                "name": "Native",
+                "type": "ALBUM",
+                "date": {"isoString": "2013-01-01T00:00:00Z", "precision": "DAY", "year": 2013},
+                "copyright": {"items": [
+                    {"text": "© 2013 Mosley Music/Interscope Records", "type": "C"},
+                    {"text": "2013 Mosley Music/Interscope Records", "type": "P"}
+                ], "totalCount": 2},
+                "coverArt": sources("native"),
+                "playability": {"playable": true},
+                "tracks": {"totalCount": 2, "items": [
+                    {"track": {"trackNumber": 1, "uri": "spotify:track:6HWeQq0zRRHQs0Sj3GpZb3"}},
+                    {"track": {"trackNumber": 2, "uri": "spotify:track:2tpWsVSb9UEmDRxAl1zhX1"}}
+                ]}
+            },
+            "firstArtist": {"totalCount": 1, "items": [{
+                "uri": "spotify:artist:5Pwc4xIPtQLFEnJriah9YJ",
+                "id": "5Pwc4xIPtQLFEnJriah9YJ",
+                "profile": {"name": "OneRepublic"},
+                "visuals": {"avatarImage": sources("onerepublic")},
+                "discography": {
+                    "topTracks": {"items": [
+                        {"track": {"uri": "spotify:track:2tpWsVSb9UEmDRxAl1zhX1", "name": "Counting Stars",
+                            "duration": {"totalMilliseconds": 257265}, "playcount": "3742266181",
+                            "contentRating": {"label": "NONE"},
+                            "artists": {"items": [{"uri": "spotify:artist:5Pwc4xIPtQLFEnJriah9YJ", "profile": {"name": "OneRepublic"}}]},
+                            "albumOfTrack": {"uri": "spotify:album:20lOt6G8MHv8ZO7ViOmiP7", "name": "Native", "coverArt": sources("native")}}},
+                        {"track": {"uri": "spotify:episode:notasong", "name": "Skip"}}
+                    ]},
+                    "popularReleasesAlbums": {"items": [release("spotify:album:20lOt6G8MHv8ZO7ViOmiP7", "Native", "ALBUM", 2013)]},
+                    "albums": {"totalCount": 1, "items": [{"releases": {"items": [release("spotify:album:0000000000000000000001", "Human", "ALBUM", 2021)]}}]},
+                    "singles": {"totalCount": 1, "items": [{"releases": {"items": [release("spotify:album:0000000000000000000002", "Single", "SINGLE", 2024)]}}]}
+                },
+                "relatedContent": {"relatedArtists": {"totalCount": 1, "items": [
+                    {"uri": "spotify:artist:0000000000000000000003", "profile": {"name": "Related"}, "visuals": {"avatarImage": sources("related")}}
+                ]}}
+            }]},
+            "otherArtists": {"items": [
+                {"uri": "spotify:artist:0000000000000000000004", "profile": {"name": "Guest"}, "visuals": {"avatarImage": null}}
+            ]}
+        }})
+    }
+
+    #[test]
+    fn reads_a_track_page() {
+        assert_eq!(
+            track_variables("spotify:track:2tpWsVSb9UEmDRxAl1zhX1"),
+            json!({"uri": "spotify:track:2tpWsVSb9UEmDRxAl1zhX1"})
+        );
+        let page = parse_track_page(&counting_stars()).unwrap();
+        assert_eq!(page.track.title, "Counting Stars");
+        assert_eq!(page.track.artist, "OneRepublic, Guest");
+        assert_eq!(page.track.duration_ms, 257265);
+        assert_eq!(
+            page.track.cover.as_deref(),
+            Some("https://i.scdn.co/image/native-300")
+        );
+        assert!(page.playable);
+        assert_eq!(page.playcount, Some(3_742_266_181));
+        let album = page.album.as_ref().unwrap();
+        assert_eq!(album.name, "Native");
+        assert_eq!(album.kind, "ALBUM");
+        assert_eq!(
+            album.copyrights,
+            [
+                "© 2013 Mosley Music/Interscope Records",
+                "℗ 2013 Mosley Music/Interscope Records"
+            ]
+        );
+        assert_eq!(
+            album.date.as_ref().and_then(ReleaseDate::long).as_deref(),
+            Some("January 1, 2013")
+        );
+        assert_eq!(album.tracks.len(), 2);
+        assert_eq!(page.artists.len(), 2);
+        let first = &page.artists[0];
+        assert_eq!(first.name, "OneRepublic");
+        assert_eq!(
+            first.image.as_deref(),
+            Some("https://i.scdn.co/image/onerepublic-300")
+        );
+        assert_eq!(first.top_tracks.len(), 1);
+        assert_eq!(first.top_tracks[0].album, "Native");
+        assert_eq!(
+            first.top_tracks[0].artist_uri.as_deref(),
+            Some("spotify:artist:5Pwc4xIPtQLFEnJriah9YJ")
+        );
+        assert_eq!(first.popular[0].subtitle, "2013 • Album");
+        assert_eq!(first.albums[0].title, "Human");
+        assert_eq!(first.singles[0].subtitle, "2024 • Single");
+        assert_eq!(first.related[0].kind, entity::Kind::Artist);
+        let guest = &page.artists[1];
+        assert_eq!(guest.name, "Guest");
+        assert_eq!(guest.image, None);
+        assert!(guest.top_tracks.is_empty() && guest.popular.is_empty());
+        let images = page.images();
+        assert!(images.contains(&"https://i.scdn.co/image/related-300".to_owned()));
+        assert_eq!(
+            images
+                .iter()
+                .filter(|url| url.ends_with("native-300"))
+                .count(),
+            1
+        );
+        let missing = parse_track_page(&json!({"trackUnion": {"__typename": "NotFound"}}));
+        let error = missing.unwrap_err();
+        assert_eq!(error.downcast_ref::<TrackMissing>(), Some(&TrackMissing));
+        assert_eq!(error.to_string(), "Couldn’t find that song");
+    }
+
+    #[test]
+    fn reads_recommended_songs() {
+        assert_eq!(
+            recommendations_variables(SONG),
+            json!({"uri": SONG, "limit": 5})
+        );
+        let data = json!({"seoRecommendedTrack": {"items": [
+            {"data": {"__typename": "Track", "name": "Bohemian Rhapsody",
+                "uri": "spotify:track:2JiDi0qAXsPwhPqA2qaKGt",
+                "duration": {"totalMilliseconds": 354321},
+                "contentRating": {"label": "EXPLICIT"},
+                "artists": {"items": [{"profile": {"name": "Queen"}, "uri": "spotify:artist:1dfeR4HaWDbWqFHLkxsg1d"}]},
+                "albumOfTrack": {"uri": "spotify:album:1TkbyIkf6GSrO5e7gWS4AM", "name": "A Night at the Opera", "coverArt": sources("opera")}}},
+            {"data": {"__typename": "NotFound"}},
+            {"data": {"__typename": "Track", "name": "No uri"}}
+        ]}});
+        let songs = parse_recommendations(&data);
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].title, "Bohemian Rhapsody");
+        assert_eq!(songs[0].artist, "Queen");
+        assert!(songs[0].explicit);
+        assert_eq!(
+            songs[0].cover.as_deref(),
+            Some("https://i.scdn.co/image/opera-300")
+        );
+        assert!(parse_recommendations(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn writes_release_dates_like_spotify() {
+        let date = |iso: &str, precision: &str| ReleaseDate {
+            iso: iso.into(),
+            precision: precision.into(),
+            year: None,
+        };
+        assert_eq!(
+            date("2025-08-29T00:00:00Z", "DAY").long().as_deref(),
+            Some("August 29, 2025")
+        );
+        assert_eq!(
+            date("2025-08-01T00:00:00Z", "MONTH").long().as_deref(),
+            Some("August 2025")
+        );
+        assert_eq!(
+            date("1997-01-01T00:00:00Z", "YEAR").long().as_deref(),
+            Some("1997")
+        );
+        assert_eq!(date("", "DAY").long(), None);
+        assert_eq!(
+            ReleaseDate {
+                year: Some(1997),
+                ..date("", "YEAR")
+            }
+            .long()
+            .as_deref(),
+            Some("1997")
         );
     }
 
