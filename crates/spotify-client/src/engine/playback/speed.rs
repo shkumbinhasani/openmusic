@@ -47,6 +47,14 @@ pub(super) fn starting_speed(uri: &str, state: Option<f32>, show: Option<f32>) -
     }
 }
 
+pub(super) fn speed_at(machine: &Value, index: usize, shows: &Shows) -> f32 {
+    let uri = track_at(machine, index)
+        .and_then(|track| track["metadata"]["uri"].as_str())
+        .unwrap_or_default();
+    let show = show_of(machine, index).and_then(|show| shows.get(&show).flatten());
+    starting_speed(uri, state_speed(machine, index), show)
+}
+
 pub(super) fn chosen(speed: f32) -> Result<f32> {
     match valid_speed(round_speed(speed)) {
         Some(speed) => Ok(speed),
@@ -135,6 +143,7 @@ impl Engine {
         }
         if let Some(show) = show_of(&playing.machine, playing.index) {
             self.audio.shows.set(show, Some(speed));
+            self.follow_prepared_speed();
         }
         let Some(playing) = self.playing.as_mut() else {
             return Ok(());
@@ -164,12 +173,14 @@ impl Engine {
         self.player.set_speed(playing.generation, speed);
         if let Some(show) = show_of(&playing.machine, playing.index) {
             self.audio.shows.set(show, Some(speed));
+            self.follow_prepared_speed();
         }
         true
     }
 
     pub(super) fn learn_show_speed(&mut self, show: String, speed: f32) {
         self.audio.shows.set(show, Some(speed));
+        self.follow_prepared_speed();
     }
 
     pub(super) fn speed_allowed(&self) -> bool {
@@ -241,6 +252,17 @@ mod tests {
         assert_eq!(starting_speed(episode, Some(1.), None), 1.);
         assert_eq!(starting_speed(episode, None, None), 1.);
         assert_eq!(starting_speed("spotify:track:x", Some(2.), Some(1.5)), 1.);
+    }
+
+    #[test]
+    fn starts_the_next_episode_at_the_speed_saved_for_its_show() {
+        let machine = machine();
+        let mut shows = Shows::default();
+        assert_eq!(speed_at(&machine, 0, &shows), 1.);
+        shows.set("spotify:show:0000000000000000000002".into(), Some(1.5));
+        assert_eq!(speed_at(&machine, 0, &shows), 1.5);
+        assert_eq!(speed_at(&machine, 1, &shows), 1.);
+        assert_eq!(speed_at(&machine, 9, &shows), 1.);
     }
 
     #[test]

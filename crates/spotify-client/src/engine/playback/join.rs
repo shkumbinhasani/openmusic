@@ -9,7 +9,7 @@ use super::{
     narration::is_narration,
     quality::{choose, reported_quality},
     source::Pick,
-    speed::{show_of, starting_speed, state_speed},
+    speed::{speed_at, state_speed},
     video::{Opened, VideoStatus, offer},
 };
 use crate::{
@@ -364,12 +364,7 @@ impl Engine {
             return;
         };
         let gain_db = self.gain_at(&playing.machine, target.index);
-        let show = show_of(&playing.machine, target.index);
-        let speed = starting_speed(
-            &target.uri,
-            state_speed(&playing.machine, target.index),
-            self.known_show_speed(show.as_deref()),
-        );
+        let speed = speed_at(&playing.machine, target.index, &self.audio.shows);
         self.player.prepare(
             generation,
             Media {
@@ -395,6 +390,23 @@ impl Engine {
             start_ms,
             video,
         });
+    }
+
+    pub(super) fn follow_prepared_speed(&mut self) {
+        let (Some(playing), Some(prepared)) =
+            (self.playing.as_ref(), self.audio.joins.prepared.as_ref())
+        else {
+            return;
+        };
+        let speed = speed_at(&playing.machine, prepared.index(), &self.audio.shows);
+        if speed == prepared.speed {
+            return;
+        }
+        let generation = prepared.generation;
+        if let Some(prepared) = self.audio.joins.prepared.as_mut() {
+            prepared.speed = speed;
+        }
+        self.player.set_speed(generation, speed);
     }
 
     pub(super) fn prepared_ready(&mut self, generation: u64, duration_ms: u32) -> bool {
