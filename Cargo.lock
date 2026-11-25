@@ -4355,6 +4355,7 @@ dependencies = [
  "block2",
  "gpui",
  "gpui-component",
+ "image",
  "lofty",
  "objc2",
  "objc2-app-kit",

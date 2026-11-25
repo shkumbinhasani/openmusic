@@ -411,6 +411,9 @@ impl OpenMusic {
     }
 
     pub fn play_dj(&mut self, cx: &mut Context<Self>) {
+        if self.needs_premium_here(false, cx) {
+            return;
+        }
         self.playback.notice = None;
         self.send(Command::DjCheck { play: true });
         cx.notify();
@@ -560,6 +563,9 @@ impl OpenMusic {
     }
 
     pub fn shuffle_play(&mut self, uri: &str, cx: &mut Context<Self>) {
+        if self.needs_premium_here(false, cx) {
+            return;
+        }
         self.playback.notice = None;
         self.send(Command::ShufflePlay(uri.to_owned()));
         cx.notify();
@@ -569,6 +575,9 @@ impl OpenMusic {
         let Some(track) = tracks.get(index) else {
             return;
         };
+        if self.needs_premium_here(false, cx) {
+            return;
+        }
         self.playback.now.track = Some(track.clone());
         self.playback.now.playing = true;
         self.playback.now.position_ms = 0;
@@ -590,6 +599,9 @@ impl OpenMusic {
 
     pub fn set_playing(&mut self, playing: bool, cx: &mut Context<Self>) {
         if self.track().is_some() && self.playback.now.playing == playing {
+            return;
+        }
+        if playing && self.needs_premium_here(true, cx) {
             return;
         }
         self.playback.now.position_ms = self.playback.now.position();
@@ -635,6 +647,9 @@ impl OpenMusic {
         options: PlayOptions,
         cx: &mut Context<Self>,
     ) {
+        if self.needs_premium_here(false, cx) {
+            return;
+        }
         if let Some(track) = tracks.get(index) {
             self.playback.now.track = Some(track.clone());
             self.playback.now.playing = true;
@@ -1046,9 +1061,14 @@ impl OpenMusic {
         if device.active || device.blocked.is_some() || idle_here {
             return;
         }
+        let this_mac = device.this_mac;
+        let name = device_label(device);
+        if this_mac && self.needs_premium_here(false, cx) {
+            return;
+        }
         self.playback.transfer = Some(PendingTransfer {
             id: id.to_owned(),
-            name: device_label(device),
+            name,
             since: Instant::now(),
         });
         self.playback.notice = None;
@@ -1060,6 +1080,9 @@ impl OpenMusic {
         if self.jam_redirected() {
             self.show_toast(LEAVE_FIRST, None);
             cx.notify();
+            return;
+        }
+        if self.needs_premium_here(false, cx) {
             return;
         }
         if let Some(own) = self
