@@ -1,5 +1,7 @@
 pub use native::{describe, hide, is_visible, progress, resize, set_hover, show, update};
 
+use super::menu_bar::like_title;
+
 pub const AUTOSAVE: &str = "OpenMusic Mini Player";
 pub const DEFAULT_SIDE: f64 = 300.;
 pub const MIN_WIDTH: f64 = 240.;
@@ -55,6 +57,7 @@ pub struct MiniState {
     pub playing: bool,
     pub saved: Option<bool>,
     pub likable: bool,
+    pub episode: bool,
     pub cover: Option<String>,
     pub duration_ms: u32,
 }
@@ -69,19 +72,16 @@ impl MiniState {
     }
 
     pub fn like_symbol(&self) -> &'static str {
-        if self.saved == Some(true) {
-            "heart.fill"
-        } else {
-            "heart"
+        match (self.episode, self.saved == Some(true)) {
+            (false, false) => "heart",
+            (false, true) => "heart.fill",
+            (true, false) => "plus",
+            (true, true) => "checkmark",
         }
     }
 
     pub fn like_tooltip(&self) -> &'static str {
-        if self.saved == Some(true) {
-            "Remove from Liked Songs"
-        } else {
-            "Save to Liked Songs"
-        }
+        like_title(self.episode, self.saved)
     }
 
     pub fn device_line(&self) -> Option<String> {
@@ -898,7 +898,8 @@ mod native {
         with_mini(|mini| {
             let relayout = mini.state.device_line().is_some() != state.device_line().is_some()
                 || mini.state.playing != state.playing
-                || mini.state.saved != state.saved;
+                || mini.state.saved != state.saved
+                || mini.state.episode != state.episode;
             apply(mini, state, cover);
             if relayout {
                 layout(mini);
@@ -1174,6 +1175,25 @@ mod tests {
         assert_eq!(state.device_line(), None);
         state.device = Some("Kitchen".into());
         assert_eq!(state.device_line().as_deref(), Some("Playing on Kitchen"));
+    }
+
+    #[test]
+    fn episodes_save_to_your_episodes() {
+        let mut state = MiniState {
+            likable: true,
+            episode: true,
+            ..MiniState::default()
+        };
+        assert_eq!(state.like_symbol(), "plus");
+        assert_eq!(state.like_tooltip(), "Save to Your Episodes");
+        state.saved = Some(true);
+        assert_eq!(state.like_symbol(), "checkmark");
+        assert_eq!(state.like_tooltip(), "Remove from Your Episodes");
+        state.episode = false;
+        assert_eq!(state.like_symbol(), "heart.fill");
+        assert_eq!(state.like_tooltip(), "Remove from Liked Songs");
+        state.saved = Some(false);
+        assert_eq!(state.like_tooltip(), "Save to Liked Songs");
     }
 
     #[test]

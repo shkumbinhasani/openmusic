@@ -45,6 +45,10 @@ pub fn saves(uri: &str) -> Option<Saves> {
     }
 }
 
+pub fn playing_saves(uri: &str) -> Option<Saves> {
+    saves(uri).filter(|kind| matches!(kind, Saves::Like | Saves::Episodes))
+}
+
 pub fn save_label(uri: &str, saved: bool) -> Option<&'static str> {
     Some(match (saves(uri)?, saved) {
         (Saves::Like, false) => "Save to your Liked Songs",
@@ -393,10 +397,9 @@ pub fn dock_heart(
     cx: &mut Context<OpenMusic>,
 ) -> Option<DockItem> {
     let uri = &app.track()?.uri;
-    let (off, on) = match saves(uri)? {
-        Saves::Like => ("heart", "heart.fill"),
+    let (off, on) = match playing_saves(uri)? {
         Saves::Episodes => ("plus", "checkmark"),
-        _ => return None,
+        _ => ("heart", "heart.fill"),
     };
     app.want_saved(uri);
     let saved = app.is_saved(uri) == Some(true);
@@ -504,6 +507,16 @@ mod tests {
             Some("Removed from Your Library.")
         );
         assert_eq!(saved_toast("spotify:artist:x", true), None);
+    }
+
+    #[test]
+    fn only_songs_and_episodes_can_be_saved_while_playing() {
+        assert_eq!(playing_saves("spotify:track:x"), Some(Saves::Like));
+        assert_eq!(playing_saves("spotify:episode:x"), Some(Saves::Episodes));
+        assert_eq!(playing_saves("spotify:local:a:b:c:1"), None);
+        assert_eq!(playing_saves("spotify:album:x"), None);
+        assert_eq!(playing_saves("spotify:show:x"), None);
+        assert_eq!(playing_saves(""), None);
     }
 
     #[test]

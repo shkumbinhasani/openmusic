@@ -45,6 +45,7 @@ pub struct MenuState {
     pub repeat: Repeat,
     pub saved: Option<bool>,
     pub episode: bool,
+    pub likable: bool,
     pub notify: bool,
     pub mini_on_minimize: bool,
     pub mini_open: bool,
@@ -65,12 +66,7 @@ impl MenuState {
     }
 
     pub fn like_title(&self) -> &'static str {
-        match (self.episode, self.saved == Some(true)) {
-            (false, false) => SAVE,
-            (false, true) => REMOVE,
-            (true, false) => SAVE_EPISODE,
-            (true, true) => REMOVE_EPISODE,
-        }
+        like_title(self.episode, self.saved)
     }
 
     pub fn shuffle_check(&self) -> Check {
@@ -89,6 +85,15 @@ impl MenuState {
     }
 }
 
+pub fn like_title(episode: bool, saved: Option<bool>) -> &'static str {
+    match (episode, saved == Some(true)) {
+        (false, false) => SAVE,
+        (false, true) => REMOVE,
+        (true, false) => SAVE_EPISODE,
+        (true, true) => REMOVE_EPISODE,
+    }
+}
+
 pub fn toggle(on: bool) -> Check {
     if on { Check::On } else { Check::Off }
 }
@@ -99,6 +104,7 @@ pub struct NativeItem {
     pub key: String,
     pub check: Option<Check>,
     pub separator: bool,
+    pub blocked: bool,
     pub children: Vec<NativeItem>,
 }
 
@@ -123,7 +129,7 @@ pub fn describe(
         line.push_str(item.check.unwrap_or(Check::Off).glyph());
         match owned.get(index) {
             Some(OwnedMenuItem::Action { action, .. }) => {
-                if !available(action.as_ref()) {
+                if item.blocked || !available(action.as_ref()) {
                     line.push_str("  [x]");
                 }
             }
@@ -153,10 +159,15 @@ pub fn native_key(key: &str, control: bool, alt: bool, shift: bool, command: boo
 
 #[cfg(target_os = "macos")]
 mod native {
-    use objc2::{MainThreadMarker, rc::Retained, sel};
+    use objc2::{
+        MainThreadMarker, msg_send,
+        rc::Retained,
+        runtime::{AnyObject, NSObject},
+        sel,
+    };
     use objc2_app_kit::{
         NSApplication, NSControlStateValueMixed, NSControlStateValueOff, NSControlStateValueOn,
-        NSEventModifierFlags, NSMenu,
+        NSEventModifierFlags, NSMenu, NSMenuItem,
     };
     use objc2_foundation::NSString;
 
@@ -169,7 +180,7 @@ mod native {
         NSApplication::sharedApplication(MainThreadMarker::new()?).mainMenu()
     }
 
-    fn find(menu: &NSMenu, titles: &[&str]) -> Option<Retained<objc2_app_kit::NSMenuItem>> {
+    fn find(menu: &NSMenu, titles: &[&str]) -> Option<Retained<NSMenuItem>> {
         titles
             .iter()
             .find_map(|title| menu.itemWithTitle(&NSString::from_str(title)))
@@ -185,12 +196,26 @@ mod native {
         }
     }
 
+    thread_local! {
+        static NOWHERE: Retained<NSObject> = NSObject::new();
+    }
+
     fn retitle(menu: &NSMenu, titles: &[&str], title: &str) {
         if let Some(item) = find(menu, titles)
             && item.title().to_string() != title
         {
             item.setTitle(&NSString::from_str(title));
         }
+    }
+
+    fn enable(menu: &NSMenu, title: &str, enabled: bool) {
+        let Some(item) = find(menu, &[title]) else {
+            return;
+        };
+        NOWHERE.with(|nowhere| {
+            let nowhere: &AnyObject = nowhere;
+            unsafe { item.setTarget((!enabled).then_some(nowhere)) };
+        });
     }
 
     fn retitle_full_screen(view: &NSMenu, title: &str) {
@@ -234,6 +259,17 @@ mod native {
         mark(&playback, SHUFFLE, state.shuffle_check());
         mark(&playback, REPEAT, state.repeat_check());
         retitle(&playback, &LIKE_TITLES, state.like_title());
+        enable(&playback, state.like_title(), state.likable);
+    }
+
+    fn blocked(item: &NSMenuItem) -> bool {
+        match (item.target(), item.action()) {
+            (Some(target), Some(action)) => {
+                let responds: bool = unsafe { msg_send![&*target, respondsToSelector: action] };
+                !responds
+            }
+            _ => false,
+        }
     }
 
     fn read(menu: &NSMenu) -> Vec<NativeItem> {
@@ -264,6 +300,7 @@ mod native {
                         Check::Off
                     }),
                     separator: item.isSeparatorItem(),
+                    blocked: blocked(&item),
                     children: item.submenu().map(|menu| read(&menu)).unwrap_or_default(),
                 }
             })
@@ -307,7 +344,7 @@ mod tests {
     use gpui::{Menu, MenuItem};
 
     use super::*;
-    use crate::menus::{Next, ToggleShuffle};
+    use crate::menus::{Next, ToggleLike, ToggleShuffle};
 
     fn state() -> MenuState {
         MenuState {
@@ -316,6 +353,7 @@ mod tests {
             repeat: Repeat::Off,
             saved: None,
             episode: false,
+            likable: true,
             notify: false,
             mini_on_minimize: false,
             mini_open: false,
@@ -401,6 +439,7 @@ mod tests {
                 MenuItem::action("Next", Next),
                 MenuItem::separator(),
                 MenuItem::action("Shuffle", ToggleShuffle),
+                MenuItem::action("Save to Liked Songs", ToggleLike),
             ],
         }
         .owned();
@@ -422,12 +461,18 @@ mod tests {
                 ..NativeItem::default()
             },
             NativeItem {
+                title: "Save to Liked Songs".into(),
+                blocked: true,
+                ..NativeItem::default()
+            },
+            NativeItem {
                 title: "Start Dictation…".into(),
                 ..NativeItem::default()
             },
         ];
         let mut lines = Vec::new();
-        let mut available = |action: &dyn Action| action.partial_eq(&Next);
+        let mut available =
+            |action: &dyn Action| action.partial_eq(&Next) || action.partial_eq(&ToggleLike);
         describe(&native, &owned.items, 1, &mut available, &mut lines);
         assert_eq!(
             lines,
@@ -435,6 +480,7 @@ mod tests {
                 "  Next  ⌘→",
                 "  ──",
                 "  Shuffle  ⌘S  ✓  [x]",
+                "  Save to Liked Songs  [x]",
                 "  Start Dictation…  (system)",
             ]
         );

@@ -7,7 +7,6 @@ use std::{
 use gpui::{App, Context, Keystroke, Window};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use spotify_client::library;
 use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
@@ -24,6 +23,7 @@ use super::{
 };
 use crate::{
     app::{OpenMusic, Page, Session, intent::Intent, settings},
+    areas::library::saves::{Saves, playing_saves},
     menus::{
         About, BringAllToFront, CloseWindow, GoBack, GoForward, GoHome, Handle, HideApp,
         HideOthers, Minimize, Next, PlayPause, PlayRecent, Previous, SeekBackward, SeekForward,
@@ -169,6 +169,7 @@ impl OpenMusic {
         }
         let now = &self.playback.now;
         let track = self.track();
+        let like = self.like_kind();
         Some(MiniState {
             title: track
                 .map(|track| track.title.clone())
@@ -178,7 +179,8 @@ impl OpenMusic {
             device: now.device.clone().filter(|_| !now.local && track.is_some()),
             playing: track.is_some() && now.playing,
             saved: track.and_then(|track| self.is_saved(&track.uri)),
-            likable: track.is_some_and(|track| library::savable(&track.uri)),
+            likable: like.is_some(),
+            episode: like == Some(Saves::Episodes),
             cover: track
                 .and_then(|track| track.cover.clone())
                 .filter(|url| self.covers.contains_key(url)),
@@ -449,16 +451,19 @@ impl OpenMusic {
         })
     }
 
+    fn like_kind(&self) -> Option<Saves> {
+        self.track().and_then(|track| playing_saves(&track.uri))
+    }
+
     pub fn menu_state(&self) -> MenuState {
+        let like = self.like_kind();
         MenuState {
             playing: self.playback.now.playing,
             shuffle: self.shuffle_mode(),
             repeat: self.repeat_mode(),
             saved: self.track().and_then(|track| self.is_saved(&track.uri)),
-            episode: self.playback.now.episode
-                || self
-                    .track()
-                    .is_some_and(|track| track.uri.starts_with("spotify:episode:")),
+            episode: like == Some(Saves::Episodes),
+            likable: like.is_some(),
             notify: self.settings.system.notify_on_track_change,
             mini_on_minimize: self.settings.system.mini_player_when_minimized,
             mini_open: mini_player::is_visible(),
