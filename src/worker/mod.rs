@@ -233,6 +233,7 @@ pub async fn run(mut commands: UnboundedReceiver<Command>, events: UnboundedSend
                     Ok(token) => Some(token),
                     Err(error) if error.downcast_ref::<oauth::Rejected>().is_some() => {
                         let _ = keychain::clear();
+                        let _ = events.send(Event::SignedOut(None));
                         pair(&http, &mut commands, &events).await
                     }
                     Err(_) => {
@@ -263,6 +264,8 @@ async fn pair(
     commands: &mut UnboundedReceiver<Command>,
     events: &UnboundedSender<Event>,
 ) -> Option<Token> {
+    cache::clear();
+    library::cache::clear();
     let _ = events.send(Event::Connecting);
     let pairing = match oauth::start_pairing(http, oauth::DESKTOP_CLIENT_ID).await {
         Ok(pairing) => pairing,
