@@ -459,6 +459,14 @@ impl OpenMusic {
                     self.search(cx);
                 }
             }
+            Event::Reconnected => {
+                account::state::reconnected(self);
+                audio::state::reconnected(self);
+                details::state::reconnected(self);
+                library::state::reconnected(self);
+                playback::state::reconnected(self);
+                playlists::state::reconnected(self);
+            }
             Event::SignedOut(message) => {
                 self.session = Session::SignedOut;
                 self.session_error = message;

@@ -196,6 +196,10 @@ pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<Op
     load_sets(app);
 }
 
+pub fn reconnected(app: &mut OpenMusic) {
+    load_sets(app);
+}
+
 fn sets_report(app: &OpenMusic) -> String {
     let sets = &app.details.sets;
     let mut lines = vec![format!(

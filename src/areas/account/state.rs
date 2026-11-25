@@ -585,6 +585,10 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
     local::connected(app, window, cx);
 }
 
+pub fn reconnected(app: &mut OpenMusic) {
+    app.refresh_account();
+}
+
 pub fn signed_out(app: &mut OpenMusic) {
     let mut library = std::mem::take(&mut app.account.local);
     local::signed_out(&mut library);

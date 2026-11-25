@@ -1667,6 +1667,11 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
     }));
 }
 
+pub fn reconnected(app: &mut OpenMusic) {
+    app.playlists.refreshed = None;
+    app.refresh_playlists_on_focus();
+}
+
 pub fn signed_out(app: &mut OpenMusic) {
     app.playlists = State::default();
 }

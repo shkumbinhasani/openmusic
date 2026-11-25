@@ -576,6 +576,10 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
     sync_controls(app, window, cx);
 }
 
+pub fn reconnected(app: &mut OpenMusic) {
+    app.send(Command::Sync);
+}
+
 pub fn signed_out(app: &mut OpenMusic) {
     app.audio = State::default();
 }

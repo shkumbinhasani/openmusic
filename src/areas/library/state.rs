@@ -702,6 +702,10 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
     app.load_played();
 }
 
+pub fn reconnected(app: &mut OpenMusic) {
+    app.resync_library();
+}
+
 pub fn signed_out(app: &mut OpenMusic) {
     let filter = app.library.filter.take();
     let focus = app.library.focus.take();

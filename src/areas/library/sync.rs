@@ -117,6 +117,10 @@ impl OpenMusic {
 
     pub fn refresh_on_focus(&mut self) {
         self.library.sync.focus_refreshes += 1;
+        self.resync_library();
+    }
+
+    pub fn resync_library(&mut self) {
         self.schedule_library_sync(true);
         if self.library.liked.loaded {
             self.library.liked.stale = true;

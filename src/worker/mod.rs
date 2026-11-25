@@ -60,6 +60,7 @@ pub enum Event {
     Connecting,
     Pairing { code: String, url: String },
     Connected,
+    Reconnected,
     SignedOut(Option<String>),
     Cover { url: String, jpeg: Vec<u8> },
     NowPlaying(NowPlaying),
@@ -335,6 +336,7 @@ async fn connected(
     };
     let _ = events.send(Event::Connected);
 
+    let mut dealer_seen = false;
     let mut debug_tasks = JoinSet::new();
     if crate::debug::directory().is_some() {
         let api = ctx.api.clone();
@@ -381,7 +383,11 @@ async fn connected(
                     return Some("Spotify disconnected. Sign in again to reconnect.".into());
                 };
                 match update {
-                    Update::Ready => {}
+                    Update::Ready => {
+                        if std::mem::replace(&mut dealer_seen, true) {
+                            let _ = events.send(Event::Reconnected);
+                        }
+                    }
                     Update::Now(mut now) => {
                         now_playing(&mut now, &mut ctx);
                         let _ = events.send(Event::NowPlaying(*now));

@@ -1276,6 +1276,10 @@ pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<Op
     app.send(Command::DjCheck { play: false });
 }
 
+pub fn reconnected(app: &mut OpenMusic) {
+    app.refresh_jam();
+}
+
 pub fn signed_out(app: &mut OpenMusic) {
     app.playback = State::default();
 }
