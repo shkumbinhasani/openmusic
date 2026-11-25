@@ -43,6 +43,8 @@ cat > "$bundle/Contents/Info.plist" <<PLIST
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSUserNotificationAlertStyle</key>
+    <string>banner</string>
 </dict>
 </plist>
 PLIST

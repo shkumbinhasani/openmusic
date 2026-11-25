@@ -15,6 +15,7 @@ use super::{
     menu_bar::{self, MenuState},
     mini_player::{self, MiniState},
     native_window,
+    notify::{self, Authorization, Seen, TrackNote, Watch},
     now_playing::{self, Snapshot},
     shortcuts,
     worker::Event,
@@ -25,7 +26,7 @@ use crate::{
         About, BringAllToFront, CloseWindow, GoBack, GoForward, GoHome, Handle, HideApp,
         HideOthers, Minimize, Next, PlayPause, PlayRecent, Previous, SeekBackward, SeekForward,
         ShowAll, ShowMainWindow, ShowShortcuts, ToggleFullScreen, ToggleMiniOnMinimize,
-        ToggleMiniPlayer, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
+        ToggleMiniPlayer, ToggleNotifications, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
     },
     ui::tracks::{RowDrag, RowDrop},
 };
@@ -76,6 +77,9 @@ pub struct State {
     pub dock_builds: u64,
     pub mini: Option<MiniState>,
     pub mini_auto: bool,
+    pub watch: Watch,
+    pub notes: u64,
+    pub notify_asked: bool,
 }
 
 impl State {
@@ -94,6 +98,7 @@ pub fn install(cx: &mut App) {
 }
 
 pub fn window_opened(window: &mut Window, cx: &mut App) {
+    notify::install();
     if native_window::install(window) {
         window.on_window_should_close(cx, |_, _| {
             native_window::hide();
@@ -194,6 +199,80 @@ impl OpenMusic {
         mini_player::progress(self.playback.now.position());
     }
 
+    pub fn track_note(&self) -> Option<TrackNote> {
+        let track = self.track().filter(|track| !track.title.is_empty())?;
+        let cover = track
+            .cover
+            .as_ref()
+            .and_then(|url| self.covers.get(url))
+            .and_then(|image| {
+                notify::cover_extension(image.format)
+                    .map(|extension| (image.bytes().to_vec(), extension))
+            });
+        Some(TrackNote {
+            uri: track.uri.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            cover,
+        })
+    }
+
+    pub fn toggle_notifications(&mut self, cx: &mut App) {
+        let on = !self.settings.system.notify_on_track_change;
+        self.update_settings(|settings| settings.system.notify_on_track_change = on);
+        if on {
+            self.system.notify_asked = true;
+            notify::authorize();
+        }
+        self.sync_system(cx);
+    }
+
+    fn notification_status(&mut self, cx: &mut App) {
+        if !self.system.notify_asked {
+            return;
+        }
+        match notify::status() {
+            Authorization::Denied => {
+                self.system.notify_asked = false;
+                if self.settings.system.notify_on_track_change {
+                    self.show_toast(
+                        "Turn on notifications for OpenMusic in System Settings.",
+                        None,
+                    );
+                    cx.open_url(notify::SETTINGS_URL);
+                }
+            }
+            Authorization::Authorized | Authorization::Unavailable => {
+                self.system.notify_asked = false;
+            }
+            Authorization::Unknown | Authorization::NotDetermined => {}
+        }
+    }
+
+    fn sync_notifications(&mut self) {
+        if !notify::available() {
+            return;
+        }
+        notify::set_app_active(native_window::state().frontmost());
+        let enabled = self.settings.system.notify_on_track_change
+            && matches!(self.session, Session::Connected);
+        let now = &self.playback.now;
+        let seen = now.track.as_ref().map(|track| Seen {
+            uri: &track.uri,
+            title: &track.title,
+            playing: now.playing,
+        });
+        let Some(uri) = self.system.watch.observe(seen, enabled, Instant::now()) else {
+            return;
+        };
+        if let Some(note) = self.track_note().filter(|note| note.uri == uri)
+            && notify::post(&note, false)
+        {
+            self.system.notes += 1;
+        }
+    }
+
     fn window_miniaturized(&mut self) {
         if self.settings.system.mini_player_when_minimized
             && !mini_player::is_visible()
@@ -278,6 +357,7 @@ impl OpenMusic {
     pub fn sync_native(&mut self) {
         self.sync_now_playing();
         self.sync_mini_player();
+        self.sync_notifications();
         let menu = self.menu_state();
         if self.system.menu.as_ref() != Some(&menu) {
             menu_bar::sync(&menu);
@@ -386,10 +466,12 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
         })
         .detach();
     }
+    app.system.watch.reset();
     app.sync_system(cx);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
+    app.system.watch.reset();
     app.close_mini_player();
     app.sync_native();
 }
@@ -508,6 +590,31 @@ pub fn debug(
                 ),
             );
         }
+        "notify" => {
+            let posted = match rest {
+                "" | "post" => app
+                    .track_note()
+                    .is_some_and(|note| notify::post(&note, true)),
+                "state" => false,
+                _ => return false,
+            };
+            if posted {
+                app.system.notes += 1;
+            }
+            notify::refresh_status();
+            write(
+                directory,
+                "notify.txt",
+                format!(
+                    "available={} status={} enabled={} posted={posted} notes={} due={:?}",
+                    notify::available(),
+                    notify::status().name(),
+                    app.settings.system.notify_on_track_change,
+                    app.system.notes,
+                    app.system.watch.due(),
+                ),
+            );
+        }
         "window" => {
             match rest {
                 "hide" => app.close_main_window(window, cx),
@@ -556,13 +663,14 @@ fn window_label(state: native_window::WindowState) -> &'static str {
 
 pub fn state_fragment(app: &OpenMusic) -> String {
     format!(
-        "published={} liked={} shortcuts={} window={} dock={} mini={}",
+        "published={} liked={} shortcuts={} window={} dock={} mini={} notes={}",
         app.system.publishes,
         app.liked_label(),
         app.system.shortcuts,
         window_label(native_window::state()),
         app.system.dock_builds,
         mini_player::is_visible(),
+        app.system.notes,
     )
 }
 
@@ -622,6 +730,11 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     route(cx, handle, |_: &ToggleMiniPlayer, app, window, cx| {
         app.act(Intent::ToggleMiniPlayer, window, cx)
     });
+    if notify::available() {
+        route(cx, handle, |_: &ToggleNotifications, app, _, cx| {
+            app.toggle_notifications(cx)
+        });
+    }
     route(cx, handle, |_: &ToggleMiniOnMinimize, app, _, cx| {
         app.update_settings(|settings| {
             settings.system.mini_player_when_minimized = !settings.system.mini_player_when_minimized
@@ -650,6 +763,8 @@ pub fn on_press(
         mini_player::NEXT => app.act(Intent::Next, window, cx),
         mini_player::LIKE => app.act(Intent::ToggleLike, window, cx),
         mini_player::CLOSE => app.close_mini_player(),
+        notify::OPEN => app.act(Intent::ShowMainWindow, window, cx),
+        notify::STATUS => app.notification_status(cx),
         super::view::MINI_BUTTON => app.act(Intent::ToggleMiniPlayer, window, cx),
         _ => return false,
     }
