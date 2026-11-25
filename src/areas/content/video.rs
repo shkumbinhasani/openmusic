@@ -41,13 +41,16 @@ pub use native::{describe, reduce_motion, status, sync, window_visible};
 
 #[cfg(target_os = "macos")]
 mod native {
-    use std::cell::RefCell;
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
 
     use objc2::{MainThreadMarker, rc::Retained};
     use objc2_app_kit::{NSImageView, NSWindowOcclusionState, NSWorkspace};
     use objc2_av_foundation::{
         AVLayerVideoGravityResizeAspectFill, AVPlayerItem, AVPlayerItemStatus, AVPlayerLayer,
-        AVPlayerLooper, AVQueuePlayer,
+        AVPlayerLooper, AVPlayerLooperStatus, AVQueuePlayer,
     };
     use objc2_foundation::{NSString, NSURL};
     use objc2_quartz_core::{CAAutoresizingMask, CALayer};
@@ -55,11 +58,14 @@ mod native {
     use super::{Status, Want, fraction, start_point};
     use crate::overlay;
 
+    const RETRY_FAILED: Duration = Duration::from_secs(30);
+
     struct Loop {
         player: Retained<AVQueuePlayer>,
         looper: Retained<AVPlayerLooper>,
         url: String,
         started: bool,
+        since: Instant,
     }
 
     impl Loop {
@@ -77,8 +83,15 @@ mod native {
                     looper,
                     url: url.to_owned(),
                     started: !random,
+                    since: Instant::now(),
                 })
             }
+        }
+
+        fn stale(&self, url: &str) -> bool {
+            self.url != url
+                || (unsafe { self.looper.status() } == AVPlayerLooperStatus::Failed
+                    && self.since.elapsed() >= RETRY_FAILED)
         }
 
         fn run(&mut self, playing: bool) {
@@ -181,7 +194,7 @@ mod native {
             if self
                 .current
                 .as_ref()
-                .is_none_or(|current| current.url != want.url)
+                .is_none_or(|current| current.stale(&want.url))
             {
                 self.stop();
                 self.current = Loop::start(&want.url, want.random, mtm);
@@ -222,7 +235,7 @@ mod native {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let art = want.and(overlay::dock_artwork());
+        let art = want.and_then(|_| overlay::dock_artwork());
         SURFACE.with_borrow_mut(|surface| match (want, art) {
             (Some(want), Some(art)) => surface.show(want, &art, mtm),
             _ => surface.stop(),
