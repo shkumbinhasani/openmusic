@@ -35,7 +35,18 @@ fn song(target: &TrackTarget) -> Vec<(Group, MenuItem)> {
     if !target.track.is_track() {
         return Vec::new();
     }
-    shared(&target.track.uri)
+    let uri = target.track.uri.clone();
+    let title = target.track.title.clone();
+    let mut items = vec![(
+        Group::Info,
+        MenuItem::action("View credits", move |app, window, cx| {
+            app.show_credits(uri.clone(), title.clone(), window, cx)
+        })
+        .key("i")
+        .symbol("person.2"),
+    )];
+    items.extend(shared(&target.track.uri));
+    items
 }
 
 fn episode(uri: &str, facts: &Facts) -> Vec<(Group, MenuItem)> {
@@ -148,6 +159,8 @@ mod tests {
         assert_eq!(
             lines,
             [
+                "View credits  i  <person.2>",
+                "──",
                 "Share ▸  <square.and.arrow.up>",
                 "  Copy link to Song  c  <link>",
                 "  (⌥) Copy Spotify URI",

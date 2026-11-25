@@ -36,7 +36,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    fn for_window(appearance: WindowAppearance) -> Self {
+    pub fn for_window(appearance: WindowAppearance) -> Self {
         let solid = reduce_transparency();
         if matches!(
             appearance,

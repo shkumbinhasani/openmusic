@@ -1,10 +1,14 @@
 use std::{collections::HashSet, path::Path};
 
-use gpui::{App, Context, Window};
-
+use gpui::{App, Context, Entity, Window};
+use gpui_component::WindowExt;
 use spotify_client::share;
 
-use super::{menu, worker::Event};
+use super::{
+    credits::{self, CreditsView},
+    menu,
+    worker::Event,
+};
 use crate::{
     app::{OpenMusic, Page},
     menus::Handle,
@@ -15,7 +19,10 @@ use crate::{
 };
 
 #[derive(Default)]
-pub struct State {}
+pub struct State {
+    pub credits: credits::Cache,
+    pub credits_view: Option<(String, Entity<CreditsView>)>,
+}
 
 impl State {
     pub fn covers(&self, _urls: &mut HashSet<String>) {}
@@ -24,25 +31,42 @@ impl State {
 pub fn load(_app: &mut OpenMusic, _page: &Page) {}
 
 pub fn on_event(
-    _app: &mut OpenMusic,
+    app: &mut OpenMusic,
     event: Event,
     _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    cx: &mut Context<OpenMusic>,
 ) {
-    match event {}
+    match event {
+        Event::Credits { uri, result } => {
+            if let Ok(credits) = &result {
+                app.details.credits.insert(credits.clone());
+                app.lookup_saved(credits.linked_artists());
+            }
+            if let Some((open, view)) = &app.details.credits_view
+                && *open == uri
+            {
+                view.update(cx, |view, cx| {
+                    view.result = Some(result);
+                    cx.notify();
+                });
+            }
+        }
+    }
 }
 
 pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {}
 
-pub fn signed_out(_app: &mut OpenMusic) {}
+pub fn signed_out(app: &mut OpenMusic) {
+    app.details = State::default();
+}
 
 pub fn debug(
     app: &mut OpenMusic,
     verb: &str,
     rest: &str,
     directory: &Path,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
     let words: Vec<&str> = rest.split_whitespace().collect();
     let write = |name: &str, text: String| {
@@ -64,13 +88,37 @@ pub fn debug(
             "share.txt",
             share::link(uri, &share::share_id()).unwrap_or_else(|| "none".into()),
         ),
+        ("credits", ["dump"]) => write(
+            "credits.txt",
+            app.details
+                .credits_view
+                .as_ref()
+                .map(|(_, view)| view.read(cx).describe())
+                .unwrap_or_else(|| "closed".into()),
+        ),
+        ("credits", ["close"]) => {
+            window.close_all_dialogs(cx);
+            app.details.credits_view = None;
+        }
+        ("credits", [uri]) => {
+            let title = app
+                .track()
+                .filter(|track| track.uri == *uri)
+                .map(|track| track.title.clone())
+                .unwrap_or_default();
+            app.show_credits((*uri).to_owned(), title, window, cx);
+        }
         _ => return false,
     }
     true
 }
 
-pub fn state_fragment(_app: &OpenMusic) -> String {
-    String::new()
+pub fn state_fragment(app: &OpenMusic) -> String {
+    app.details
+        .credits_view
+        .as_ref()
+        .map(|(uri, _)| format!("credits={uri}"))
+        .unwrap_or_default()
 }
 
 pub fn register_actions(_cx: &mut App, _handle: &Handle) {}
