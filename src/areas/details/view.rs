@@ -1,8 +1,14 @@
-use gpui::{AnyElement, Context, Pixels, prelude::*};
-use spotify_client::Track;
+use gpui::{AnyElement, Context, prelude::*};
+use spotify_client::{Track, details::hide_context};
 
+use super::{
+    feedback::first_artist,
+    go,
+    menu::{self, Facts},
+    track::ALBUM_ROWS,
+};
 use crate::{
-    app::OpenMusic,
+    app::{OpenMusic, Page},
     ui::{
         Palette,
         dock::DockItem,
@@ -12,20 +18,8 @@ use crate::{
     },
 };
 
-impl OpenMusic {
-    pub fn track_page(
-        &self,
-        _uri: &str,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-}
-
-pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    Vec::new()
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    menu::items(target, &Facts::of(app))
 }
 
 pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
@@ -42,16 +36,43 @@ pub fn dock_items(
 }
 
 pub fn row_accessories(
-    _app: &OpenMusic,
-    _track: &Track,
+    app: &OpenMusic,
+    track: &Track,
     _row: Row,
     _options: &RowOptions,
     _palette: Palette,
     _cx: &mut Context<OpenMusic>,
 ) -> Vec<AnyElement> {
-    Vec::new()
+    match &app.details.highlight {
+        Some(highlight) if !highlight.scrolled.get() && app.highlights(track) => {
+            vec![
+                go::scroll_anchor(app.details.scroll.handle(), highlight.scrolled.clone())
+                    .into_any_element(),
+            ]
+        }
+        _ => Vec::new(),
+    }
 }
 
-pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
-    false
+pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, options: &RowOptions) -> bool {
+    let sets = &app.details.sets;
+    let hidden = || {
+        options
+            .context
+            .as_deref()
+            .and_then(hide_context)
+            .is_some_and(|context| sets.is_hidden(&track.uri, &context))
+    };
+    let banned = || first_artist(track).is_some_and(|artist| sets.is_banned(artist));
+    track.is_track() && (hidden() || banned())
+}
+
+pub fn row_highlighted(app: &OpenMusic, track: &Track, row: Row) -> bool {
+    app.highlights(track)
+        || (row.0 == ALBUM_ROWS && matches!(&app.page, Page::Track(uri) if *uri == track.uri))
+}
+
+pub fn title_page(app: &OpenMusic, track: &Track) -> Option<Page> {
+    let page = Page::Track(track.uri.clone());
+    (track.is_track() && app.page != page).then_some(page)
 }

@@ -1,3 +1,11 @@
+pub mod credits;
+pub mod dialog;
+pub mod embed;
+pub mod feedback;
+pub mod go;
+pub mod menu;
+pub mod share;
 pub mod state;
+pub mod track;
 pub mod view;
 pub mod worker;

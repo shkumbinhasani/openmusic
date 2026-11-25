@@ -36,7 +36,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    fn for_window(appearance: WindowAppearance) -> Self {
+    pub fn for_window(appearance: WindowAppearance) -> Self {
         let solid = reduce_transparency();
         if matches!(
             appearance,
@@ -422,9 +422,10 @@ impl Render for OpenMusic {
             };
             content.child(
                 div()
-                    .id(gpui::ElementId::Name(scroll_id.into()))
+                    .id(gpui::ElementId::Name(scroll_id.clone().into()))
                     .size_full()
                     .overflow_y_scroll()
+                    .track_scroll(&self.details.content_scroll(&scroll_id))
                     .child(
                         div()
                             .w_full()
