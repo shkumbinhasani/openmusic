@@ -130,7 +130,7 @@ pub fn panel(app: &OpenMusic, palette: Palette) -> Option<Panel> {
 
 fn sample_tracks(app: &OpenMusic) -> Vec<Track> {
     let mut tracks: Vec<Track> = [
-        app.discovery.results.as_slice(),
+        app.discovery.search_tracks(),
         app.discovery.home.tracks.as_slice(),
     ]
     .into_iter()

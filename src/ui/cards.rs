@@ -22,6 +22,8 @@ use crate::{
 
 const CARD_TEXT_HEIGHT: f32 = 50.;
 
+pub type CardOpen = Rc<dyn Fn(&mut OpenMusic, &Card, &mut Window, &mut Context<OpenMusic>)>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Face {
     pub name: String,
@@ -186,6 +188,18 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.card_grid_with(cards, prefix, card_side, None, palette, cx)
+    }
+
+    pub fn card_grid_with(
+        &self,
+        cards: &[Card],
+        prefix: &'static str,
+        card_side: Pixels,
+        open: Option<CardOpen>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_wrap()
@@ -199,6 +213,7 @@ impl OpenMusic {
                 };
                 let page = page_for(&card.uri);
                 let target = card_target(card);
+                let open = open.clone().map(|open| (open, card.clone()));
                 let subtitle = div()
                     .text_size(px(12.))
                     .text_color(rgb(palette.muted))
@@ -239,11 +254,14 @@ impl OpenMusic {
                                 }
                             }),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some((open, card)) = &open {
+                            open(this, card, window, cx);
+                        }
                         if let Some(page) = page.clone() {
                             this.navigate(page);
-                            cx.notify();
                         }
+                        cx.notify();
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -260,6 +278,21 @@ impl OpenMusic {
         cards: &[Card],
         prefix: &'static str,
         card_side: Pixels,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        self.shelf_with(title, show_all, cards, prefix, card_side, None, palette, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn shelf_with(
+        &self,
+        title: impl Into<SharedString>,
+        show_all: Option<Page>,
+        cards: &[Card],
+        prefix: &'static str,
+        card_side: Pixels,
+        open: Option<CardOpen>,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -304,7 +337,7 @@ impl OpenMusic {
                     }),
             )
             .child(
-                self.card_grid(cards, prefix, card_side, palette, cx)
+                self.card_grid_with(cards, prefix, card_side, open, palette, cx)
                     .max_h(card_side + px(CARD_TEXT_HEIGHT))
                     .overflow_hidden(),
             )
@@ -318,6 +351,18 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.hero_card_with(card, prefix, play, None, palette, cx)
+    }
+
+    pub fn hero_card_with(
+        &self,
+        card: &Card,
+        prefix: &'static str,
+        play: Option<&'static str>,
+        open: Option<CardOpen>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let image = card.image.as_ref().and_then(|url| self.covers.get(url));
         let side = px(92.);
         let radius = if round_kind(card.kind) {
@@ -327,6 +372,7 @@ impl OpenMusic {
         };
         let page = page_for(&card.uri);
         let target = card_target(card);
+        let open = open.map(|open| (open, card.clone()));
         div()
             .id(prefix)
             .flex()
@@ -337,11 +383,14 @@ impl OpenMusic {
             .bg(rgba(palette.press))
             .cursor_pointer()
             .when(!card.playable, |hero| hero.opacity(0.5))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some((open, card)) = &open {
+                    open(this, card, window, cx);
+                }
                 if let Some(page) = page.clone() {
                     this.navigate(page);
-                    cx.notify();
                 }
+                cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,

@@ -1,14 +1,25 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use gpui::{App, Context, Window};
 use gpui_component::input::InputEvent;
-use spotify_client::{Track, catalog::Artist, engine::NowPlaying};
+use spotify_client::{
+    catalog::Artist,
+    engine::NowPlaying,
+    search::{SearchKind, SearchResults},
+};
 
-use super::worker::{Command, Discovery, Event, Mix};
+use super::{
+    search::{Keys, Recent, Suggest, TabState},
+    worker::{Command, Discovery, Event, Mix},
+};
 use crate::{
-    app::{OpenMusic, Page, Session, intent::Intent},
+    app::{OpenMusic, Page, intent::Intent},
     menus::{self, FocusSearch, Handle},
     ui::{
+        components::Sentinel,
         menu::Target,
         tracks::{RowDrag, RowDrop},
     },
@@ -90,7 +101,6 @@ impl SectionSource {
 
 #[derive(Default)]
 pub struct State {
-    pub results: Vec<Track>,
     pub home: Discovery,
     pub newest_mix: Option<Mix>,
     pub last_seed: Option<String>,
@@ -98,7 +108,12 @@ pub struct State {
     pub artist: Option<(String, Result<Artist, String>)>,
     pub search_query: String,
     pub search_pending: bool,
-    pub search_error: Option<String>,
+    pub search: Option<Result<Box<SearchResults>, String>>,
+    pub search_tabs: HashMap<SearchKind, TabState>,
+    pub search_sentinel: Sentinel,
+    pub suggest: Suggest,
+    pub recent: Recent,
+    pub search_keys: Keys,
 }
 
 impl State {
@@ -107,10 +122,11 @@ impl State {
     }
 
     pub fn covers(&self, urls: &mut HashSet<String>) {
+        self.search_covers(urls);
         let tracks = self
-            .results
+            .home
+            .tracks
             .iter()
-            .chain(&self.home.tracks)
             .chain(self.home.mix.iter().flat_map(|mix| &mix.tracks))
             .chain(self.newest_mix.iter().flat_map(|mix| &mix.tracks));
         urls.extend(tracks.filter_map(|track| track.cover.clone()));
@@ -139,24 +155,6 @@ impl State {
 }
 
 impl OpenMusic {
-    pub fn search(&mut self, cx: &mut Context<Self>) {
-        let value = self.input.read(cx).value();
-        let query = value.trim();
-        if query.is_empty()
-            || self.discovery.search_pending
-            || !matches!(self.session, Session::Connected)
-        {
-            return;
-        }
-        self.navigate(Page::Search(SearchTab::All));
-        self.discovery.search_query = query.to_owned();
-        self.discovery.search_pending = true;
-        self.discovery.search_error = None;
-        self.discovery.results.clear();
-        self.send(Command::Search(query.to_owned()));
-        cx.notify();
-    }
-
     pub fn recommend_from(&mut self, now: &NowPlaying) {
         if let Some(track) = &now.track
             && track.is_track()
@@ -170,6 +168,9 @@ impl OpenMusic {
 }
 
 pub fn load(app: &mut OpenMusic, page: &Page) {
+    if let Page::Search(tab) = page {
+        app.open_search_tab(*tab);
+    }
     if let Page::Artist(uri) = page
         && app
             .discovery
@@ -185,12 +186,10 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
 pub fn on_input(
     app: &mut OpenMusic,
     event: &InputEvent,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<OpenMusic>,
 ) {
-    if let InputEvent::PressEnter { .. } = event {
-        app.search(cx);
-    }
+    app.search_input(event, window, cx);
 }
 
 pub fn on_event(
@@ -200,23 +199,6 @@ pub fn on_event(
     cx: &mut Context<OpenMusic>,
 ) {
     match event {
-        Event::SearchDone(result) => {
-            app.discovery.search_pending = false;
-            match result {
-                Ok(tracks) => app.discovery.results = tracks,
-                Err(error) => app.discovery.search_error = Some(error),
-            }
-        }
-        Event::DirectTrack(result) => {
-            app.discovery.search_pending = false;
-            match result {
-                Ok(track) => {
-                    app.discovery.results = vec![track.clone()];
-                    app.play(&[track], 0, cx);
-                }
-                Err(error) => app.discovery.search_error = Some(error),
-            }
-        }
         Event::Discovered(home) => {
             app.discovery.discovery_pending = false;
             app.discovery.home = home;
@@ -227,38 +209,41 @@ pub fn on_event(
             }
         }
         Event::Artist { uri, result } => app.discovery.artist = Some((uri, result)),
+        event => app.on_search_event(event, cx),
     }
 }
 
-pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+pub fn connected(app: &mut OpenMusic, _window: &mut Window, cx: &mut Context<OpenMusic>) {
     app.discovery.discovery_pending = true;
     app.send(Command::Discover);
+    app.watch_search_keys(cx);
+    app.discovery.recent.pending = false;
+    app.load_recent_searches(true);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
-    app.discovery.search_error = None;
-    app.discovery.results.clear();
+    app.discovery.reset_search();
     app.discovery.home = Discovery::default();
     app.discovery.newest_mix = None;
     app.discovery.last_seed = None;
     app.discovery.discovery_pending = false;
     app.discovery.artist = None;
-    app.discovery.search_pending = false;
 }
 
 pub fn debug(
-    _app: &mut OpenMusic,
-    _verb: &str,
-    _rest: &str,
-    _directory: &Path,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    app: &mut OpenMusic,
+    verb: &str,
+    rest: &str,
+    directory: &Path,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    app.search_debug(verb, rest, directory, window, cx)
 }
 
-pub fn state_fragment(_app: &OpenMusic) -> String {
-    String::new()
+pub fn state_fragment(app: &OpenMusic) -> String {
+    app.discovery
+        .search_fragment(&app.page, app.search_dropdown_visible())
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
@@ -286,6 +271,7 @@ pub fn on_press(
                 app.play_context(&uri, &tracks, 0, cx);
             }
         }
+        "search-top-play" => app.play_top_result(cx),
         "more-artist" => {
             if let Page::Artist(uri) = &app.page
                 && let Some(target) = Target::for_uri(uri)
@@ -308,4 +294,8 @@ pub fn row_dropped(
     false
 }
 
-pub fn tick(_app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {}
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if app.discovery.search_sentinel.take() && app.more_search_results() {
+        cx.notify();
+    }
+}

@@ -6,7 +6,10 @@ use spotify_client::{
     entity::{Card, Kind},
 };
 
-use super::state::{SearchTab, SectionSource};
+use super::{
+    search::SONG_ROWS,
+    state::{SearchTab, SectionSource},
+};
 use crate::{
     app::{OpenMusic, Page},
     icons,
@@ -272,58 +275,6 @@ impl OpenMusic {
             })
     }
 
-    pub fn search_results(
-        &self,
-        _tab: SearchTab,
-        _card_side: Pixels,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(30.))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Search"),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(palette.muted))
-                            .truncate()
-                            .child(format!("Results for “{}”", self.discovery.search_query)),
-                    ),
-            )
-            .when(self.discovery.results.is_empty(), |page| {
-                if self.discovery.search_pending {
-                    return page.child(skeleton_rows("search-rows", 9, false, palette));
-                }
-                page.child(
-                    div().py_4().text_color(rgb(palette.muted)).child(
-                        self.discovery
-                            .search_error
-                            .clone()
-                            .unwrap_or_else(|| "No songs found.".into()),
-                    ),
-                )
-            })
-            .child(self.rows(
-                &self.discovery.results,
-                "search-track",
-                0,
-                None,
-                palette,
-                cx,
-            ))
-    }
-
     pub fn artist_page(
         &self,
         uri: &str,
@@ -571,14 +522,6 @@ impl OpenMusic {
     ) -> AnyElement {
         self.page_status("Coming soon", palette).into_any_element()
     }
-
-    pub fn search_suggestions(
-        &self,
-        _palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        None
-    }
 }
 
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
@@ -602,10 +545,13 @@ pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
             "Search",
             matches!(app.page, Page::Search(_)),
             |app, window, cx| {
+                let tab = match app.page {
+                    Page::Search(tab) => tab,
+                    _ => SearchTab::All,
+                };
+                app.navigate(Page::Search(tab));
                 if app.discovery.search_query.is_empty() {
                     app.input.update(cx, |input, cx| input.focus(window, cx));
-                } else {
-                    app.navigate(Page::Search(SearchTab::All));
                 }
             },
         ),
@@ -632,6 +578,6 @@ pub fn row_accessories(
     Vec::new()
 }
 
-pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
-    false
+pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOptions) -> bool {
+    SONG_ROWS.contains(&row.0) && app.discovery.is_unplayable(&track.uri)
 }
