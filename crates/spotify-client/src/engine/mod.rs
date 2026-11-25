@@ -242,6 +242,7 @@ struct Engine {
     volume_due: Option<tokio::time::Instant>,
     published: Option<(PublishedKey, u32, Instant)>,
     published_playback: Option<PlaybackKey>,
+    remote: remote::State,
 }
 
 #[derive(PartialEq)]
@@ -339,6 +340,7 @@ async fn run(
         volume_due: None,
         published: None,
         published_playback: None,
+        remote: remote::State::default(),
     };
     let mut refresh_at = tokio::time::Instant::from_std(token.refresh_due());
 
@@ -476,7 +478,8 @@ impl Engine {
     }
 
     async fn send_command(&mut self, target: &str, command: Value) -> Result<Option<String>> {
-        let (to, alias) = connect::device_target(target);
+        let target = self.remote.redirect(target);
+        let (to, alias) = connect::device_target(&target);
         connect::command(&self.api, &self.device_id, to, command, alias).await
     }
 

@@ -7,6 +7,15 @@ use crate::connect;
 #[derive(Clone, Debug)]
 pub enum Control {}
 
+#[derive(Debug, Default)]
+pub(super) struct State {}
+
+impl State {
+    pub(super) fn redirect(&self, target: &str) -> String {
+        target.to_owned()
+    }
+}
+
 impl Engine {
     pub(super) async fn remote_control(&mut self, control: Control) -> Result<()> {
         match control {}
