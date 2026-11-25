@@ -213,10 +213,10 @@ pub fn parse_ref(value: &Value) -> Option<ProfileRef> {
 
 pub fn parse_playlist(value: &Value) -> Option<PlaylistRef> {
     let uri = string(&value["uri"]);
-    let name = string(&value["name"]);
-    if uri.is_empty() || name.is_empty() {
+    if uri.is_empty() || value["name"].as_str().is_none_or(str::is_empty) {
         return None;
     }
+    let name = string(&value["name"]);
     let owner_uri = Some(string(&value["owner_uri"])).filter(|uri| !uri.is_empty());
     Some(PlaylistRef {
         uri,
@@ -808,7 +808,8 @@ mod tests {
                 {"uri": "spotify:playlist:0000000000000000000002", "name": "Mix Two",
                  "image_url": "spotify:image:ab67706c0000da84cccc",
                  "owner_name": "Someone Example", "owner_uri": "spotify:user:someone"},
-                {"uri": "spotify:playlist:0000000000000000000003", "name": ""}
+                {"uri": "spotify:playlist:0000000000000000000003", "name": ""},
+                {"uri": "spotify:playlist:0000000000000000000004", "name": " "}
             ],
             "total_public_playlists_count": 24,
             "is_current_user": true,
@@ -836,7 +837,8 @@ mod tests {
         assert!(!profile.is_following);
         assert!(profile.allow_follows && profile.show_follows);
         assert_eq!(profile.total_playlists, 24);
-        assert_eq!(profile.playlists.len(), 2);
+        assert_eq!(profile.playlists.len(), 3);
+        assert_eq!(profile.playlists[2].name, "");
         assert_eq!(
             profile.playlists[0].image.as_deref(),
             Some("https://i.scdn.co/image/ab67616d0000b273aaaa")
