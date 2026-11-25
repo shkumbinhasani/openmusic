@@ -19,7 +19,10 @@ static NAME: Mutex<Option<String>> = Mutex::new(None);
 
 pub enum Command {
     Sync,
-    Write(Vec<Setting>),
+    Write {
+        settings: Vec<Setting>,
+        undo: Vec<Setting>,
+    },
     Report,
     PlayLocal {
         tracks: Vec<LocalTrack>,
@@ -43,6 +46,7 @@ pub enum Event {
     WriteFailed {
         message: String,
         remote: Option<Remote>,
+        undo: Vec<Setting>,
     },
     Report(Box<AudioReport>),
     Status(AudioStatus),
@@ -79,7 +83,7 @@ fn sync(ctx: &mut Ctx) {
 pub fn handle(command: Command, ctx: &mut Ctx) {
     match command {
         Command::Sync => sync(ctx),
-        Command::Write(settings) => {
+        Command::Write { settings, undo } => {
             let api = ctx.api.clone();
             let device = descriptor(ctx);
             ctx.writes
@@ -91,6 +95,7 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                         Err(_) => Event::WriteFailed {
                             message: "Couldn’t save this setting to Spotify. Try again.".into(),
                             remote: playback_settings::read(&api, Some(&device), &[]).await.ok(),
+                            undo,
                         },
                     };
                     Ok(event.into())
@@ -132,6 +137,7 @@ fn save_show_speed(ctx: &mut Ctx, show: String, speed: f32) {
                     Err(_) => Event::WriteFailed {
                         message: "Couldn’t save this speed for the show. Try again.".into(),
                         remote: None,
+                        undo: Vec::new(),
                     },
                 };
             Ok(event.into())

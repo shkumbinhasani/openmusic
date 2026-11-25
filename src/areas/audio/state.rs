@@ -122,6 +122,17 @@ impl AudioPrefs {
         }
     }
 
+    pub fn current(&self, setting: Setting) -> Setting {
+        match setting {
+            Setting::Gapless(_) => Setting::Gapless(self.gapless),
+            Setting::Crossfade(_) => Setting::Crossfade(self.crossfade),
+            Setting::CrossfadeMs(_) => Setting::CrossfadeMs(self.crossfade_ms),
+            Setting::Normalize(_) => Setting::Normalize(self.normalize),
+            Setting::Level(_) => Setting::Level(self.level),
+            Setting::Speed(speed) => Setting::Speed(speed),
+        }
+    }
+
     pub fn merge(&mut self, remote: &Remote) {
         if let Some(user) = remote.user {
             self.gapless = user.gapless;
@@ -144,20 +155,82 @@ pub struct State {
     pub controls: Controls,
     pending_speed: Option<(f32, Instant)>,
     sleep_label: Option<String>,
+    writing: Writing,
 }
 
 impl State {
     pub fn covers(&self, _urls: &mut HashSet<String>) {}
 }
 
+#[derive(Debug, Default)]
+pub struct Writing(HashMap<i32, u32>);
+
+impl Writing {
+    fn key(setting: Setting) -> i32 {
+        setting.id() as i32
+    }
+
+    pub fn start(&mut self, settings: &[Setting]) {
+        for setting in settings {
+            *self.0.entry(Self::key(*setting)).or_default() += 1;
+        }
+    }
+
+    pub fn finish(&mut self, settings: &[Setting]) {
+        for setting in settings {
+            let key = Self::key(*setting);
+            if let Some(count) = self.0.get_mut(&key) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    self.0.remove(&key);
+                }
+            }
+        }
+    }
+
+    pub fn busy(&self, setting: Setting) -> bool {
+        self.0.contains_key(&Self::key(setting))
+    }
+
+    pub fn settled(&self, settings: Vec<Setting>) -> Vec<Setting> {
+        settings
+            .into_iter()
+            .filter(|setting| !self.busy(*setting))
+            .collect()
+    }
+
+    pub fn merge(&self, prefs: &mut AudioPrefs, remote: &Remote) {
+        let held: Vec<Setting> = [
+            Setting::Gapless(false),
+            Setting::Crossfade(false),
+            Setting::CrossfadeMs(0),
+            Setting::Normalize(false),
+            Setting::Level(LoudnessLevel::Normal),
+        ]
+        .into_iter()
+        .filter(|setting| self.busy(*setting))
+        .map(|setting| prefs.current(setting))
+        .collect();
+        prefs.merge(remote);
+        for setting in held {
+            prefs.apply(setting);
+        }
+    }
+}
+
 impl OpenMusic {
     pub fn change_audio(&mut self, settings: Vec<Setting>) {
+        let undo = settings
+            .iter()
+            .map(|setting| self.settings.audio.current(*setting))
+            .collect();
         self.update_settings(|current| {
             for setting in &settings {
                 current.audio.apply(*setting);
             }
         });
-        self.send(Command::Write(settings));
+        self.audio.writing.start(&settings);
+        self.send(Command::Write { settings, undo });
     }
 
     pub fn play_local(&mut self, tracks: Vec<LocalTrack>, index: usize) {
@@ -436,10 +509,16 @@ fn apply_event(app: &mut OpenMusic, event: Event) {
         Event::Synced(Ok(remote)) => {
             app.audio.synced = Some(Ok(()));
             app.audio.speeds.extend(remote.speeds.clone());
-            app.update_settings(|current| current.audio.merge(&remote));
+            let mut prefs = app.settings.audio.clone();
+            app.audio.writing.merge(&mut prefs, &remote);
+            app.update_settings(|current| current.audio = prefs);
         }
         Event::Synced(Err(message)) => app.audio.synced = Some(Err(message)),
-        Event::Changed(settings) | Event::Written(settings) => app.apply_audio(&settings),
+        Event::Changed(settings) => {
+            let settings = app.audio.writing.settled(settings);
+            app.apply_audio(&settings);
+        }
+        Event::Written(settings) => app.audio.writing.finish(&settings),
         Event::Content {
             content_id,
             settings,
@@ -450,9 +529,22 @@ fn apply_event(app: &mut OpenMusic, event: Event) {
                 }
             }
         }
-        Event::WriteFailed { message, remote } => {
-            if let Some(remote) = remote {
-                app.update_settings(|current| current.audio.merge(&remote));
+        Event::WriteFailed {
+            message,
+            remote,
+            undo,
+        } => {
+            app.audio.writing.finish(&undo);
+            match remote {
+                Some(remote) => {
+                    let mut prefs = app.settings.audio.clone();
+                    app.audio.writing.merge(&mut prefs, &remote);
+                    app.update_settings(|current| current.audio = prefs);
+                }
+                None => {
+                    let undo = app.audio.writing.settled(undo);
+                    app.apply_audio(&undo);
+                }
             }
             app.show_toast(message, None);
         }
@@ -845,6 +937,78 @@ mod tests {
         assert!(engine.crossfade);
         assert_eq!(engine.crossfade_ms, MAX_CROSSFADE_MS);
         assert_eq!(engine.level, LoudnessLevel::Quiet);
+    }
+
+    #[test]
+    fn remembers_what_a_failed_write_puts_back() {
+        let mut prefs = AudioPrefs {
+            crossfade: true,
+            crossfade_ms: 2000,
+            ..AudioPrefs::default()
+        };
+        let change = [
+            Setting::Crossfade(false),
+            Setting::CrossfadeMs(6000),
+            Setting::Level(LoudnessLevel::Loud),
+        ];
+        let undo: Vec<Setting> = change
+            .iter()
+            .map(|setting| prefs.current(*setting))
+            .collect();
+        assert_eq!(
+            undo,
+            vec![
+                Setting::Crossfade(true),
+                Setting::CrossfadeMs(2000),
+                Setting::Level(LoudnessLevel::Normal)
+            ]
+        );
+        let before = prefs.clone();
+        for setting in change {
+            prefs.apply(setting);
+        }
+        for setting in undo {
+            prefs.apply(setting);
+        }
+        assert_eq!(prefs, before);
+    }
+
+    #[test]
+    fn keeps_local_choices_while_their_writes_are_out() {
+        let mut writing = Writing::default();
+        writing.start(&[Setting::CrossfadeMs(3000)]);
+        writing.start(&[Setting::CrossfadeMs(6000)]);
+        let echo = vec![Setting::CrossfadeMs(3000), Setting::Gapless(false)];
+        assert_eq!(writing.settled(echo), vec![Setting::Gapless(false)]);
+
+        let mut prefs = AudioPrefs {
+            crossfade: true,
+            crossfade_ms: 6000,
+            ..AudioPrefs::default()
+        };
+        writing.merge(
+            &mut prefs,
+            &Remote {
+                user: Some(UserAudio {
+                    gapless: false,
+                    crossfade: true,
+                    crossfade_ms: 3000,
+                }),
+                device: None,
+                speeds: HashMap::new(),
+            },
+        );
+        assert_eq!(prefs.crossfade_ms, 6000);
+        assert!(!prefs.gapless);
+
+        writing.finish(&[Setting::CrossfadeMs(3000)]);
+        assert!(writing.busy(Setting::CrossfadeMs(0)));
+        writing.finish(&[Setting::CrossfadeMs(6000)]);
+        assert!(!writing.busy(Setting::CrossfadeMs(0)));
+        assert_eq!(
+            writing.settled(vec![Setting::CrossfadeMs(2000)]),
+            vec![Setting::CrossfadeMs(2000)]
+        );
     }
 
     #[test]
