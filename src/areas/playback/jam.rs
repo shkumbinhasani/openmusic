@@ -13,6 +13,7 @@ use gpui_component::{
 };
 use spotify_client::{
     Track,
+    connect::ConnectDevice,
     jam::{self, Change, JoinMode, Member, Person, Session, SessionUpdate, VolumeControl},
 };
 
@@ -113,6 +114,16 @@ impl JamState {
 
 pub fn queue_only_guest(session: Option<&Session>) -> bool {
     session.is_some_and(|session| !session.is_owner && session.queue_only)
+}
+
+pub fn host_volume_only(session: Option<&Session>, active: Option<&ConnectDevice>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+    let host_speaker = active.is_none_or(|device| !device.this_mac);
+    let locked = !session.is_owner && session.volume_control != VolumeControl::Enabled;
+    let unaddressable = session.redirect_commands && active.is_none();
+    (locked && host_speaker) || unaddressable
 }
 
 pub fn people_label(count: usize) -> String {
@@ -1539,6 +1550,36 @@ mod tests {
             ..session(false)
         };
         assert!(queue_only_guest(Some(&guest)));
+    }
+
+    #[test]
+    fn keeps_the_volume_with_the_host_when_a_guest_cannot_reach_it() {
+        let speaker = |this_mac| ConnectDevice {
+            this_mac,
+            ..ConnectDevice::default()
+        };
+        let (mac, remote) = (speaker(true), speaker(false));
+        let guest = Session {
+            volume_control: VolumeControl::Enabled,
+            ..session(false)
+        };
+        assert!(!host_volume_only(None, None));
+        assert!(!host_volume_only(Some(&guest), None));
+        assert!(!host_volume_only(Some(&guest), Some(&remote)));
+        let locked = Session {
+            volume_control: VolumeControl::Disabled,
+            ..guest.clone()
+        };
+        assert!(host_volume_only(Some(&locked), None));
+        assert!(host_volume_only(Some(&locked), Some(&remote)));
+        assert!(!host_volume_only(Some(&locked), Some(&mac)));
+        let redirected = Session {
+            redirect_commands: true,
+            ..guest
+        };
+        assert!(host_volume_only(Some(&redirected), None));
+        assert!(!host_volume_only(Some(&redirected), Some(&remote)));
+        assert!(!host_volume_only(Some(&redirected), Some(&mac)));
     }
 
     #[test]

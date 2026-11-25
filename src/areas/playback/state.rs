@@ -17,7 +17,7 @@ use spotify_client::{
     dj::{self, Dj},
     engine::NowPlaying,
     entity,
-    jam::{JoinMode, VolumeControl},
+    jam::JoinMode,
 };
 
 use super::{
@@ -1204,11 +1204,7 @@ impl OpenMusic {
     }
 
     pub fn volume_state(&self) -> (bool, Option<String>) {
-        let host_speaker = self.remote_device().is_some() || self.active_device().is_none();
-        if self.jam().is_some_and(|session| {
-            !session.is_owner && session.volume_control != VolumeControl::Enabled
-        }) && host_speaker
-        {
+        if jams::host_volume_only(self.jam(), self.active_device()) {
             return (false, Some(HOST_VOLUME.to_owned()));
         }
         match self.remote_device() {

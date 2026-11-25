@@ -181,14 +181,12 @@ impl Engine {
         if let Some(target) = self.remote_target() {
             return Some(target);
         }
-        let player = matches!(
-            control,
-            super::Control::SetPlaying(_)
-                | super::Control::Next
-                | super::Control::Previous
-                | super::Control::Seek(_)
-        );
-        (self.redirected() && player).then(|| self.command_target())
+        let idle = self
+            .playback
+            .as_ref()
+            .and_then(Playback::active_device)
+            .is_none();
+        (self.redirected() && for_host(control, idle)).then(|| self.command_target())
     }
 
     fn redirected(&self) -> bool {
@@ -644,9 +642,30 @@ impl Engine {
     }
 }
 
+fn for_host(control: &super::Control, idle: bool) -> bool {
+    match control {
+        super::Control::SetPlaying(_)
+        | super::Control::Next
+        | super::Control::Previous
+        | super::Control::Seek(_) => true,
+        super::Control::Volume(_) => idle,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sends_a_redirected_guests_controls_to_the_host() {
+        use super::super::Control;
+        assert!(for_host(&Control::Next, false));
+        assert!(for_host(&Control::Seek(1000), true));
+        assert!(for_host(&Control::Volume(100), true));
+        assert!(!for_host(&Control::Volume(100), false));
+        assert!(!for_host(&Control::PlayHere, true));
+    }
 
     #[test]
     fn never_retries_older_commands_once_the_jam_is_gone() {
