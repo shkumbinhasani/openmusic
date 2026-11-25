@@ -276,6 +276,7 @@ struct PlaybackKey {
     speed: u32,
     allowed: Allowed,
     revision: String,
+    tracks: u64,
     devices: Vec<ConnectDevice>,
     signals: Vec<String>,
     sleep: SleepState,
@@ -294,12 +295,26 @@ impl PlaybackKey {
             speed: playback.playback_speed.to_bits(),
             allowed: playback.allowed,
             revision: playback.queue.revision.clone(),
+            tracks: queue_tracks(&playback.queue),
             devices: playback.devices.clone(),
             signals: playback.signals.clone(),
             sleep: playback.sleep_timer,
             jam: playback.jam_mode.clone(),
         }
     }
+}
+
+fn queue_tracks(queue: &connect::Queue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    for side in [&queue.raw_prev, &queue.raw_next] {
+        side.len().hash(&mut hasher);
+        for track in side {
+            track.uid.hash(&mut hasher);
+            track.uri.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 const POSITION_DRIFT_MS: u32 = 1500;
@@ -848,6 +863,36 @@ mod tests {
         ] {
             assert!(!is_push(uri), "{uri}");
         }
+    }
+
+    #[test]
+    fn republishes_a_refetched_queue_under_the_same_revision() {
+        use spotify_proto::connectstate::{Cluster, PlayerState, ProvidedTrack};
+        let track = |uri: &str, uid: &str| ProvidedTrack {
+            uri: uri.into(),
+            uid: uid.into(),
+            ..Default::default()
+        };
+        let cluster = |next: Vec<ProvidedTrack>| Cluster {
+            player_state: Some(PlayerState {
+                track: Some(track("spotify:track:a", "u1")),
+                queue_revision: "7".into(),
+                next_tracks: next,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let pushed = connect::playback(&cluster(Vec::new()), "own");
+        let fetched = connect::playback(
+            &cluster(vec![
+                track("spotify:track:b", "u2"),
+                track("spotify:track:c", "u3"),
+            ]),
+            "own",
+        );
+        assert_eq!(pushed.queue.revision, fetched.queue.revision);
+        assert!(PlaybackKey::of(&pushed) != PlaybackKey::of(&fetched));
+        assert!(PlaybackKey::of(&fetched) == PlaybackKey::of(&fetched.clone()));
     }
 
     #[test]
