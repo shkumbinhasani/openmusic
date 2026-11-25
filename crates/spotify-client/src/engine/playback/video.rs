@@ -5,6 +5,7 @@ use reqwest::Method;
 use serde_json::Value;
 
 use super::{
+    Update,
     gain::linear,
     source::{Pick, audio_pick, video_manifest},
 };
@@ -95,9 +96,25 @@ impl Opened {
     }
 }
 
+const REFUSED: &str = "This video can’t play right now, so OpenMusic plays its audio.";
+
 #[derive(Default)]
 pub(super) struct Video {
     pub(super) prefs: VideoPrefs,
+    refused: Option<String>,
+}
+
+impl Video {
+    pub(super) fn prefs_for(&self, uri: &str) -> VideoPrefs {
+        if self.refused.as_deref() == Some(uri) {
+            VideoPrefs {
+                music: false,
+                podcasts: false,
+            }
+        } else {
+            self.prefs
+        }
+    }
 }
 
 pub(super) fn offer(uri: &str, track: &Value, carried: Option<Carried>) -> Option<VideoStatus> {
@@ -148,7 +165,7 @@ impl Engine {
         {
             self.audio.gains.learn(uri, measured);
         }
-        let show = self.audio.video.prefs.wants(uri) && manifest.has_video();
+        let show = self.audio.video.prefs_for(uri).wants(uri) && manifest.has_video();
         let (playlists, root) = director::playlists(&manifest, show)?;
         let key = match &manifest.protection {
             Some(protection) => Some(HlsKey {
@@ -202,6 +219,7 @@ impl Engine {
             return;
         }
         self.audio.video.prefs = prefs;
+        self.audio.video.refused = None;
         self.discard_prepared();
         self.audio.joins.tried = None;
         self.swap_media().await;
@@ -222,7 +240,7 @@ impl Engine {
             return;
         }
         let uri = playing.uri().to_owned();
-        if !needs_swap(playing.video, self.audio.video.prefs, &uri) {
+        if !needs_swap(playing.video, self.audio.video.prefs_for(&uri), &uri) {
             return;
         }
         let Some(track) = playing.track().cloned() else {
@@ -278,6 +296,31 @@ impl Engine {
             if shown { "video" } else { "audio" }
         ));
         self.report("modify_current_state").await;
+    }
+
+    pub(super) async fn video_failed(&mut self, generation: u64, message: &str) -> bool {
+        let Some(playing) = self
+            .playing
+            .as_ref()
+            .filter(|playing| playing.generation == generation)
+        else {
+            return false;
+        };
+        if !playing.video.is_some_and(|video| video.on) {
+            return false;
+        }
+        let uri = playing.uri().to_owned();
+        if self.audio.video.refused.as_deref() == Some(uri.as_str()) {
+            return false;
+        }
+        self.audio.video.refused = Some(uri.clone());
+        self.audio
+            .note(format!("video refused for {uri}: {message}"));
+        self.audio.updates.push(Update::Notice(REFUSED.to_owned()));
+        self.swap_media().await;
+        self.playing
+            .as_ref()
+            .is_some_and(|playing| !playing.video.is_some_and(|video| video.on))
     }
 
     pub(super) async fn watch(&mut self, uri: String, position_ms: u32) -> Result<()> {
@@ -349,6 +392,15 @@ mod tests {
             })
         );
         assert_eq!(offer("spotify:local:a:b:c:1", &video, Some(carried)), None);
+    }
+
+    #[test]
+    fn keeps_a_refused_video_as_audio() {
+        let mut video = Video::default();
+        assert_eq!(video.prefs_for(TRACK), VideoPrefs::default());
+        video.refused = Some(TRACK.into());
+        assert!(!video.prefs_for(TRACK).wants(TRACK));
+        assert!(video.prefs_for(EPISODE).wants(EPISODE));
     }
 
     #[test]

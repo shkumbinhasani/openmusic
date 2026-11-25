@@ -1080,7 +1080,8 @@ impl Engine {
                 generation,
                 message,
             } => {
-                if self.prepared_failed(generation) {
+                if self.prepared_failed(generation) || self.video_failed(generation, &message).await
+                {
                     return;
                 }
                 let current = self.playing.as_ref().map(|playing| playing.generation);

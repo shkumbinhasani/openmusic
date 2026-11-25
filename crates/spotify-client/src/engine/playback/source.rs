@@ -172,8 +172,8 @@ impl Engine {
             bail!(BOOK);
         }
         let ceiling = self.bitrate_ceiling();
-        let video = self.audio.video.prefs;
         let uri = uri(track);
+        let video = self.audio.video.prefs_for(uri);
         if video.wants(uri)
             && is_video_track(track)
             && video_manifest(&track["manifest"]).is_none()
