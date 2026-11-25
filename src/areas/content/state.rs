@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     path::Path,
     time::{Duration, Instant},
@@ -25,6 +25,7 @@ use crate::{
 };
 
 const REFRESH_AFTER_PLAYBACK_MS: u64 = 3000;
+const REFRESH_AFTER_MARK_MS: u64 = 1500;
 const PROGRESS_REDRAW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -43,6 +44,8 @@ pub struct State {
     pub show_end: Sentinel,
     pub about_open: bool,
     pub episode: Option<(String, Result<Episode, String>)>,
+    pub marks: HashMap<String, bool>,
+    pub marking: HashMap<String, Option<bool>>,
     pub unavailable: HashSet<String>,
     pub progress_drawn: Option<Instant>,
 }
@@ -109,6 +112,14 @@ impl State {
             *episode = Ok(fresh.clone());
         }
         self.note(std::slice::from_ref(fresh));
+        if !self.marking.contains_key(&fresh.uri)
+            && self
+                .marks
+                .get(&fresh.uri)
+                .is_some_and(|mark| *mark == fresh.played.finished())
+        {
+            self.marks.remove(&fresh.uri);
+        }
     }
 }
 
@@ -208,14 +219,27 @@ impl OpenMusic {
     }
 
     pub fn played(&self, episode: &Episode) -> Played {
-        if self.is_current(&episode.uri) {
+        let base = if self.is_current(&episode.uri) {
             match self.playback.now.position() {
                 0 => episode.played,
                 position => Played::InProgress(position),
             }
         } else {
             episode.played
-        }
+        };
+        podcast::effective(base, self.content.marks.get(&episode.uri).copied())
+    }
+
+    pub fn played_uri(&self, uri: &str) -> Option<Played> {
+        self.content
+            .loaded_episode(uri)
+            .map(|episode| self.played(episode))
+            .or_else(|| {
+                self.content
+                    .marks
+                    .get(uri)
+                    .map(|mark| podcast::effective(Played::NotStarted, Some(*mark)))
+            })
     }
 
     pub fn show_resume(&self, show: &Show) -> Option<(usize, bool)> {
@@ -287,6 +311,31 @@ impl OpenMusic {
         if let Some((index, _)) = self.show_resume(show) {
             self.play_show_episode(index, cx);
         }
+    }
+
+    pub fn mark_played(&mut self, uris: Vec<String>, played: bool) {
+        let uris: Vec<String> = uris
+            .into_iter()
+            .filter(|uri| {
+                (is_episode(uri) || uri.starts_with("spotify:show:"))
+                    && !self.content.marking.contains_key(uri)
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if uris.is_empty() {
+            return;
+        }
+        for uri in &uris {
+            let before = self.content.marks.insert(uri.clone(), played);
+            self.content.marking.insert(uri.clone(), before);
+        }
+        self.send(Command::MarkPlayed { uris, played });
+    }
+
+    pub fn toggle_played(&mut self, uri: &str) {
+        let finished = self.played_uri(uri).is_some_and(Played::finished);
+        self.mark_played(vec![uri.to_owned()], !finished);
     }
 
     pub fn load_more_episodes(&mut self) {
@@ -473,6 +522,28 @@ pub fn on_event(
                 app.content.patch(episode);
             }
         }
+        Event::Marked { uris, error } => {
+            let mut settled = Vec::new();
+            for uri in &uris {
+                let before = app.content.marking.remove(uri).flatten();
+                if error.is_some() {
+                    match before {
+                        Some(mark) => app.content.marks.insert(uri.clone(), mark),
+                        None => app.content.marks.remove(uri),
+                    };
+                } else if is_episode(uri) {
+                    settled.push(uri.clone());
+                }
+            }
+            if let Some(message) = error {
+                app.show_toast(message, None);
+            } else if !settled.is_empty() {
+                app.send(Command::Refresh {
+                    uris: settled,
+                    delay_ms: REFRESH_AFTER_MARK_MS,
+                });
+            }
+        }
     }
 }
 
@@ -546,6 +617,9 @@ pub fn debug(
             app.content.show_error = None;
             app.load_more_episodes();
         }
+        ("markplayed", [uri, setting @ ("on" | "off")]) => {
+            app.mark_played(vec![(*uri).to_owned()], *setting == "on");
+        }
         ("content", []) => {
             let mut lines = String::new();
             match &app.content.show {
@@ -577,6 +651,14 @@ pub fn debug(
                     let _ = writeln!(lines, "episode {uri} error={error:?}");
                 }
                 None => lines.push_str("episode none\n"),
+            }
+            for (uri, mark) in &app.content.marks {
+                let pending = if app.content.marking.contains_key(uri) {
+                    " pending"
+                } else {
+                    ""
+                };
+                let _ = writeln!(lines, "mark {uri} {mark}{pending}");
             }
             let _ = std::fs::write(directory.join("content.txt"), lines);
         }
@@ -660,6 +742,11 @@ pub fn on_press(
             if let Some(uri) = episode_uri() {
                 let saved = app.is_saved(&uri).unwrap_or(false);
                 app.set_saved(vec![uri], !saved);
+            }
+        }
+        "episode-played" => {
+            if let Some(uri) = episode_uri() {
+                app.toggle_played(&uri);
             }
         }
         "episode-show" => {
@@ -749,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn patches_fresh_played_state() {
+    fn patches_fresh_played_state_and_settles_marks() {
         let mut state = State::default();
         let show = Show {
             uri: "spotify:show:s".into(),
@@ -773,6 +860,8 @@ mod tests {
         state.note(&show.episodes);
         assert!(state.unavailable.contains("spotify:episode:b"));
         state.show = Some(("spotify:show:s".into(), Ok(show)));
+        state.marks.insert("spotify:episode:a".into(), true);
+        state.marking.insert("spotify:episode:a".into(), None);
 
         let fresh = episode(
             "spotify:episode:a",
@@ -783,6 +872,15 @@ mod tests {
         let patched = state.loaded_episode("spotify:episode:a").unwrap();
         assert_eq!(patched.played, Played::Completed);
         assert_eq!(patched.uid.as_deref(), Some("row"));
+        assert!(state.marks.contains_key("spotify:episode:a"));
+
+        state.marking.clear();
+        state.patch(&fresh);
+        assert!(!state.marks.contains_key("spotify:episode:a"));
+
+        state.marks.insert("spotify:episode:a".into(), false);
+        state.patch(&fresh);
+        assert_eq!(state.marks.get("spotify:episode:a"), Some(&false));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use spotify_client::{
 };
 
 use super::state::ContentPrefs;
-use crate::worker::Ctx;
+use crate::worker::{Ctx, Mutation, User};
 
 pub enum Command {
     Lyrics(String),
@@ -22,6 +22,10 @@ pub enum Command {
     Refresh {
         uris: Vec<String>,
         delay_ms: u64,
+    },
+    MarkPlayed {
+        uris: Vec<String>,
+        played: bool,
     },
 }
 
@@ -44,6 +48,10 @@ pub enum Event {
         result: Result<Box<Episode>, String>,
     },
     Refreshed(Vec<Episode>),
+    Marked {
+        uris: Vec<String>,
+        error: Option<String>,
+    },
 }
 
 impl Event {
@@ -76,7 +84,8 @@ impl Event {
             | Self::Show { .. }
             | Self::ShowPage { .. }
             | Self::Episode { .. }
-            | Self::Refreshed(_) => Vec::new(),
+            | Self::Refreshed(_)
+            | Self::Marked { .. } => Vec::new(),
         }
     }
 }
@@ -100,6 +109,12 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                     refresh(ctx.api.clone(), uri, Duration::from_millis(delay_ms)),
                 );
             }
+        }
+        Command::MarkPlayed { uris, played } => {
+            let keys = uris.iter().map(|uri| format!("played {uri}")).collect();
+            let run = mark(ctx.api.clone(), ctx.user.clone(), uris, played);
+            ctx.writes
+                .push(Mutation::new(keys, async move { Ok(run.await) }));
         }
     }
 }
@@ -153,4 +168,19 @@ async fn refresh(api: Api, uri: String, delay: Duration) -> crate::worker::Event
     tokio::time::sleep(delay).await;
     let fresh = podcast::episode(&api, &uri).await.ok();
     Event::Refreshed(fresh.into_iter().collect()).into()
+}
+
+async fn mark(api: Api, user: User, uris: Vec<String>, played: bool) -> crate::worker::Event {
+    let written = match user.name(&api).await {
+        Ok(name) => podcast::mark_played(&api, &name, &uris, played).await,
+        Err(error) => Err(error),
+    };
+    let error = written.err().map(|_| {
+        if played {
+            "Couldn’t mark this as finished. Try again.".to_owned()
+        } else {
+            "Couldn’t mark this as not started. Try again.".to_owned()
+        }
+    });
+    Event::Marked { uris, error }.into()
 }

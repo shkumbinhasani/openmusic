@@ -1182,6 +1182,17 @@ impl OpenMusic {
                                         )
                                         .w(px(80.)),
                                     )
+                                    .child(self.text_control(
+                                        "episode-played",
+                                        if played.finished() {
+                                            "Mark as not started"
+                                        } else {
+                                            "Mark as finished"
+                                        },
+                                        false,
+                                        palette,
+                                        cx,
+                                    ))
                             }
                         })
                         .when(has_menu, |actions| {
@@ -1247,8 +1258,29 @@ impl OpenMusic {
     }
 }
 
-pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    Vec::new()
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    let uri = match target {
+        Target::Episode { uri } => uri.clone(),
+        Target::Track(track) if track.track.uri.starts_with("spotify:episode:") => {
+            track.track.uri.clone()
+        }
+        _ => return Vec::new(),
+    };
+    let finished = app.played_uri(&uri).is_some_and(Played::finished);
+    let pending = app.content.marking.contains_key(&uri);
+    let (title, symbol) = if finished {
+        ("Mark as not started", "arrow.counterclockwise.circle")
+    } else {
+        ("Mark as finished", "checkmark.circle")
+    };
+    vec![(
+        Group::Library,
+        MenuItem::action(title, move |app, _, _| {
+            app.mark_played(vec![uri.clone()], !finished)
+        })
+        .symbol(symbol)
+        .enabled(!pending),
+    )]
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
