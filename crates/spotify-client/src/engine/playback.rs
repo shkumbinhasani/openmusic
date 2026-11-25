@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -19,10 +19,12 @@ use crate::{
 };
 use gain::{Gains, linear, state_options};
 use join::{Joins, Taken};
+use local::LocalQueue;
 pub use source::MANIFEST_FORMATS;
 
 mod gain;
 mod join;
+mod local;
 mod source;
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,7 @@ pub struct AudioReport {
     pub prepared: Option<ReportPrepared>,
     pub joins: Vec<String>,
     pub player: Snapshot,
+    pub local: Option<String>,
 }
 
 impl fmt::Display for AudioReport {
@@ -167,6 +170,9 @@ impl fmt::Display for AudioReport {
         for join in &self.joins {
             writeln!(f, "join {join}")?;
         }
+        if let Some(local) = &self.local {
+            writeln!(f, "local {local}")?;
+        }
         Ok(())
     }
 }
@@ -177,6 +183,8 @@ pub(super) struct State {
     updates: Vec<Update>,
     joins: Joins,
     gains: Gains,
+    local: Option<LocalQueue>,
+    unloaded: bool,
 }
 
 impl State {
@@ -328,7 +336,7 @@ impl Playing {
 impl Engine {
     pub(super) async fn audio(&mut self, control: Control) -> Result<()> {
         match control {
-            Control::PlayLocal { .. } => bail!("Local files can’t play yet."),
+            Control::PlayLocal { tracks, index } => self.play_local(tracks, index).await?,
             Control::Settings(settings) => {
                 self.audio.settings = settings;
                 self.check_prepared();
@@ -368,6 +376,7 @@ impl Engine {
                 .map(|prepared| prepared.report()),
             joins: self.audio.joins.log.clone(),
             player: self.player.snapshot(),
+            local: self.audio.local.as_ref().map(LocalQueue::describe),
         }
     }
 
@@ -520,6 +529,23 @@ impl Engine {
             .and_then(|playing| playing.state().map(|state| state["state_id"].clone()))
             == new_state_id
             && new_state_id.is_some();
+        if same && (self.audio.unloaded || self.local_active()) {
+            let Some(playing) = self.playing.as_mut() else {
+                return;
+            };
+            playing.machine = machine;
+            playing.index = index;
+            if let Some(seek) = seek {
+                playing.position_ms = seek;
+            }
+            if paused {
+                self.check_prepared();
+                self.report("modify_current_state").await;
+            } else {
+                self.reload().await;
+            }
+            return;
+        }
         if same {
             let Some(playing) = self.playing.as_mut() else {
                 return;
@@ -606,6 +632,10 @@ impl Engine {
         paused: bool,
         seek: Option<u32>,
     ) -> Result<()> {
+        if !paused {
+            self.end_local();
+        }
+        self.audio.unloaded = false;
         self.discard_prepared();
         self.audio.joins.tried = None;
         self.generation += 1;
@@ -635,6 +665,10 @@ impl Engine {
         self.playing = Some(playing);
         self.audio.joins.record(format!("cold {generation}"));
         self.report("before_track_load").await;
+        if self.local_active() {
+            self.audio.unloaded = true;
+            return Ok(());
+        }
 
         let api = self.api.clone();
         let (found, opened) = tokio::join!(loudness::fetch(&api, &missing), self.open(&pick, &uri));
@@ -753,6 +787,9 @@ impl Engine {
     }
 
     pub(super) async fn player_event(&mut self, event: PlayerEvent) {
+        if self.local_event(&event).await {
+            return;
+        }
         match event {
             PlayerEvent::Ready {
                 generation,
@@ -888,8 +925,11 @@ impl Engine {
     }
 
     pub(super) fn stop_local(&mut self) {
-        self.player.stop();
+        if !self.local_active() {
+            self.player.stop();
+        }
         self.playing = None;
+        self.audio.unloaded = false;
         self.audio.joins.reset();
     }
 

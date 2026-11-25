@@ -6,6 +6,7 @@ use std::{
 use gpui::{App, Context, Window};
 use serde::{Deserialize, Serialize};
 use spotify_client::{
+    catalog::LocalTrack,
     engine::playback::AudioSettings,
     playback_settings::{LoudnessLevel, MAX_CROSSFADE_MS, Remote, Setting},
 };
@@ -94,6 +95,10 @@ impl OpenMusic {
             }
         });
         self.send(Command::Write(settings));
+    }
+
+    pub fn play_local(&mut self, tracks: Vec<LocalTrack>, index: usize) {
+        self.send(Command::PlayLocal { tracks, index });
     }
 
     pub fn set_gapless(&mut self, on: bool) {
@@ -205,6 +210,21 @@ pub fn signed_out(app: &mut OpenMusic) {
     app.audio = State::default();
 }
 
+fn debug_local_track(path: &str) -> LocalTrack {
+    let path = PathBuf::from(path.trim());
+    let title = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let part = title.replace(':', " ").replace(' ', "+");
+    LocalTrack {
+        uri: format!("spotify:local:::{part}:0"),
+        path,
+        title,
+        ..LocalTrack::default()
+    }
+}
+
 fn switch(text: &str) -> Option<bool> {
     match text {
         "on" | "true" => Some(true),
@@ -238,6 +258,16 @@ pub fn debug(
                 (Some(on), _) => app.set_crossfade(on, ms),
                 (None, Ok(ms)) => app.set_crossfade(true, ms),
                 _ => {}
+            }
+        }
+        "playlocal" => {
+            let tracks: Vec<LocalTrack> = rest
+                .split('|')
+                .filter(|path| !path.trim().is_empty())
+                .map(debug_local_track)
+                .collect();
+            if !tracks.is_empty() {
+                app.play_local(tracks, 0);
             }
         }
         "normalize" => match (switch(rest), LoudnessLevel::parse(rest)) {
@@ -291,6 +321,14 @@ mod tests {
 
     use super::*;
     use crate::app::settings::Settings;
+
+    #[test]
+    fn names_debug_files_after_their_path() {
+        let track = debug_local_track(" /tmp/Some Song: Live.m4a ");
+        assert_eq!(track.path, PathBuf::from("/tmp/Some Song: Live.m4a"));
+        assert_eq!(track.title, "Some Song: Live");
+        assert_eq!(track.uri, "spotify:local:::Some+Song++Live:0");
+    }
 
     #[test]
     fn starts_from_the_desktop_defaults() {

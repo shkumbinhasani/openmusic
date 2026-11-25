@@ -1,4 +1,5 @@
 use spotify_client::{
+    catalog::LocalTrack,
     dealer::Message,
     engine::{
         Control,
@@ -16,6 +17,10 @@ pub enum Command {
     Sync,
     Write(Vec<Setting>),
     Report,
+    PlayLocal {
+        tracks: Vec<LocalTrack>,
+        index: usize,
+    },
 }
 
 pub enum Event {
@@ -79,6 +84,13 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 }));
         }
         Command::Report => ctx.handle.send(Control::Audio(playback::Control::Report)),
+        Command::PlayLocal { tracks, index } => {
+            ctx.handle
+                .send(Control::Audio(playback::Control::PlayLocal {
+                    tracks,
+                    index,
+                }))
+        }
     }
 }
 

@@ -550,6 +550,9 @@ impl Engine {
     }
 
     fn now(&self) -> NowPlaying {
+        if let Some(now) = self.local_now() {
+            return now;
+        }
         if let Some(playing) = self.playing.as_ref().filter(|_| self.is_active_here()) {
             let track = playing.metadata();
             let here = self.playback_here();
@@ -700,6 +703,9 @@ impl Engine {
             Control::Remote(control) => return self.remote_control(control).await,
             Control::Audio(control) => return self.audio(control).await,
             control => control,
+        };
+        let Some(control) = self.local_control(control).await else {
+            return Ok(());
         };
         if let Some(target) = self.remote_target().filter(|_| {
             !matches!(
