@@ -15,7 +15,8 @@ pub enum Intent {
     Previous,
     SeekTo(u32),
     SeekBy(i32),
-    VolumeBy(i32),
+    VolumeUp,
+    VolumeDown,
     ToggleShuffle,
     CycleRepeat,
     ToggleLike,
@@ -41,7 +42,8 @@ impl Intent {
             "previous" => bare(Self::Previous),
             "seekto" => rest.parse().ok().map(Self::SeekTo),
             "seekby" => rest.parse().ok().map(Self::SeekBy),
-            "volumeby" => rest.parse().ok().map(Self::VolumeBy),
+            "volumeup" => bare(Self::VolumeUp),
+            "volumedown" => bare(Self::VolumeDown),
             "shuffle" => bare(Self::ToggleShuffle),
             "repeat" => bare(Self::CycleRepeat),
             "like" => bare(Self::ToggleLike),
@@ -79,12 +81,8 @@ impl OpenMusic {
                     self.seek_to(position, cx);
                 }
             }
-            Intent::VolumeBy(delta) => {
-                let volume = (i32::from(self.playback.now.volume) + delta)
-                    .clamp(0, i32::from(u16::MAX)) as u16;
-                self.playback.now.volume = volume;
-                self.send(Command::Volume(volume));
-            }
+            Intent::VolumeUp => self.step_volume(true, cx),
+            Intent::VolumeDown => self.step_volume(false, cx),
             Intent::ToggleShuffle => self.toggle_shuffle(cx),
             Intent::CycleRepeat => self.cycle_repeat(cx),
             Intent::ToggleLike => self.like_current(),
@@ -118,7 +116,8 @@ mod tests {
     fn parses_debug_intents() {
         assert_eq!(Intent::parse("playpause"), Some(Intent::PlayPause));
         assert_eq!(Intent::parse("seekby -15000"), Some(Intent::SeekBy(-15000)));
-        assert_eq!(Intent::parse("volumeby 4096"), Some(Intent::VolumeBy(4096)));
+        assert_eq!(Intent::parse("volumeup"), Some(Intent::VolumeUp));
+        assert_eq!(Intent::parse("volumedown 4096"), None);
         assert_eq!(
             Intent::parse("playcontext spotify:album:1b5KESuOMQomF3wntoLAsk"),
             Some(Intent::PlayContext(

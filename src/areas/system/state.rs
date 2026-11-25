@@ -47,7 +47,6 @@ pub struct SystemPrefs {
 
 pub const TRACK_SEEK_MS: i32 = 5_000;
 pub const EPISODE_SEEK_MS: i32 = 15_000;
-pub const VOLUME_STEP: i32 = 4096;
 pub const THROTTLE: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
@@ -406,11 +405,16 @@ impl OpenMusic {
         self.act(Intent::SeekBy(direction * step), window, cx);
     }
 
-    pub fn volume_key(&mut self, direction: i32, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn volume_key(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !allow(&mut self.system.throttle.volume, Instant::now()) {
             return;
         }
-        self.act(Intent::VolumeBy(direction * VOLUME_STEP), window, cx);
+        let intent = if up {
+            Intent::VolumeUp
+        } else {
+            Intent::VolumeDown
+        };
+        self.act(intent, window, cx);
     }
 
     pub fn now_playing_snapshot(&self) -> Option<Snapshot> {
@@ -870,10 +874,10 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.seek_key(-1, window, cx)
     });
     route(cx, handle, |_: &VolumeUp, app, window, cx| {
-        app.volume_key(1, window, cx)
+        app.volume_key(true, window, cx)
     });
     route(cx, handle, |_: &VolumeDown, app, window, cx| {
-        app.volume_key(-1, window, cx)
+        app.volume_key(false, window, cx)
     });
     route(cx, handle, |_: &GoBack, app, window, cx| {
         app.perform(Intent::Back, window, cx)
@@ -995,11 +999,5 @@ mod tests {
         assert!(allow(&mut last, start + Duration::from_millis(100)));
         assert!(!allow(&mut last, start + Duration::from_millis(150)));
         assert!(allow(&mut last, start + Duration::from_millis(230)));
-    }
-
-    #[test]
-    fn four_volume_steps_make_a_quarter() {
-        assert_eq!(VOLUME_STEP * 4, 16_384);
-        assert_eq!(VOLUME_STEP * 16, 65_536);
     }
 }
