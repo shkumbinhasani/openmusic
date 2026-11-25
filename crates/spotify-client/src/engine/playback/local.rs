@@ -43,17 +43,22 @@ impl LocalQueue {
         self.tracks.get(self.index)
     }
 
+    pub(super) fn at_end(&self) -> bool {
+        self.index + 1 >= self.tracks.len()
+    }
+
     pub(super) fn step(&self, forward: bool) -> Step {
         if forward {
-            match self.index + 1 {
-                next if next < self.tracks.len() => Step {
-                    index: next,
-                    play: true,
-                },
-                _ => Step {
+            if self.at_end() {
+                Step {
                     index: 0,
                     play: false,
-                },
+                }
+            } else {
+                Step {
+                    index: self.index + 1,
+                    play: true,
+                }
             }
         } else {
             Step {
@@ -167,6 +172,10 @@ impl Engine {
         let Some(queue) = self.audio.local.as_ref() else {
             return;
         };
+        if queue.at_end() && self.audio.unloaded {
+            self.end_local();
+            return;
+        }
         let step = queue.step(true);
         let play = step.play && !self.sleep_after_track();
         self.go_local(Step { play, ..step });
@@ -340,6 +349,7 @@ mod tests {
     #[test]
     fn moves_through_the_files_and_wraps_paused() {
         let mut queue = LocalQueue::new(tracks(), 0).unwrap();
+        assert!(!queue.at_end());
         assert_eq!(
             queue.step(true),
             Step {
@@ -355,6 +365,7 @@ mod tests {
             }
         );
         queue.index = 2;
+        assert!(queue.at_end());
         assert_eq!(
             queue.step(true),
             Step {
