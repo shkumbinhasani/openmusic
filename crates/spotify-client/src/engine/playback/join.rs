@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::{
     AudioSettings, Ending, Playing, ReportPrepared,
-    gain::{fetch_loudness, linear},
+    gain::{SIDE_LOOKUP, fetch_loudness, linear},
     mix::blend_at,
     narration::is_narration,
     quality::{choose, reported_quality},
@@ -334,7 +334,8 @@ impl Engine {
         };
         let duration_ms = track["metadata"]["duration"].as_u64().unwrap_or_default() as u32;
         let missing = self.audio.gains.missing(&playing.machine);
-        let Ok(pick) = self.resolve(&track).await else {
+        let deadline = tokio::time::Instant::now() + SIDE_LOOKUP;
+        let Ok(Ok(pick)) = tokio::time::timeout_at(deadline, self.resolve(&track)).await else {
             self.audio.joins.tried = Some(source);
             return;
         };
@@ -344,10 +345,16 @@ impl Engine {
         self.generation += 1;
         let generation = self.generation;
         let api = self.api.clone();
-        let (found, opened) = tokio::join!(
-            fetch_loudness(&api, &missing),
-            self.open(&pick, &target.uri)
-        );
+        let opening = async {
+            tokio::join!(
+                fetch_loudness(&api, &missing),
+                self.open(&pick, &target.uri)
+            )
+        };
+        let Ok((found, opened)) = tokio::time::timeout_at(deadline, opening).await else {
+            self.audio.joins.tried = Some(source);
+            return;
+        };
         self.store_loudness(found);
         let Ok(Opened {
             media,
