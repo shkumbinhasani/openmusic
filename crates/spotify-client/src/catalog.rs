@@ -800,10 +800,6 @@ pub async fn station(api: &Api, seed: &str) -> Result<Vec<Track>> {
     Ok(tracks)
 }
 
-pub async fn liked(api: &Api, limit: usize) -> Result<Vec<Track>> {
-    context_tracks(api, "spotify:collection:tracks", limit).await
-}
-
 #[derive(Clone, Debug)]
 pub struct Lyrics {
     pub synced: bool,

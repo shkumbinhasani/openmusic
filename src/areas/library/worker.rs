@@ -1,17 +1,19 @@
+use std::sync::Arc;
+
 use spotify_client::{
     Api, Track,
-    catalog::{self, Playlist},
+    catalog::{self, ContextItem, Playlist},
     dealer::Message,
     library::{
-        self, LibraryError, LibraryPage, LibraryPush, LibraryQuery, LikedPage, PinResult,
-        PlayedContext, RecentEntry, RecentsPage, Rootlist,
+        self, LIKED_PAGE_SIZE, LIKED_SONGS, LibraryError, LibraryPage, LibraryPush, LibraryQuery,
+        LikedPage, PinResult, PlayedContext, RecentEntry, RecentsPage, Rootlist,
     },
 };
 
 use super::{cache, state::LibraryPrefs};
 use crate::worker::{self, Ctx, Mutation, User};
 
-const LIKED_FALLBACK: usize = 1000;
+pub type LikedList = Arc<[ContextItem]>;
 
 pub enum Command {
     Playlists,
@@ -33,6 +35,7 @@ pub enum Command {
     Liked {
         offset: u32,
         request: u64,
+        fallback: Option<LikedList>,
     },
     Grid {
         query: LibraryQuery,
@@ -76,6 +79,7 @@ pub enum Event {
         request: u64,
         offset: u32,
         result: Result<LikedPage, String>,
+        fallback: Option<LikedList>,
     },
     Grid {
         request: u64,
@@ -173,9 +177,13 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                     .into())
                 }))
         }
-        Command::Liked { offset, request } => ctx
+        Command::Liked {
+            offset,
+            request,
+            fallback,
+        } => ctx
             .tasks
-            .spawn_keyed("library-liked", liked(api, offset, request)),
+            .spawn_keyed("library-liked", liked(api, offset, request, fallback)),
         Command::Grid {
             query,
             offset,
@@ -211,32 +219,51 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
     }
 }
 
-async fn liked(api: Api, offset: u32, request: u64) -> worker::Event {
-    let result = match library::liked(&api, offset, library::LIKED_PAGE_SIZE).await {
-        Err(error) if offset == 0 && library::wants_fallback(&error) => {
-            catalog::liked(&api, LIKED_FALLBACK)
-                .await
-                .map(liked_fallback)
-                .map_err(|_| error)
-        }
-        result => result,
+async fn liked(api: Api, offset: u32, request: u64, fallback: Option<LikedList>) -> worker::Event {
+    let (result, fallback) = match fallback {
+        Some(list) => (liked_from(&api, &list, offset).await, Some(list)),
+        None => match library::liked(&api, offset, LIKED_PAGE_SIZE).await {
+            Err(error) if offset == 0 && library::wants_fallback(&error) => {
+                match catalog::context_uris(&api, LIKED_SONGS, usize::MAX).await {
+                    Ok(items) => {
+                        let list = LikedList::from(items);
+                        let page = liked_from(&api, &list, 0).await.map_err(|_| error);
+                        (page, Some(list))
+                    }
+                    Err(_) => (Err(error), None),
+                }
+            }
+            result => (result, None),
+        },
     };
     Event::Liked {
         request,
         offset,
         result: result.map_err(|error| error.to_string()),
+        fallback,
     }
     .into()
 }
 
-pub(super) fn liked_fallback(tracks: Vec<Track>) -> LikedPage {
-    let count = tracks.len() as u32;
+fn liked_slice(list: &[ContextItem], offset: u32) -> &[ContextItem] {
+    let start = (offset as usize).min(list.len());
+    let end = (start + LIKED_PAGE_SIZE as usize).min(list.len());
+    &list[start..end]
+}
+
+async fn liked_from(api: &Api, list: &[ContextItem], offset: u32) -> anyhow::Result<LikedPage> {
+    let slice = liked_slice(list, offset);
+    let tracks = catalog::item_tracks(api, slice).await?;
+    Ok(liked_fallback(tracks, list.len(), offset, slice.len()))
+}
+
+fn liked_fallback(tracks: Vec<Track>, total: usize, offset: u32, rows: usize) -> LikedPage {
     LikedPage {
         tracks,
         unplayable: Vec::new(),
-        total: count,
-        offset: 0,
-        rows: count,
+        total: total as u32,
+        offset,
+        rows: rows as u32,
     }
 }
 
@@ -395,16 +422,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn liked_fallback_is_one_whole_page() {
-        let track = |uri: &str| Track {
-            uri: uri.into(),
+    fn liked_fallback_pages_through_the_whole_collection() {
+        let list: Vec<ContextItem> = (0..120)
+            .map(|index| ContextItem {
+                uri: format!("spotify:track:{index:022}"),
+                ..ContextItem::default()
+            })
+            .collect();
+        assert_eq!(liked_slice(&list, 0).len(), 50);
+        assert_eq!(liked_slice(&list, 100).len(), 20);
+        assert_eq!(liked_slice(&list, 100)[0].uri, list[100].uri);
+        assert!(liked_slice(&list, 500).is_empty());
+        let track = Track {
+            uri: list[100].uri.clone(),
             ..Track::default()
         };
-        let page = liked_fallback(vec![
-            track("spotify:track:0000000000000000000001"),
-            track("spotify:track:0000000000000000000002"),
-        ]);
-        assert_eq!((page.total, page.rows, page.offset), (2, 2, 0));
+        let page = liked_fallback(vec![track], list.len(), 100, 20);
+        assert_eq!((page.total, page.rows, page.offset), (120, 20, 100));
         assert!(page.unplayable.is_empty());
     }
 }

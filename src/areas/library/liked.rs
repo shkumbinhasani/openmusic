@@ -14,7 +14,7 @@ use spotify_client::{
     library::{ItemKind, LIKED_SONGS, LibraryItem, LikedPage, count_label},
 };
 
-use super::worker::Command;
+use super::worker::{Command, LikedList};
 use crate::{
     app::{OpenMusic, Page},
     icons, overlay,
@@ -160,6 +160,7 @@ pub struct Liked {
     pub sort: LikedSort,
     pub stale: bool,
     pub fetched: Option<Instant>,
+    pub fallback: Option<LikedList>,
 }
 
 impl Liked {
@@ -217,6 +218,13 @@ impl Liked {
         if removed == 0 {
             return false;
         }
+        if let Some(list) = &mut self.fallback {
+            *list = list
+                .iter()
+                .filter(|item| !gone(&item.uri))
+                .cloned()
+                .collect();
+        }
         self.total = self.total.saturating_sub(removed);
         self.next_offset = self.next_offset.saturating_sub(removed);
         self.reshow();
@@ -231,7 +239,11 @@ impl OpenMusic {
         liked.loading = true;
         liked.stale = false;
         let request = liked.request;
-        self.send(Command::Liked { offset: 0, request });
+        self.send(Command::Liked {
+            offset: 0,
+            request,
+            fallback: None,
+        });
     }
 
     pub fn more_liked(&mut self) {
@@ -241,8 +253,12 @@ impl OpenMusic {
         }
         liked.request += 1;
         liked.loading = true;
-        let (offset, request) = (liked.next_offset, liked.request);
-        self.send(Command::Liked { offset, request });
+        let command = Command::Liked {
+            offset: liked.next_offset,
+            request: liked.request,
+            fallback: liked.fallback.clone(),
+        };
+        self.send(command);
     }
 
     fn retry_liked(&mut self) {
@@ -260,6 +276,7 @@ impl OpenMusic {
         request: u64,
         offset: u32,
         result: Result<LikedPage, String>,
+        fallback: Option<LikedList>,
     ) {
         if request != self.library.liked.request {
             return;
@@ -271,6 +288,9 @@ impl OpenMusic {
                     if !self.saved.pending.contains_key(&track.uri) {
                         self.saved.known.insert(track.uri.clone(), true);
                     }
+                }
+                if offset == 0 {
+                    self.library.liked.fallback = fallback;
                 }
                 self.library.liked.take(offset, page);
             }
@@ -757,5 +777,30 @@ mod tests {
         assert_eq!(liked.total, 3);
         liked.stale = true;
         assert!(liked.wants_reload());
+    }
+
+    #[test]
+    fn forgets_unliked_songs_in_the_fallback_list_too() {
+        let mut liked = Liked::default();
+        let tracks = sample();
+        liked.fallback = Some(
+            tracks
+                .iter()
+                .map(|track| spotify_client::catalog::ContextItem {
+                    uri: track.uri.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        liked.take(0, page(tracks, 3, 3));
+        assert!(liked.forget(|uri| uri == "spotify:track:a"));
+        let left: Vec<&str> = liked
+            .fallback
+            .iter()
+            .flat_map(|list| list.iter())
+            .map(|item| item.uri.as_str())
+            .collect();
+        assert_eq!(left, ["spotify:track:c", "spotify:track:b"]);
+        assert_eq!((liked.total, liked.next_offset), (2, 2));
     }
 }

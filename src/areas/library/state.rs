@@ -656,7 +656,8 @@ pub fn on_event(
             request,
             offset,
             result,
-        } => app.on_liked(request, offset, result),
+            fallback,
+        } => app.on_liked(request, offset, result, fallback),
         Event::Grid {
             request,
             query,
