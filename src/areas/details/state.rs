@@ -480,7 +480,7 @@ pub fn on_press(
             if let Some(track) = app.track_page_track() {
                 if app.is_current(&track.uri) {
                     app.toggle(cx);
-                } else {
+                } else if !app.refuses_track(Some(&track), None, cx) {
                     app.play(&[track], 0, cx);
                 }
             }
