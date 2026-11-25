@@ -71,7 +71,8 @@ thread_local! {
 pub use native::dock_artwork;
 pub use native::{
     available, bar_built, bar_menu, bar_menu_tree, close_menu, drag, filter_menu, menu_bar_tree,
-    menu_tree, nudge_window, pick, progress, right_click, set_handler, splice_menu, update_menu,
+    menu_tree, nudge_window, pick, press_sheet_button, progress, right_click, set_handler,
+    sheet_tree, splice_menu, update_menu,
 };
 
 pub fn replace_submenu(entries: &mut [Entry], id: u32, fresh: &[Entry]) -> bool {
@@ -1565,6 +1566,14 @@ mod native {
         appkit::nudge_window(dx, dy)
     }
 
+    pub fn sheet_tree() -> Option<String> {
+        appkit::sheet_tree()
+    }
+
+    pub fn press_sheet_button(title: &str) -> bool {
+        appkit::press_sheet_button(title)
+    }
+
     pub fn describe() -> Vec<String> {
         let mut lines = Vec::new();
         OVERLAY.with_borrow(|overlay| {
@@ -1695,6 +1704,14 @@ mod native {
     }
 
     pub fn nudge_window(_: f64, _: f64) -> bool {
+        false
+    }
+
+    pub fn sheet_tree() -> Option<String> {
+        None
+    }
+
+    pub fn press_sheet_button(_: &str) -> bool {
         false
     }
 

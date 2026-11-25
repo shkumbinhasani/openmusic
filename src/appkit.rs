@@ -7,7 +7,7 @@ use objc2::{
     runtime::{AnyClass, AnyObject, NSObject},
 };
 use objc2_app_kit::{
-    NSApplication, NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFont,
+    NSApplication, NSButton, NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSFont,
     NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSLineBreakMode, NSTextField,
     NSView,
 };
@@ -195,6 +195,58 @@ fn post_mouse(events: &[(NSEventType, f64, f64)], button: i64) -> bool {
         };
         application.postEvent_atStart(&event, false);
     }
+    true
+}
+
+fn sheet_controls(view: &NSView, texts: &mut Vec<String>, buttons: &mut Vec<Retained<NSButton>>) {
+    for child in view.subviews().iter() {
+        if let Ok(button) = child.clone().downcast::<NSButton>() {
+            buttons.push(button);
+        } else if let Ok(field) = child.clone().downcast::<NSTextField>() {
+            let text = field.stringValue().to_string();
+            if !text.is_empty() {
+                texts.push(text);
+            }
+        } else {
+            sheet_controls(&child, texts, buttons);
+        }
+    }
+}
+
+fn sheet_contents() -> Option<(Vec<String>, Vec<Retained<NSButton>>)> {
+    let window = container()?.window()?;
+    let sheet = window.attachedSheet()?;
+    let view = sheet.contentView()?;
+    let (mut texts, mut buttons) = (Vec::new(), Vec::new());
+    sheet_controls(&view, &mut texts, &mut buttons);
+    Some((texts, buttons))
+}
+
+pub(crate) fn sheet_tree() -> Option<String> {
+    let (texts, buttons) = sheet_contents()?;
+    let mut lines: Vec<String> = texts
+        .into_iter()
+        .map(|text| format!("text {text}"))
+        .collect();
+    lines.extend(
+        buttons
+            .iter()
+            .map(|button| format!("button {} tag={}", button.title(), button.tag())),
+    );
+    Some(lines.join("\n"))
+}
+
+pub(crate) fn press_sheet_button(title: &str) -> bool {
+    let Some((_, buttons)) = sheet_contents() else {
+        return false;
+    };
+    let Some(button) = buttons
+        .into_iter()
+        .find(|button| button.title().to_string() == title)
+    else {
+        return false;
+    };
+    unsafe { button.performClick(None) };
     true
 }
 

@@ -925,6 +925,15 @@ pub fn debug(
                 app.open_menu(target, point(size.width / 2., size.height / 2.), None);
             }
         }
+        ("sheet", []) => write(
+            "sheet.txt",
+            overlay::sheet_tree().unwrap_or_else(|| "none".into()),
+        ),
+        ("sheet", ["press", title @ ..]) if !title.is_empty() => {
+            let title = title.join(" ");
+            let pressed = overlay::press_sheet_button(&title);
+            write("sheet.txt", format!("pressed {title} {pressed}"));
+        }
         ("rightclick", [x, y]) => {
             if let (Ok(x), Ok(y)) = (x.parse(), y.parse()) {
                 overlay::right_click(x, y);
