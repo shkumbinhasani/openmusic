@@ -116,6 +116,13 @@ impl OpenMusic {
         }
         if likes < changes.len() {
             self.library.resync = true;
+            if !saved {
+                let gone: Vec<&String> = changes
+                    .iter()
+                    .filter(|uri| saves(uri) != Some(Saves::Like))
+                    .collect();
+                self.library.forget_items(&gone);
+            }
         }
         let written = changes.len();
         self.set_saved(changes, saved);

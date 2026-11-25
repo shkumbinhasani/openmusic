@@ -153,6 +153,18 @@ impl State {
             .filter(move |item| same_item(item, uri))
     }
 
+    pub(super) fn forget_items(&mut self, uris: &[&String]) {
+        let before = self.items.len();
+        self.items.retain(|item| !uris.contains(&&item.uri));
+        let removed = (before - self.items.len()) as u32;
+        if removed > 0 {
+            self.next_offset = self.next_offset.saturating_sub(removed);
+            if let Some(page) = &mut self.page {
+                page.total = page.total.saturating_sub(removed);
+            }
+        }
+    }
+
     fn set_playlists(&mut self, playlists: Vec<Playlist>) {
         self.playlist_rows = playlists
             .iter()
@@ -956,6 +968,25 @@ mod tests {
         fallback.fallback = true;
         assert_eq!(merge(&mut items, &mut fallback, 50), 2);
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn drops_items_removed_from_the_library() {
+        let mut state = State {
+            items: vec![
+                item("spotify:album:a", 0),
+                item("spotify:artist:b", 0),
+                item("spotify:playlist:c", 0),
+            ],
+            page: Some(page(Vec::new(), 40)),
+            next_offset: 3,
+            ..State::default()
+        };
+        let gone = ["spotify:album:a".to_owned(), "spotify:show:z".to_owned()];
+        state.forget_items(&gone.iter().collect::<Vec<_>>());
+        assert_eq!(state.items.len(), 2);
+        assert_eq!(state.next_offset, 2);
+        assert_eq!(state.page.as_ref().map(|page| page.total), Some(39));
     }
 
     #[test]
