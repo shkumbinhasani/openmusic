@@ -25,6 +25,25 @@ pub const PLAYLIST_PERMISSIONS: Operation = Operation::query(
     "playlistPermissions",
     "e43d1d35f231cf289c23c9d9c489f4a4f502e4eda09839c530608f107b6556b8",
 );
+pub const EDITABLE_PLAYLISTS: Operation = Operation::query(
+    "editablePlaylists",
+    "d5c4b8096437dcc2ac9528c91dfcd299e35b747cda2f8f75d28f41f49c5092ba",
+);
+pub const IS_CURATED: Operation = Operation::query(
+    "isCurated",
+    "e4ed1f91a2cc5415befedb85acf8671dc1a4bf3ca1a5b945a6386101a22e28a6",
+);
+pub const APPLY_CURATIONS: Operation = Operation::mutation(
+    "applyCurations",
+    "05b739a3a73091c213385233b9d3ed8a857c2ca29d2eebadb3d04ed12e288697",
+);
+
+pub const LIKED_SONGS: &str = "spotify:collection:tracks";
+pub const EDITABLE_PAGE: usize = 50;
+pub const EDITABLE_LIMIT: usize = 500;
+pub const EDITABLE_FOLDERS: usize = 10;
+pub const CONTENTS_LIMIT: usize = 10_000;
+pub const EXPAND_LIMIT: usize = 1_000;
 
 pub const PAGE: usize = 100;
 pub const ITEM_BATCH: usize = 100;
@@ -1369,10 +1388,7 @@ pub async fn move_playlists(
     position: &Position,
 ) -> Result<String> {
     let list = rootlist(api, user).await?;
-    let keys: Vec<String> = uris
-        .iter()
-        .filter_map(|uri| list.playlist(uri).map(|found| found.key.clone()))
-        .collect();
+    let keys = place_keys(&list, uris);
     if keys.is_empty() {
         bail!("These playlists are not in Your Library.");
     }
@@ -1461,6 +1477,408 @@ pub async fn remove_member(api: &Api, uri: &str, username: &str) -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootPlace {
+    Start,
+    End,
+    Before(String),
+    After(String),
+    Into(String),
+}
+
+impl Rootlist {
+    fn index_of(&self, uri: &str) -> Option<usize> {
+        if let Some(hash) = folder_hash(uri) {
+            return self.span(hash).map(|span| span.start);
+        }
+        let uri = canonical(uri)?;
+        self.entries
+            .iter()
+            .position(|entry| matches!(entry, RootEntry::Playlist(playlist) if playlist.uri == uri))
+    }
+
+    fn key_of(&self, uri: &str) -> Option<Item> {
+        match folder_hash(uri) {
+            Some(hash) => self.span(hash).map(|_| Item::key(start_key(hash))),
+            None => self.playlist(uri).map(|playlist| Item::key(&playlist.key)),
+        }
+    }
+
+    pub fn place_index(&self, place: &RootPlace) -> Option<usize> {
+        match place {
+            RootPlace::Start => Some(0),
+            RootPlace::End => Some(self.entries.len()),
+            RootPlace::Before(uri) => self.index_of(uri),
+            RootPlace::After(uri) => match folder_hash(uri) {
+                Some(hash) => self.span(hash).map(|span| span.start + span.length),
+                None => self.index_of(uri).map(|index| index + 1),
+            },
+            RootPlace::Into(uri) => self.span(folder_hash(uri)?).map(|span| span.start + 1),
+        }
+    }
+
+    pub fn place_position(&self, place: &RootPlace) -> Option<Position> {
+        Some(match place {
+            RootPlace::Start => Position::Start,
+            RootPlace::End => Position::End,
+            RootPlace::Before(uri) => Position::Before(self.key_of(uri)?),
+            RootPlace::After(uri) => match folder_hash(uri) {
+                Some(hash) => {
+                    self.span(hash)?;
+                    Position::After(Item::key(end_marker(hash)))
+                }
+                None => Position::After(self.key_of(uri)?),
+            },
+            RootPlace::Into(uri) => {
+                let hash = folder_hash(uri)?;
+                self.span(hash)?;
+                Position::in_folder(hash)
+            }
+        })
+    }
+
+    pub fn parent_of(&self, uri: &str) -> Option<String> {
+        let target = self.index_of(uri)?;
+        let mut open: Vec<&str> = Vec::new();
+        for entry in &self.entries[..target] {
+            match entry {
+                RootEntry::Start { hash, .. } => open.push(hash),
+                RootEntry::End { hash } if open.last() == Some(&hash.as_str()) => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        open.last().map(|hash| (*hash).to_owned())
+    }
+}
+
+pub fn place_keys(list: &Rootlist, uris: &[String]) -> Vec<String> {
+    uris.iter()
+        .filter_map(|uri| list.playlist(uri).map(|found| found.key.clone()))
+        .collect()
+}
+
+pub async fn move_playlists_to(
+    api: &Api,
+    user: &str,
+    uris: &[String],
+    place: &RootPlace,
+) -> Result<String> {
+    let list = rootlist(api, user).await?;
+    let position = list
+        .place_position(place)
+        .ok_or_else(|| anyhow!("That place is no longer in Your Library."))?;
+    let keys = place_keys(&list, uris);
+    if keys.is_empty() {
+        bail!("These playlists are not in Your Library.");
+    }
+    rootlist_apply(api, user, &move_playlists_changes(&keys, &position), None).await
+}
+
+pub async fn move_folder_to(
+    api: &Api,
+    user: &str,
+    hash: &str,
+    place: &RootPlace,
+) -> Result<String> {
+    apply_indexed(api, user, |list| {
+        let to = list
+            .place_index(place)
+            .ok_or_else(|| anyhow!("That place is no longer in Your Library."))?;
+        move_folder_changes(list, hash, to)
+    })
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetKind {
+    Playlist,
+    Folder,
+    LikedSongs,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditTarget {
+    pub uri: String,
+    pub name: String,
+    pub kind: TargetKind,
+    pub curates: bool,
+    pub pinned: bool,
+    pub cover: Option<String>,
+    pub folder: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditablePage {
+    pub total: usize,
+    pub items: Vec<EditTarget>,
+}
+
+pub fn editable_variables(
+    uris: &[String],
+    text: &str,
+    folder: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Value {
+    json!({
+        "offset": offset,
+        "limit": limit,
+        "textFilter": text,
+        "folderUri": folder,
+        "uris": uris,
+    })
+}
+
+fn edit_target(entry: &Value) -> Option<EditTarget> {
+    let item = &entry["item"];
+    let data = &item["data"];
+    let uri = text(&data["uri"]).or_else(|| text(&item["_uri"]))?;
+    let kind = match data["__typename"].as_str().unwrap_or_default() {
+        "Playlist" => TargetKind::Playlist,
+        "Folder" => TargetKind::Folder,
+        "PseudoPlaylist" if entity::is_liked_songs(&uri) => TargetKind::LikedSongs,
+        "PseudoPlaylist" => TargetKind::Other,
+        _ => return None,
+    };
+    let sources = match kind {
+        TargetKind::Playlist => &data["images"]["items"][0]["sources"],
+        _ => &data["image"]["sources"],
+    };
+    let uri = match kind {
+        TargetKind::LikedSongs => LIKED_SONGS.to_owned(),
+        TargetKind::Playlist => canonical(&uri).unwrap_or(uri),
+        _ => uri,
+    };
+    Some(EditTarget {
+        name: text(&data["name"]).unwrap_or_else(|| "Untitled".to_owned()),
+        cover: entity::pick_image(sources, 64),
+        curates: entry["curates"].as_bool().unwrap_or_default(),
+        pinned: entry["pinned"].as_bool().unwrap_or_default(),
+        folder: None,
+        uri,
+        kind,
+    })
+}
+
+pub fn parse_editable(data: &Value) -> EditablePage {
+    let page = &data["me"]["editablePlaylists"];
+    EditablePage {
+        total: page["totalCount"].as_u64().unwrap_or_default() as usize,
+        items: page["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(edit_target)
+            .collect(),
+    }
+}
+
+pub async fn editable_level(
+    api: &Api,
+    uris: &[String],
+    folder: Option<&str>,
+) -> Result<Vec<EditTarget>> {
+    let mut items = Vec::new();
+    let mut offset = 0;
+    loop {
+        let data = pathfinder::query(
+            api,
+            EDITABLE_PLAYLISTS,
+            editable_variables(uris, "", folder, offset, EDITABLE_PAGE),
+        )
+        .await?;
+        let page = parse_editable(&data);
+        let empty = page.items.is_empty();
+        items.extend(page.items.into_iter().map(|mut target| {
+            target.folder = folder.map(str::to_owned);
+            target
+        }));
+        offset += EDITABLE_PAGE;
+        if empty || offset >= page.total || offset >= EDITABLE_LIMIT {
+            return Ok(items);
+        }
+    }
+}
+
+pub async fn editable(api: &Api, uris: &[String]) -> Result<Vec<EditTarget>> {
+    let mut found = editable_level(api, uris, None).await?;
+    let mut next = 0;
+    let mut visited = 0;
+    while next < found.len() && visited < EDITABLE_FOLDERS {
+        let index = next;
+        next += 1;
+        if found[index].kind != TargetKind::Folder {
+            continue;
+        }
+        visited += 1;
+        let folder = found[index].uri.clone();
+        let children = editable_level(api, uris, Some(&folder)).await?;
+        found.extend(children);
+    }
+    Ok(found)
+}
+
+pub fn editable_tree(items: &[EditTarget]) -> Vec<(usize, &EditTarget)> {
+    fn walk<'a>(
+        items: &'a [EditTarget],
+        parent: Option<&str>,
+        depth: usize,
+        seen: &mut HashSet<&'a str>,
+        out: &mut Vec<(usize, &'a EditTarget)>,
+    ) {
+        for item in items.iter().filter(|item| item.folder.as_deref() == parent) {
+            if !seen.insert(item.uri.as_str()) {
+                continue;
+            }
+            out.push((depth, item));
+            if item.kind == TargetKind::Folder {
+                walk(items, Some(&item.uri), depth + 1, seen, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(items, None, 0, &mut HashSet::new(), &mut out);
+    out
+}
+
+pub fn parse_is_curated(data: &Value) -> Vec<Option<bool>> {
+    data["lookup"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| item["data"]["isCurated"].as_bool())
+        .collect()
+}
+
+pub async fn is_curated(api: &Api, uris: &[String]) -> Result<Vec<Option<bool>>> {
+    let data = pathfinder::query(api, IS_CURATED, json!({ "uris": uris })).await?;
+    Ok(parse_is_curated(&data))
+}
+
+pub fn curation_variables(items: &[String], changes: &[(String, bool)]) -> Value {
+    let curations: Vec<Value> = changes
+        .iter()
+        .map(|(context, curate)| {
+            json!({
+                "contextUri": context,
+                "curationType": if *curate { "CURATE" } else { "UNCURATE" },
+            })
+        })
+        .collect();
+    json!({ "input": { "curations": curations, "itemUris": items } })
+}
+
+pub fn parse_curations(data: &Value) -> Vec<Option<bool>> {
+    data["applyCurations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|item| item["data"]["isCurated"].as_bool())
+        .collect()
+}
+
+pub fn curation_context(uri: &str) -> Option<String> {
+    if entity::is_liked_songs(uri) {
+        return Some(LIKED_SONGS.to_owned());
+    }
+    canonical(uri)
+}
+
+pub async fn apply_curations(
+    api: &Api,
+    items: &[String],
+    changes: &[(String, bool)],
+) -> Result<Vec<Option<bool>>> {
+    let changes: Vec<(String, bool)> = changes
+        .iter()
+        .filter_map(|(context, curate)| Some((curation_context(context)?, *curate)))
+        .collect();
+    if items.is_empty() || changes.is_empty() {
+        bail!("Nothing to change.");
+    }
+    let data =
+        pathfinder::mutate(api, APPLY_CURATIONS, curation_variables(items, &changes)).await?;
+    Ok(parse_curations(&data))
+}
+
+pub fn addable(uri: &str) -> bool {
+    ["spotify:track:", "spotify:episode:", "spotify:local:"]
+        .iter()
+        .any(|prefix| uri.starts_with(prefix))
+}
+
+pub fn split_duplicates(existing: &HashSet<String>, uris: &[String]) -> (Vec<String>, Vec<String>) {
+    uris.iter().cloned().partition(|uri| existing.contains(uri))
+}
+
+pub async fn item_uris(api: &Api, uri: &str, limit: usize) -> Result<Vec<String>> {
+    let id = id_of(uri)?;
+    let mut uris = Vec::new();
+    let mut from = 0;
+    loop {
+        let contents = parse_contents(&fetch(api, id, from, PAGE).await?);
+        uris.extend(contents.items.into_iter().map(|item| item.uri));
+        match contents.next {
+            Some(next) if next > from && uris.len() < limit => from = next,
+            _ => break,
+        }
+    }
+    uris.truncate(limit);
+    Ok(uris)
+}
+
+pub async fn expand(api: &Api, sources: &[String]) -> Result<Vec<String>> {
+    let mut uris = Vec::new();
+    for source in sources {
+        if source.starts_with("spotify:album:") {
+            let items = catalog::context_uris(api, source, EXPAND_LIMIT).await?;
+            uris.extend(items.into_iter().map(|item| item.uri));
+        } else if playlist_id(source).is_some() {
+            let items = item_uris(api, source, EXPAND_LIMIT).await?;
+            uris.extend(items.into_iter().filter(|uri| addable(uri)));
+        } else if addable(source) {
+            uris.push(source.clone());
+        }
+    }
+    Ok(uris)
+}
+
+pub fn reorder<T>(
+    items: &mut Vec<T>,
+    uid: impl Fn(&T) -> Option<&str>,
+    moving: &[String],
+    position: &ItemPosition,
+) -> bool {
+    let moves = |item: &T| uid(item).is_some_and(|uid| moving.iter().any(|found| found == uid));
+    if let ItemPosition::BeforeUid(anchor) | ItemPosition::AfterUid(anchor) = position {
+        let anchored = items.iter().any(|item| uid(item) == Some(anchor.as_str()));
+        if !anchored || moving.iter().any(|uid| uid == anchor) {
+            return false;
+        }
+    }
+    if !items.iter().any(&moves) {
+        return false;
+    }
+    let (taken, mut kept): (Vec<T>, Vec<T>) = std::mem::take(items)
+        .into_iter()
+        .partition(|item| moves(item));
+    let find = |anchor: &str, kept: &[T]| kept.iter().position(|item| uid(item) == Some(anchor));
+    let at = match position {
+        ItemPosition::Top => 0,
+        ItemPosition::Bottom => kept.len(),
+        ItemPosition::BeforeUid(anchor) => find(anchor, &kept).unwrap_or(kept.len()),
+        ItemPosition::AfterUid(anchor) => find(anchor, &kept).map_or(kept.len(), |index| index + 1),
+    };
+    let tail = kept.split_off(at);
+    kept.extend(taken);
+    kept.extend(tail);
+    *items = kept;
+    true
 }
 
 #[cfg(test)]
@@ -1987,5 +2405,230 @@ mod tests {
             0
         );
         assert!(local_track("spotify:local:broken").is_none());
+    }
+
+    #[test]
+    fn reads_editable_playlists_with_curates() {
+        assert_eq!(
+            editable_variables(&["spotify:track:a".into()], "", None, 50, EDITABLE_PAGE),
+            json!({"offset":50,"limit":50,"textFilter":"","folderUri":null,"uris":["spotify:track:a"]})
+        );
+        let data = json!({"me":{"editablePlaylists":{"__typename":"EditablePlaylistPage","totalCount":4,
+        "pagingInfo":{"limit":5,"offset":0},
+        "items":[
+            {"pinned":true,"curates":false,"item":{"__typename":"LibraryPseudoPlaylistResponseWrapper",
+                "_uri":"spotify:collection:tracks",
+                "data":{"__typename":"PseudoPlaylist","uri":"spotify:collection:tracks","name":"Liked Songs",
+                    "image":{"sources":[{"url":"https://misc.scdn.co/liked-songs/liked-songs-64.png","width":64}]}}}},
+            {"pinned":false,"curates":true,"item":{"__typename":"PlaylistResponseWrapper",
+                "_uri":"spotify:playlist:p1",
+                "data":{"__typename":"Playlist","uri":"spotify:playlist:p1","name":"Road",
+                    "images":{"items":[{"sources":[{"url":"https://i.scdn.co/image/ab67616d00001e02aa","width":null,"height":null}]}]}}}},
+            {"pinned":false,"curates":false,"item":{"__typename":"LibraryFolderResponseWrapper",
+                "_uri":"spotify:user:someone:folder:00000000000000f1",
+                "data":{"__typename":"Folder","uri":"spotify:user:someone:folder:00000000000000f1","name":"Trips"}}},
+            {"pinned":false,"curates":false,"item":{"__typename":"PlaylistResponseWrapper",
+                "_uri":"spotify:playlist:gone","data":{"__typename":"NotFound"}}}
+        ]}}});
+        let page = parse_editable(&data);
+        assert_eq!(page.total, 4);
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.items[0].kind, TargetKind::LikedSongs);
+        assert_eq!(page.items[0].uri, LIKED_SONGS);
+        assert!(page.items[0].pinned && !page.items[0].curates);
+        assert_eq!(
+            page.items[0].cover.as_deref(),
+            Some("https://misc.scdn.co/liked-songs/liked-songs-64.png")
+        );
+        assert_eq!(
+            (
+                page.items[1].kind,
+                page.items[1].name.as_str(),
+                page.items[1].curates
+            ),
+            (TargetKind::Playlist, "Road", true)
+        );
+        assert_eq!(
+            page.items[1].cover.as_deref(),
+            Some("https://i.scdn.co/image/ab67616d00001e02aa")
+        );
+        assert_eq!(page.items[2].kind, TargetKind::Folder);
+        assert_eq!(parse_editable(&json!({})), EditablePage::default());
+    }
+
+    fn target(uri: &str, kind: TargetKind, folder: Option<&str>) -> EditTarget {
+        EditTarget {
+            uri: uri.into(),
+            name: uri.into(),
+            kind,
+            curates: false,
+            pinned: false,
+            cover: None,
+            folder: folder.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn orders_editable_targets_as_a_tree() {
+        let items = vec![
+            target(LIKED_SONGS, TargetKind::LikedSongs, None),
+            target("f1", TargetKind::Folder, None),
+            target("p1", TargetKind::Playlist, None),
+            target("p2", TargetKind::Playlist, Some("f1")),
+            target("f2", TargetKind::Folder, Some("f1")),
+            target("p3", TargetKind::Playlist, Some("f2")),
+        ];
+        let tree: Vec<(usize, &str)> = editable_tree(&items)
+            .into_iter()
+            .map(|(depth, item)| (depth, item.uri.as_str()))
+            .collect();
+        assert_eq!(
+            tree,
+            [
+                (0, LIKED_SONGS),
+                (0, "f1"),
+                (1, "p2"),
+                (1, "f2"),
+                (2, "p3"),
+                (0, "p1")
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_curation_requests() {
+        assert_eq!(IS_CURATED.kind, pathfinder::Kind::Query);
+        assert_eq!(APPLY_CURATIONS.kind, pathfinder::Kind::Mutation);
+        assert_eq!(EDITABLE_PLAYLISTS.kind, pathfinder::Kind::Query);
+        let lookup = json!({"lookup":[
+            {"__typename":"TrackResponseWrapper","data":{"__typename":"Track","isCurated":true}},
+            {"__typename":"TrackResponseWrapper","data":{"__typename":"Track","isCurated":false}},
+            {"__typename":"NotFound"}]});
+        assert_eq!(parse_is_curated(&lookup), [Some(true), Some(false), None]);
+        assert_eq!(
+            curation_variables(
+                &["spotify:track:a".into()],
+                &[
+                    ("spotify:playlist:p1".into(), true),
+                    (LIKED_SONGS.into(), false)
+                ]
+            ),
+            json!({"input":{"curations":[
+                {"contextUri":"spotify:playlist:p1","curationType":"CURATE"},
+                {"contextUri":"spotify:collection:tracks","curationType":"UNCURATE"}],
+                "itemUris":["spotify:track:a"]}})
+        );
+        let applied = json!({"applyCurations":[{"__typename":"TrackResponseWrapper","data":{"isCurated":true}}]});
+        assert_eq!(parse_curations(&applied), [Some(true)]);
+        assert_eq!(
+            curation_context("spotify:user:someone:playlist:p1").as_deref(),
+            Some("spotify:playlist:p1")
+        );
+        assert_eq!(
+            curation_context("spotify:user:someone:collection").as_deref(),
+            Some(LIKED_SONGS)
+        );
+        assert_eq!(curation_context("spotify:album:x"), None);
+    }
+
+    #[test]
+    fn splits_duplicates_from_new_songs() {
+        let existing: HashSet<String> = ["spotify:track:a".to_owned()].into();
+        let (duplicates, fresh) = split_duplicates(
+            &existing,
+            &["spotify:track:a".into(), "spotify:track:b".into()],
+        );
+        assert_eq!(duplicates, ["spotify:track:a"]);
+        assert_eq!(fresh, ["spotify:track:b"]);
+        assert!(addable("spotify:episode:e"));
+        assert!(addable("spotify:local:a:b:c:1"));
+        assert!(!addable("spotify:album:x"));
+    }
+
+    #[test]
+    fn reorders_rows_like_the_server() {
+        fn uid<'a>(row: &'a &str) -> Option<&'a str> {
+            Some(row)
+        }
+        let rows = || vec!["a", "b", "c", "d"];
+        let moved = |position: ItemPosition, moving: &[&str]| {
+            let mut items = rows();
+            let moving: Vec<String> = moving.iter().map(|uid| (*uid).to_owned()).collect();
+            let changed = reorder(&mut items, uid, &moving, &position);
+            (changed, items)
+        };
+        assert_eq!(
+            moved(ItemPosition::Top, &["c"]),
+            (true, vec!["c", "a", "b", "d"])
+        );
+        assert_eq!(
+            moved(ItemPosition::Bottom, &["a"]),
+            (true, vec!["b", "c", "d", "a"])
+        );
+        assert_eq!(
+            moved(ItemPosition::BeforeUid("b".into()), &["d"]),
+            (true, vec!["a", "d", "b", "c"])
+        );
+        assert_eq!(
+            moved(ItemPosition::AfterUid("c".into()), &["a", "b"]),
+            (true, vec!["c", "a", "b", "d"])
+        );
+        assert!(!moved(ItemPosition::AfterUid("x".into()), &["a"]).0);
+        assert!(!moved(ItemPosition::BeforeUid("a".into()), &["a"]).0);
+        assert_eq!(moved(ItemPosition::Top, &["x"]), (false, rows()));
+    }
+
+    #[test]
+    fn places_moves_in_the_rootlist() {
+        let list = sample();
+        let folder = |hash: &str| folder_uri("someone", hash);
+        assert_eq!(list.place_index(&RootPlace::Start), Some(0));
+        assert_eq!(list.place_index(&RootPlace::End), Some(8));
+        assert_eq!(
+            list.place_index(&RootPlace::Before("spotify:playlist:d".into())),
+            Some(7)
+        );
+        assert_eq!(
+            list.place_index(&RootPlace::After("spotify:playlist:a".into())),
+            Some(1)
+        );
+        assert_eq!(list.place_index(&RootPlace::Before(folder("f2"))), Some(3));
+        assert_eq!(list.place_index(&RootPlace::After(folder("f1"))), Some(7));
+        assert_eq!(list.place_index(&RootPlace::Into(folder("f1"))), Some(2));
+        assert_eq!(list.place_index(&RootPlace::Into(folder("zz"))), None);
+        assert_eq!(
+            list.place_position(&RootPlace::Before(folder("f1"))),
+            Some(Position::Before(Item::key("spotify:start-group:f1")))
+        );
+        assert_eq!(
+            list.place_position(&RootPlace::After(folder("f2"))),
+            Some(Position::After(Item::key("spotify:end-group:f2")))
+        );
+        assert_eq!(
+            list.place_position(&RootPlace::After("spotify:playlist:d".into())),
+            Some(Position::After(Item::key("spotify:playlist:d")))
+        );
+        assert_eq!(
+            list.place_position(&RootPlace::Into(folder("f2"))),
+            Some(Position::in_folder("f2"))
+        );
+        assert_eq!(
+            list.place_position(&RootPlace::Before("spotify:playlist:zz".into())),
+            None
+        );
+        assert_eq!(list.parent_of("spotify:playlist:a"), None);
+        assert_eq!(list.parent_of("spotify:playlist:b").as_deref(), Some("f1"));
+        assert_eq!(list.parent_of("spotify:playlist:c").as_deref(), Some("f2"));
+        assert_eq!(list.parent_of(&folder("f2")).as_deref(), Some("f1"));
+        assert_eq!(list.parent_of("spotify:playlist:d"), None);
+        let into = list.place_index(&RootPlace::Into(folder("f2"))).unwrap();
+        assert!(move_folder_changes(&list, "f1", into).is_err());
+        assert_eq!(
+            place_keys(
+                &list,
+                &["spotify:playlist:b".into(), "spotify:playlist:zz".into()]
+            ),
+            ["spotify:playlist:b"]
+        );
     }
 }
