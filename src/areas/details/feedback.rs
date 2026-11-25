@@ -57,6 +57,12 @@ pub enum Entry {
     Hidden(Ban),
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Pending {
+    count: usize,
+    settled: bool,
+}
+
 #[derive(Default)]
 pub struct Sets {
     pub load: Load,
@@ -66,7 +72,7 @@ pub struct Sets {
     pub editable: HashMap<String, Option<bool>>,
     pub last_format: Option<WriteFormat>,
     pub pushes: usize,
-    writing: HashMap<Entry, usize>,
+    writing: HashMap<Entry, Pending>,
     touched: HashMap<Entry, Instant>,
     requested: Option<Instant>,
     next: Option<Instant>,
@@ -209,24 +215,30 @@ impl Sets {
     }
 
     fn begin(&mut self, entry: Entry, on: bool) {
+        let settled = self.contains(&entry);
         self.mark(&entry, on);
-        *self.writing.entry(entry).or_default() += 1;
+        self.writing
+            .entry(entry)
+            .or_insert(Pending { count: 0, settled })
+            .count += 1;
     }
 
     fn written(&mut self, entry: &Entry, on: bool, ok: bool) {
-        let left = self
-            .writing
-            .get(entry)
-            .map_or(0, |count| count.saturating_sub(1));
-        if left == 0 {
-            self.writing.remove(entry);
-            self.touched.insert(entry.clone(), Instant::now());
-        } else if let Some(count) = self.writing.get_mut(entry) {
-            *count = left;
+        let mut pending = self.writing.get(entry).copied().unwrap_or(Pending {
+            count: 1,
+            settled: !on,
+        });
+        if ok {
+            pending.settled = on;
         }
-        if !ok && left == 0 {
-            self.mark(entry, !on);
+        pending.count = pending.count.saturating_sub(1);
+        if pending.count > 0 {
+            self.writing.insert(entry.clone(), pending);
+            return;
         }
+        self.writing.remove(entry);
+        self.touched.insert(entry.clone(), Instant::now());
+        self.mark(entry, pending.settled);
     }
 
     pub fn excluded_written(&mut self, uri: &str, excluded: bool, ok: bool) {
@@ -493,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn rolls_back_only_the_last_failed_write() {
+    fn rolls_back_to_what_the_server_last_took() {
         let mut sets = Sets::default();
         sets.apply(Ok(Snapshot::default()));
         sets.begin(Entry::Hidden(ban()), true);
@@ -501,8 +513,17 @@ mod tests {
         sets.hidden_written(&ban(), true, &Err("no".into()));
         assert!(!sets.is_hidden(SONG, RADIO));
         sets.hidden_written(&ban(), false, &Err("no".into()));
-        assert!(sets.is_hidden(SONG, RADIO));
+        assert!(!sets.is_hidden(SONG, RADIO));
         assert!(!sets.writing.contains_key(&Entry::Hidden(ban())));
+        sets.begin(Entry::Hidden(ban()), true);
+        sets.begin(Entry::Hidden(ban()), false);
+        sets.hidden_written(&ban(), true, &Ok(WriteFormat::Protobuf));
+        assert!(!sets.is_hidden(SONG, RADIO));
+        sets.hidden_written(&ban(), false, &Err("no".into()));
+        assert!(sets.is_hidden(SONG, RADIO));
+        sets.begin(Entry::Hidden(ban()), false);
+        sets.hidden_written(&ban(), false, &Ok(WriteFormat::Protobuf));
+        assert!(!sets.is_hidden(SONG, RADIO));
         sets.hidden_written(&ban(), true, &Ok(WriteFormat::Json));
         assert_eq!(sets.last_format, Some(WriteFormat::Json));
 
