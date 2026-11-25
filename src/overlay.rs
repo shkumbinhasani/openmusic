@@ -317,6 +317,7 @@ mod native {
     const SEEK: isize = -1;
     const VOLUME: isize = -2;
     const NO_MATCH: isize = -1;
+    const MIN_SLIDER_WIDTH: f64 = 60.;
 
     struct Dock {
         glass: Retained<NSGlassEffectView>,
@@ -677,11 +678,15 @@ mod native {
             let art = height - 18.;
             dock.art.setFrame(rect(9., 9., art, art));
             let text_x = 9. + art + 12.;
+            let room = (width - text_x - 20.).max(0.);
             let text_width = (width * 0.3).clamp(70., 220.);
+            let seekable = room - text_width - 14. >= MIN_SLIDER_WIDTH;
+            let text_width = if seekable { text_width } else { room };
             dock.title
                 .setFrame(rect(text_x, height / 2. + 1., text_width, 17.));
             dock.subtitle
                 .setFrame(rect(text_x, height / 2. - 17., text_width, 16.));
+            dock.slider.setHidden(!seekable);
             let bar_x = text_x + text_width + 14.;
             let bar_width = width - bar_x - 20.;
             let compact = bar_width < 200.;
@@ -1591,9 +1596,11 @@ mod native {
             ));
             if let Some(dock) = overlay.dock.as_ref() {
                 lines.push(format!(
-                    "dock elapsed={} slider={:.4}",
+                    "dock elapsed={} slider={:.4} slider_hidden={} slider_width={}",
                     dock.elapsed.stringValue(),
-                    dock.slider.doubleValue()
+                    dock.slider.doubleValue(),
+                    dock.slider.isHidden(),
+                    dock.slider.frame().size.width,
                 ));
             }
             if let Some(volume) = overlay.volume.as_ref() {
