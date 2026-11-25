@@ -107,16 +107,23 @@ impl Default for NowPlaying {
 
 impl NowPlaying {
     pub fn position(&self) -> u32 {
-        let elapsed = if self.playing {
-            (self.observed.elapsed().as_millis() as f64 * f64::from(self.speed.max(0.))) as u32
-        } else {
-            0
-        };
-        let position = self.position_ms.saturating_add(elapsed);
-        match self.track.as_ref().map(|track| track.duration_ms) {
-            Some(duration) if duration > 0 => position.min(duration),
-            _ => position,
-        }
+        advance(
+            self.position_ms,
+            self.playing.then_some(self.speed),
+            self.track.as_ref().map(|track| track.duration_ms),
+            self.observed.elapsed(),
+        )
+    }
+}
+
+fn advance(position_ms: u32, speed: Option<f32>, duration_ms: Option<u32>, since: Duration) -> u32 {
+    let elapsed = speed.map_or(0, |speed| {
+        (since.as_millis() as f64 * f64::from(speed.max(0.))) as u32
+    });
+    let position = position_ms.saturating_add(elapsed);
+    match duration_ms {
+        Some(duration) if duration > 0 => position.min(duration),
+        _ => position,
     }
 }
 
@@ -237,6 +244,7 @@ struct Engine {
     generation: u64,
     playing: Option<Playing>,
     playback: Option<Playback>,
+    playback_at: Instant,
     certificate: Option<Arc<Vec<u8>>>,
     license_url: Option<(String, Instant)>,
     last_report: Option<Value>,
@@ -351,6 +359,7 @@ async fn run(
         generation: 0,
         playing: None,
         playback: None,
+        playback_at: Instant::now(),
         certificate: None,
         license_url: None,
         last_report: None,
@@ -563,8 +572,22 @@ impl Engine {
             return;
         };
         if let Ok(cluster) = connect::observe(&self.api, &self.device_id, &connection_id).await {
-            self.playback = Some(connect::playback(&cluster, &self.device_id));
+            self.keep_playback(connect::playback(&cluster, &self.device_id));
         }
+    }
+
+    fn keep_playback(&mut self, playback: Playback) {
+        self.playback = Some(playback);
+        self.playback_at = Instant::now();
+    }
+
+    fn playback_position(&self, playback: &Playback) -> u32 {
+        advance(
+            playback.position_ms,
+            playback.playing.then_some(playback.playback_speed),
+            playback.track.as_ref().map(|track| track.duration_ms),
+            self.playback_at.elapsed(),
+        )
     }
 
     fn now(&self) -> NowPlaying {
@@ -615,7 +638,7 @@ impl Engine {
             track: playback.track.clone(),
             playing: playback.playing,
             position_ms: playback.position_ms,
-            observed: Instant::now(),
+            observed: self.playback_at,
             device: playback.active_device_name.clone(),
             local: false,
             volume: playback.active_volume.unwrap_or(u16::MAX),
@@ -666,11 +689,11 @@ impl Engine {
                 0
             };
             let expected = position.saturating_add(elapsed);
-            if *last == key && expected.abs_diff(now.position_ms) < POSITION_DRIFT_MS {
+            if *last == key && expected.abs_diff(now.position()) < POSITION_DRIFT_MS {
                 return;
             }
         }
-        self.published = Some((key, now.position_ms, Instant::now()));
+        self.published = Some((key, now.position(), Instant::now()));
         let _ = updates.send(Update::Now(Box::new(now)));
     }
 
@@ -683,7 +706,7 @@ impl Engine {
                     .as_deref()
                     .is_some_and(|active| active != self.device_id)
                     && self.playing.is_some();
-                self.playback = Some(playback);
+                self.keep_playback(playback);
                 if moved_away {
                     self.stop_local();
                 }
@@ -900,6 +923,17 @@ mod tests {
         assert_eq!(pushed.queue.revision, fetched.queue.revision);
         assert!(PlaybackKey::of(&pushed) != PlaybackKey::of(&fetched));
         assert!(PlaybackKey::of(&fetched) == PlaybackKey::of(&fetched.clone()));
+    }
+
+    #[test]
+    fn advances_a_position_from_when_it_was_read() {
+        let since = Duration::from_millis(30_000);
+        assert_eq!(advance(4_000, Some(1.), Some(200_000), since), 34_000);
+        assert_eq!(advance(4_000, None, Some(200_000), since), 4_000);
+        assert_eq!(advance(4_000, Some(1.5), Some(200_000), since), 49_000);
+        assert_eq!(advance(190_000, Some(1.), Some(200_000), since), 200_000);
+        assert_eq!(advance(190_000, Some(1.), Some(0), since), 220_000);
+        assert_eq!(advance(4_000, Some(1.), None, since), 34_000);
     }
 
     #[test]

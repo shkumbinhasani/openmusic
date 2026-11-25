@@ -224,7 +224,7 @@ impl Engine {
 
     async fn refresh_cluster(&mut self) -> Result<()> {
         let cluster = connect::fetch_cluster(&self.api).await?;
-        self.playback = Some(connect::playback(&cluster, &self.device_id));
+        self.keep_playback(connect::playback(&cluster, &self.device_id));
         Ok(())
     }
 
@@ -430,7 +430,7 @@ impl Engine {
                 };
                 position.saturating_add(elapsed)
             }
-            _ => playback.position_ms,
+            _ => self.playback_position(playback),
         }
     }
 
