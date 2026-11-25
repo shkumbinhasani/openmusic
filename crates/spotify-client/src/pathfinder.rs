@@ -95,9 +95,6 @@ pub fn interpret(operation: Operation, status: StatusCode, bytes: &[u8]) -> Resu
         .get_mut("data")
         .map(Value::take)
         .unwrap_or(Value::Null);
-    if !data.is_null() {
-        return Ok(data);
-    }
     let messages: Vec<String> = reply["errors"]
         .as_array()
         .into_iter()
@@ -109,10 +106,34 @@ pub fn interpret(operation: Operation, status: StatusCode, bytes: &[u8]) -> Resu
                 .unwrap_or_else(|| error.to_string())
         })
         .collect();
+    if operation.kind == Kind::Mutation {
+        if !messages.is_empty() {
+            bail!(PathfinderError::GraphQl(messages));
+        }
+        if let Some(refusal) = refusal(&data) {
+            bail!(PathfinderError::GraphQl(vec![refusal]));
+        }
+    }
+    if !data.is_null() {
+        return Ok(data);
+    }
     if reply["errors"].is_array() {
         bail!(PathfinderError::GraphQl(messages));
     }
     bail!(PathfinderError::NoData)
+}
+
+fn refusal(data: &Value) -> Option<String> {
+    data.as_object()?.values().find_map(|reply| {
+        let kind = reply["__typename"].as_str()?;
+        kind.ends_with("Error").then(|| {
+            reply["message"]
+                .as_str()
+                .filter(|message| !message.is_empty())
+                .unwrap_or(kind)
+                .to_owned()
+        })
+    })
 }
 
 async fn run(api: &Api, operation: Operation, variables: Value) -> Result<Value> {
@@ -230,6 +251,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(data, json!({"searchV2": {"query": "x"}}));
+    }
+
+    #[test]
+    fn fails_a_write_that_comes_back_with_errors() {
+        let result = interpret(
+            ADD,
+            StatusCode::OK,
+            br#"{"data":{"addLibraryItems":null},"errors":[{"message":"not allowed"}]}"#,
+        );
+        assert_eq!(
+            error(result),
+            PathfinderError::GraphQl(vec!["not allowed".into()])
+        );
+        let result = interpret(
+            ADD,
+            StatusCode::OK,
+            br#"{"data":{"addItemsToPlaylist":{"__typename":"GenericError","message":"Too many"}}}"#,
+        );
+        assert_eq!(
+            error(result),
+            PathfinderError::GraphQl(vec!["Too many".into()])
+        );
+        let result = interpret(
+            ADD,
+            StatusCode::OK,
+            br#"{"data":{"removeItems":{"__typename":"NotFoundError"}}}"#,
+        );
+        assert_eq!(
+            error(result),
+            PathfinderError::GraphQl(vec!["NotFoundError".into()])
+        );
+        let data = interpret(
+            ADD,
+            StatusCode::OK,
+            br#"{"data":{"addLibraryItems":{"__typename":"AddLibraryItemsResponse"}},"errors":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            data,
+            json!({"addLibraryItems": {"__typename": "AddLibraryItemsResponse"}})
+        );
+        assert!(interpret(ADD, StatusCode::OK, br#"{"data":{"x":null}}"#).is_ok());
     }
 
     #[test]
