@@ -19,7 +19,7 @@ use crate::{
     icons, overlay,
     ui::{
         Palette,
-        components::{Sentinel, icon, scroll_sentinel, skeleton_header, skeleton_rows},
+        components::{Sentinel, icon, link, scroll_sentinel, skeleton_header, skeleton_rows},
         menu::{MenuItem, Place},
     },
 };
@@ -34,6 +34,7 @@ const ROWS: RowIds = RowIds {
     show: "your-episode-show",
 };
 pub const SORT_KEY: &str = "your-episodes-sort";
+const FIND_PODCASTS: &str = "spotify:genre:podcasts-web";
 
 type Undo = Rc<dyn Fn(&mut OpenMusic, &mut Context<OpenMusic>)>;
 
@@ -367,7 +368,15 @@ impl OpenMusic {
                                 .text_size(px(14.))
                                 .text_color(rgb(palette.muted))
                                 .child("Save episodes to this playlist by tapping the plus icon."),
-                        ),
+                        )
+                        .child(div().pt_2().flex().child(link(
+                            "your-episodes-find",
+                            "Find podcasts".to_owned(),
+                            Some(Page::Browse(FIND_PODCASTS.to_owned())),
+                            14.,
+                            palette,
+                            cx,
+                        ))),
                 )
                 .into_any_element();
         }

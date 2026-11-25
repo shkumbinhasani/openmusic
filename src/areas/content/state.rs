@@ -987,6 +987,22 @@ pub fn state_fragment(app: &OpenMusic) -> String {
             Some((loaded, Err(_))) if loaded == uri => format!("show={uri} episodes=error"),
             _ => format!("show={uri} episodes=loading"),
         },
+        Page::Lyrics => match app.track() {
+            Some(track) if is_episode(&track.uri) => match &app.content.lyrics {
+                Some((uri, Some(lyrics))) if *uri == track.uri => format!(
+                    "transcript={} line={:?} detached={}",
+                    lyrics.lines.len(),
+                    app.content.lyrics_line,
+                    app.transcript_view()
+                        .is_some_and(|view| view.detached.get())
+                ),
+                Some((uri, None)) if *uri == track.uri && app.content.lyrics_loading => {
+                    "transcript=loading".to_owned()
+                }
+                _ => "transcript=none".to_owned(),
+            },
+            _ => String::new(),
+        },
         Page::YourEpisodes => match &app.content.yours.entries {
             Some(Ok(entries)) => format!(
                 "your_episodes={}/{} decorated={}",
