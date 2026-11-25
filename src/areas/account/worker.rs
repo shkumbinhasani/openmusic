@@ -1,14 +1,19 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use spotify_client::{
     Api, Track,
     account::{self, AccountInfo},
     api::HttpStatus,
     dealer::Message,
+    engine::{Control, playback},
     social::{self, Friend, PlaylistRef, Privacy, PrivacyField, Profile, ProfileRef, TopContent},
 };
+use tokio::sync::mpsc::UnboundedSender;
 
-use super::state::{AccountPrefs, ProfileListKind, chosen_language, system_language};
+use super::{
+    local_scan::{self, CoverCache, LocalFile, LocalSources, ScanReport, ScanUpdate},
+    state::{AccountPrefs, ProfileListKind, chosen_language, system_language},
+};
 use crate::worker::{Ctx, Mutation, User, cache};
 
 const SECOND_LOOK: Duration = Duration::from_secs(5);
@@ -43,6 +48,17 @@ pub enum Command {
     SetName(String),
     RefreshSoon,
     Friends,
+    LocalScan {
+        sources: LocalSources,
+        generation: u64,
+        load: bool,
+    },
+    LocalStop(u64),
+    LocalArt(Vec<(String, PathBuf)>),
+    PlayLocal {
+        files: Vec<LocalFile>,
+        index: usize,
+    },
 }
 
 pub struct ProfileView {
@@ -153,6 +169,8 @@ pub enum Event {
         result: Result<Vec<Friend>, String>,
         slow: bool,
     },
+    LocalScan(Box<ScanUpdate>),
+    LocalArt(Vec<String>),
 }
 
 impl Event {
@@ -170,6 +188,7 @@ impl Event {
                 result: Ok(friends),
                 ..
             } => friends.iter().flat_map(Friend::images).collect(),
+            Self::LocalArt(keys) => keys.clone(),
             Self::Account(Err(_))
             | Self::Cache { .. }
             | Self::Profile { .. }
@@ -182,7 +201,8 @@ impl Event {
             | Self::Privacy(_)
             | Self::PrivacySaved { .. }
             | Self::NameSaved { .. }
-            | Self::Friends { .. } => Vec::new(),
+            | Self::Friends { .. }
+            | Self::LocalScan(_) => Vec::new(),
         }
     }
 }
@@ -243,7 +263,96 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::Friends => ctx
             .tasks
             .spawn_keyed("friends", friend_activity(ctx.api.clone())),
+        Command::LocalScan {
+            sources,
+            generation,
+            load,
+        } => {
+            local_scan::supersede(generation);
+            let events = ctx.events.clone();
+            ctx.tasks.spawn_keyed(
+                "local-scan",
+                scan_local_files(sources, generation, load, events),
+            );
+        }
+        Command::LocalStop(generation) => local_scan::supersede(generation),
+        Command::LocalArt(items) => ctx.tasks.spawn(local_art(items)),
+        Command::PlayLocal { files, index } => {
+            for file in &files {
+                ctx.known.tracks.insert(file.uri.clone(), file.track());
+            }
+            let tracks = files.iter().map(LocalFile::local_track).collect();
+            ctx.handle
+                .send(Control::Audio(playback::Control::PlayLocal {
+                    tracks,
+                    index,
+                }));
+        }
     }
+}
+
+async fn scan_local_files(
+    sources: LocalSources,
+    generation: u64,
+    load: bool,
+    events: UnboundedSender<crate::worker::Event>,
+) -> crate::worker::Event {
+    let finished = tokio::task::spawn_blocking(move || {
+        let send = |update: ScanUpdate| {
+            let _ = events.send(Event::LocalScan(Box::new(update)).into());
+        };
+        let path = local_scan::index_path();
+        let previous = path
+            .as_deref()
+            .map(local_scan::read_index)
+            .unwrap_or_default();
+        if load {
+            send(ScanUpdate {
+                generation,
+                files: Some(previous.clone()),
+                ..ScanUpdate::default()
+            });
+        }
+        let alive = || local_scan::live(generation);
+        let mut report = send;
+        let update = local_scan::scan(
+            &sources,
+            local_scan::home().as_deref(),
+            previous,
+            generation,
+            &CoverCache,
+            &alive,
+            &mut report,
+        )?;
+        if let (Some(path), Some(files)) = (&path, &update.files)
+            && alive()
+        {
+            local_scan::write_index(path, files);
+        }
+        Some(update)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(ScanUpdate {
+        generation,
+        finished: Some(ScanReport::default()),
+        ..ScanUpdate::default()
+    });
+    Event::LocalScan(Box::new(finished)).into()
+}
+
+async fn local_art(items: Vec<(String, PathBuf)>) -> crate::worker::Event {
+    let keys = tokio::task::spawn_blocking(move || {
+        items
+            .into_iter()
+            .filter(|(key, path)| local_scan::ensure_art(key, path, &CoverCache))
+            .map(|(key, _)| key)
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+    Event::LocalArt(keys).into()
 }
 
 pub fn on_push(message: &Message, ctx: &mut Ctx) {

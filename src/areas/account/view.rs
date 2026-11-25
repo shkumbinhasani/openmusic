@@ -8,11 +8,11 @@ use spotify_client::{
     account::{AccountInfo, Explicit},
 };
 
-use super::profile;
 use super::state::{
     CHIP, CHIP_ROW, CLEAR_CACHE_KEY, FREE_MESSAGE, FREE_NOTICE, LANGUAGE_KEY, LANGUAGES,
     PREMIUM_KEY, PREMIUM_URL, cache_label, language_name,
 };
+use super::{local, profile};
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
     icons,
@@ -142,11 +142,11 @@ impl OpenMusic {
 
     pub fn local_files_page(
         &self,
-        _card_side: Pixels,
+        card_side: Pixels,
         palette: Palette,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
+        self.local_files_view(card_side, palette, cx)
     }
 
     pub fn account_chip(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -432,12 +432,12 @@ impl OpenMusic {
         Some(settings_section("Social", rows, palette))
     }
 
-    pub fn library_section(
-        &self,
-        _palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        None
+    pub fn library_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        Some(settings_section(
+            "Local Files",
+            self.local_rows(palette, cx),
+            palette,
+        ))
     }
 
     pub fn language_section(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -532,11 +532,13 @@ impl OpenMusic {
 }
 
 pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    profile::menu_items(target, app)
+    let mut items = profile::menu_items(target, app);
+    items.extend(local::menu_items(target, app));
+    items
 }
 
-pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {
-    Vec::new()
+pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
+    local::nav_entry(app).into_iter().collect()
 }
 
 pub fn dock_items(
@@ -567,8 +569,8 @@ fn label_width(text: &str) -> f32 {
     (32. + glyphs).max(72.)
 }
 
-pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, _options: &RowOptions) -> bool {
-    filtered(app.account(), track)
+pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOptions) -> bool {
+    filtered(app.account(), track) || local::row_dimmed(app, row)
 }
 
 pub fn filtered(account: Option<&AccountInfo>, track: &Track) -> bool {

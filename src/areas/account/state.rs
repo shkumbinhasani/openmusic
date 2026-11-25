@@ -8,6 +8,8 @@ use spotify_client::account::{AccountInfo, Explicit};
 use super::{
     friends::{self, Friends},
     friends_view::HIDE_KEY,
+    local::{self, LocalLibrary},
+    local_scan::{LocalSources, is_local},
     name::{self, NameEditor},
     privacy::{self, PrivacyState},
     profile::{self, Profiles},
@@ -30,6 +32,7 @@ use crate::{
 pub struct AccountPrefs {
     pub language: Option<String>,
     pub show_friends: bool,
+    pub local_files: LocalSources,
 }
 
 pub const LANGUAGE_KEY: &str = "settings-language";
@@ -223,6 +226,7 @@ pub struct State {
     pub privacy: PrivacyState,
     pub name_editor: Option<Entity<NameEditor>>,
     pub friends: Friends,
+    pub local: LocalLibrary,
 }
 
 impl State {
@@ -232,6 +236,7 @@ impl State {
         }
         self.profiles.covers(urls);
         self.friends.covers(urls);
+        self.local.covers(urls);
     }
 }
 
@@ -242,7 +247,8 @@ impl OpenMusic {
 
     pub fn needs_premium_here(&mut self, resume: bool, cx: &mut Context<Self>) -> bool {
         let elsewhere = self.playback.now.device.is_some() && !self.playback.now.local;
-        if !blocks_playback(self.account(), resume, elsewhere) {
+        let local_file = resume && self.track().is_some_and(|track| is_local(&track.uri));
+        if local_file || !blocks_playback(self.account(), resume, elsewhere) {
             return false;
         }
         self.show_toast(FREE_NOTICE, None);
@@ -488,6 +494,9 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
         app.refresh_cache_size();
         app.refresh_privacy();
     }
+    if *page == Page::LocalFiles {
+        local::load(app);
+    }
     profile::load(app, page);
 }
 
@@ -529,6 +538,8 @@ pub fn on_event(
         } => privacy::on_saved(app, field, value, saved, now),
         Event::NameSaved { name, done } => name::on_saved(app, name, done, window, cx),
         Event::Friends { result, slow } => friends::on_friends(app, result, slow),
+        Event::LocalScan(update) => local::on_scan(app, *update),
+        Event::LocalArt(_) => {}
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -539,14 +550,20 @@ pub fn on_event(
     }
 }
 
-pub fn connected(app: &mut OpenMusic, _window: &mut Window, cx: &mut Context<OpenMusic>) {
+pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<OpenMusic>) {
     app.send(Command::Language(app.settings.account.language.clone()));
     app.refresh_account();
     app.resume_social(cx);
+    local::connected(app, window, cx);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
-    app.account = State::default();
+    let mut library = std::mem::take(&mut app.account.local);
+    local::signed_out(&mut library);
+    app.account = State {
+        local: library,
+        ..State::default()
+    };
 }
 
 pub fn debug(
@@ -598,6 +615,7 @@ pub fn debug(
         "privacy" => privacy::debug(app, rest, directory),
         "display-name" => name::debug(app, rest, directory, window, cx),
         "friends" => friends::debug(app, rest, directory),
+        "localfiles" => local::debug(app, rest, directory, window, cx),
         "profile" | "profiles" | "follow-user" | "follows" | "block" | "block-ask" | "blocking" => {
             return profile::debug(app, verb, rest, directory, window, cx);
         }
@@ -667,10 +685,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         "off".to_owned()
     };
     format!(
-        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={} blocks_pending={} friends={friends}",
+        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={} blocks_pending={} friends={friends} {}",
         app.language(),
         app.account.profiles.pending.len(),
-        app.account.profiles.block_pending.len()
+        app.account.profiles.block_pending.len(),
+        local::state_fragment(app)
     )
 }
 
@@ -722,6 +741,13 @@ pub fn on_press(
                 app.set_blocking(uri.clone(), false);
             }
         }
+        local::PLAY_KEY => app.play_local_files(cx),
+        local::MORE_KEY => app.open_local_menu(),
+        local::SORT_KEY => app.open_local_sort_menu(),
+        local::ADD_KEY => app.add_local_folders(cx),
+        local::RESCAN_KEY => app.rescan_local_files(),
+        local::ENABLE_KEY => app.set_local_sources(|sources| sources.enabled = true),
+        local::PRIVACY_KEY => cx.open_url(local::PRIVACY_URL),
         _ => return false,
     }
     true
@@ -740,6 +766,7 @@ pub fn row_dropped(
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     profile::tick(app, cx);
     friends::tick(app, cx);
+    local::tick(app, cx);
 }
 
 #[cfg(test)]

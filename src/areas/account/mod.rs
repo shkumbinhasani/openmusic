@@ -1,5 +1,8 @@
 pub mod friends;
 pub mod friends_view;
+pub mod local;
+pub mod local_scan;
+pub mod local_view;
 pub mod name;
 pub mod privacy;
 pub mod profile;
