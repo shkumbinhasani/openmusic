@@ -1,3 +1,4 @@
+mod page;
 mod rootlist;
 
 use anyhow::{Result, bail};
@@ -10,10 +11,86 @@ use crate::{
     dealer::Message,
     pathfinder::{self, Operation},
 };
+pub use page::{
+    ALPHABETICAL, CREATOR, CUSTOM_ORDER, Chip, FEATURES, ItemKind, LIBRARY_V3, LIKED_SONGS,
+    LibraryError, LibraryItem, LibraryPage, LibraryQuery, PAGE_SIZE, PLAYLISTS, RECENTLY_ADDED,
+    RECENTS, YOUR_EPISODES, count_label, fallback_page, folder_detail, iso_ms, now_ms, page,
+    parse_page, variables, wants_fallback,
+};
 pub use rootlist::{
     ROOT_HASH, RootEntry, RootFolder, RootItem, RootNode, RootPage, Rootlist, decode_name,
     folder_hash, folder_uri, rootlist,
 };
+
+pub const PIN_LIBRARY_ITEM: Operation = Operation::mutation(
+    "pinLibraryItem",
+    "896ebcb47815681340860d121cb5d494e157e2a78d3950385cd54e0393c67148",
+);
+pub const UNPIN_LIBRARY_ITEM: Operation = Operation::mutation(
+    "unpinLibraryItem",
+    "896ebcb47815681340860d121cb5d494e157e2a78d3950385cd54e0393c67148",
+);
+pub const DEFAULT_PIN_LIMIT: u32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinResult {
+    Done,
+    LimitReached(u32),
+    InFolder,
+    NotSupported,
+    NotInLibrary,
+    Refused,
+}
+
+pub fn pinnable_uri(uri: &str, user: &str) -> String {
+    match uri {
+        "spotify:collection:tracks" | "spotify:collection" => {
+            format!("spotify:user:{user}:collection")
+        }
+        "spotify:collection:your-episodes" => {
+            format!("spotify:user:{user}:collection:your-episodes")
+        }
+        uri => uri.to_owned(),
+    }
+}
+
+pub fn pin_request(uri: &str, user: &str, pinned: bool) -> (Operation, Value) {
+    let operation = if pinned {
+        PIN_LIBRARY_ITEM
+    } else {
+        UNPIN_LIBRARY_ITEM
+    };
+    (
+        operation,
+        json!({ "pinnableItemUri": pinnable_uri(uri, user) }),
+    )
+}
+
+pub fn parse_pin(data: &Value) -> PinResult {
+    let result = &data["pinItemInLibrary"];
+    match result["pinResult"].as_str() {
+        Some("SUCCESSFUL") => PinResult::Done,
+        Some("FAILED_ITEM_LIMIT_REACHED") => PinResult::LimitReached(
+            result["pinLimit"]
+                .as_u64()
+                .map_or(DEFAULT_PIN_LIMIT, |limit| limit as u32),
+        ),
+        Some("FAILED_ITEM_IN_FOLDER") => PinResult::InFolder,
+        Some("FAILED_ITEM_NOT_SUPPORTED") => PinResult::NotSupported,
+        Some("FAILED_NOT_IN_YOUR_LIBRARY") => PinResult::NotInLibrary,
+        _ => PinResult::Refused,
+    }
+}
+
+pub async fn pin(api: &Api, user: &str, uri: &str, pinned: bool) -> Result<PinResult> {
+    let (operation, variables) = pin_request(uri, user, pinned);
+    let data = pathfinder::mutate(api, operation, variables).await?;
+    Ok(if pinned {
+        parse_pin(&data)
+    } else {
+        PinResult::Done
+    })
+}
 
 pub const ARE_ENTITIES_IN_LIBRARY: Operation = Operation::query(
     "areEntitiesInLibrary",
@@ -227,6 +304,65 @@ mod tests {
         );
         let plain = collection_push(&message("hm://collection/artist/someone/json", body)).unwrap();
         assert_eq!(plain.len(), 2);
+    }
+
+    #[test]
+    fn pins_with_the_web_player_uris() {
+        assert_eq!(
+            pinnable_uri("spotify:collection:tracks", "someone"),
+            "spotify:user:someone:collection"
+        );
+        assert_eq!(
+            pinnable_uri("spotify:collection:your-episodes", "someone"),
+            "spotify:user:someone:collection:your-episodes"
+        );
+        assert_eq!(
+            pinnable_uri("spotify:playlist:37i9dQZF1FgnTBfUlzkeKt", "someone"),
+            "spotify:playlist:37i9dQZF1FgnTBfUlzkeKt"
+        );
+        let (operation, variables) = pin_request("spotify:collection:tracks", "someone", true);
+        assert_eq!(operation, PIN_LIBRARY_ITEM);
+        assert_eq!(
+            variables,
+            json!({"pinnableItemUri": "spotify:user:someone:collection"})
+        );
+        let (operation, variables) =
+            pin_request("spotify:user:someone:folder:1a2b", "someone", false);
+        assert_eq!(operation, UNPIN_LIBRARY_ITEM);
+        assert_eq!(
+            variables,
+            json!({"pinnableItemUri": "spotify:user:someone:folder:1a2b"})
+        );
+    }
+
+    #[test]
+    fn reads_pin_results() {
+        let result = |value: Value| parse_pin(&json!({ "pinItemInLibrary": value }));
+        assert_eq!(
+            result(json!({"pinResult": "SUCCESSFUL", "pinLimit": 4})),
+            PinResult::Done
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_LIMIT_REACHED", "pinLimit": 5})),
+            PinResult::LimitReached(5)
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_LIMIT_REACHED"})),
+            PinResult::LimitReached(4)
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_IN_FOLDER"})),
+            PinResult::InFolder
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_NOT_SUPPORTED"})),
+            PinResult::NotSupported
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_NOT_IN_YOUR_LIBRARY"})),
+            PinResult::NotInLibrary
+        );
+        assert_eq!(result(Value::Null), PinResult::Refused);
     }
 
     #[test]
