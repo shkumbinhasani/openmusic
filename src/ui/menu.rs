@@ -462,8 +462,30 @@ pub struct Menus {
     runs: Vec<Run>,
     submenus: HashMap<&'static str, u32>,
     bar: Vec<Entry>,
-    bar_runs: Vec<Run>,
+    bar_target: Option<Target>,
+    bar_runs: BarRuns,
     sample: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct BarRuns {
+    latest: u32,
+    kept: Vec<(u32, Vec<Run>)>,
+}
+
+impl BarRuns {
+    fn replace(&mut self, runs: Vec<Run>, shown: Option<u32>) -> u32 {
+        self.latest = self.latest.wrapping_add(1);
+        self.kept
+            .retain(|(generation, _)| Some(*generation) == shown);
+        self.kept.push((self.latest, runs));
+        self.latest
+    }
+
+    fn get(&self, generation: u32, id: u32) -> Option<Run> {
+        let (_, runs) = self.kept.iter().find(|(kept, _)| *kept == generation)?;
+        runs.get(id as usize).cloned()
+    }
 }
 
 impl OpenMusic {
@@ -542,7 +564,7 @@ impl OpenMusic {
     pub fn menu_action(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         let run = match action {
             Action::Menu(id) => self.menus.runs.get(id as usize).cloned(),
-            Action::BarMenu(id) => self.menus.bar_runs.get(id as usize).cloned(),
+            Action::BarMenu { generation, id } => self.menus.bar_runs.get(generation, id),
             Action::MenuClosed => {
                 self.menus.row = None;
                 None
@@ -569,17 +591,20 @@ impl OpenMusic {
     }
 
     pub fn refresh_bar_menu(&mut self) {
-        let items = self
-            .now_playing_target(Surface::NowPlaying)
-            .map(|target| self.menu_items(&target))
+        let target = self.now_playing_target(Surface::NowPlaying);
+        let items = target
+            .as_ref()
+            .map(|target| self.menu_items(target))
             .unwrap_or_default();
         let mut runs = Vec::new();
         let entries = lower(items, &mut runs, &mut HashMap::new());
-        self.menus.bar_runs = runs;
-        if entries != self.menus.bar {
-            self.menus.bar = entries.clone();
-            overlay::bar_menu(entries);
+        if entries == self.menus.bar && target == self.menus.bar_target {
+            return;
         }
+        let generation = self.menus.bar_runs.replace(runs, overlay::bar_built());
+        self.menus.bar = entries.clone();
+        self.menus.bar_target = target;
+        overlay::bar_menu(generation, entries);
     }
 }
 
@@ -885,5 +910,23 @@ mod tests {
             target.describe(),
             "track spotify:track:4uLU6hMCjMI75M1A2tKUQC uid=u1 context=spotify:album:1b5KESuOMQomF3wntoLAsk surface=card"
         );
+    }
+
+    #[test]
+    fn a_bar_menu_click_runs_the_item_that_was_shown() {
+        let run = || -> Run { Rc::new(|_, _, _| {}) };
+        let (first, second, third) = (run(), run(), run());
+        let mut bar = BarRuns::default();
+        let shown = bar.replace(vec![first.clone(), second.clone()], None);
+        let newer = bar.replace(vec![third.clone()], Some(shown));
+        assert!(Rc::ptr_eq(&bar.get(shown, 0).unwrap(), &first));
+        assert!(Rc::ptr_eq(&bar.get(shown, 1).unwrap(), &second));
+        assert!(Rc::ptr_eq(&bar.get(newer, 0).unwrap(), &third));
+        let latest = bar.replace(vec![run()], Some(shown));
+        assert!(bar.get(newer, 0).is_none());
+        assert!(bar.get(shown, 1).is_some());
+        bar.replace(vec![run()], Some(latest));
+        assert!(bar.get(shown, 0).is_none());
+        assert!(bar.get(latest, 0).is_some());
     }
 }

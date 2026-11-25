@@ -422,7 +422,7 @@ impl OpenMusic {
             }
             overlay::Action::Menu(_)
             | overlay::Action::MenuClosed
-            | overlay::Action::BarMenu(_) => self.menu_action(action, window, cx),
+            | overlay::Action::BarMenu { .. } => self.menu_action(action, window, cx),
             overlay::Action::Seek(fraction) => {
                 if let Some(duration) = self.duration() {
                     let position = (fraction * duration.saturating_sub(1) as f32) as u32;

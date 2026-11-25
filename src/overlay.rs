@@ -10,7 +10,7 @@ pub enum Action {
     Volume(f32),
     Menu(u32),
     MenuClosed,
-    BarMenu(u32),
+    BarMenu { generation: u32, id: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,8 +70,8 @@ thread_local! {
 #[cfg(target_os = "macos")]
 pub use native::dock_artwork;
 pub use native::{
-    available, bar_menu, bar_menu_tree, close_menu, drag, filter_menu, menu_bar_tree, menu_tree,
-    nudge_window, pick, progress, right_click, set_handler, update_menu,
+    available, bar_built, bar_menu, bar_menu_tree, close_menu, drag, filter_menu, menu_bar_tree,
+    menu_tree, nudge_window, pick, progress, right_click, set_handler, update_menu,
 };
 
 pub fn button(key: &'static str, spec: ButtonSpec) -> impl IntoElement {
@@ -264,7 +264,12 @@ mod native {
 
             #[unsafe(method(barMenuItem:))]
             fn bar_menu_item(&self, sender: &NSMenuItem) {
-                dispatch(Action::BarMenu(sender.tag() as u32));
+                if let Some(generation) = OVERLAY.with_borrow(|overlay| overlay.bar_built) {
+                    dispatch(Action::BarMenu {
+                        generation,
+                        id: sender.tag() as u32,
+                    });
+                }
             }
 
             #[unsafe(method(showMenu:))]
@@ -349,6 +354,8 @@ mod native {
         tracking: Option<Retained<NSMenu>>,
         built: Built,
         bar_entries: Vec<Entry>,
+        bar_generation: u32,
+        bar_built: Option<u32>,
         bar: Option<Retained<NSMenu>>,
     }
 
@@ -984,14 +991,19 @@ mod native {
         })
     }
 
-    pub fn bar_menu(entries: Vec<Entry>) {
+    pub fn bar_menu(generation: u32, entries: Vec<Entry>) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         OVERLAY.with_borrow_mut(|overlay| {
             overlay.bar_entries = entries;
+            overlay.bar_generation = generation;
             attach_bar(overlay, mtm);
         });
+    }
+
+    pub fn bar_built() -> Option<u32> {
+        OVERLAY.with_borrow(|overlay| overlay.bar_built)
     }
 
     fn attach_bar(overlay: &mut Overlay, mtm: MainThreadMarker) {
@@ -1056,8 +1068,10 @@ mod native {
             return;
         };
         let Some((entries, delegate)) = OVERLAY.with_borrow_mut(|overlay| {
-            (overlay.bar.as_deref() == Some(menu))
-                .then(|| (overlay.bar_entries.clone(), delegate(overlay, mtm)))
+            (overlay.bar.as_deref() == Some(menu)).then(|| {
+                overlay.bar_built = Some(overlay.bar_generation);
+                (overlay.bar_entries.clone(), delegate(overlay, mtm))
+            })
         }) else {
             return;
         };
@@ -1569,7 +1583,11 @@ mod native {
 
     pub fn update_menu(_: u32, _: Vec<Entry>) {}
 
-    pub fn bar_menu(_: Vec<Entry>) {}
+    pub fn bar_menu(_: u32, _: Vec<Entry>) {}
+
+    pub fn bar_built() -> Option<u32> {
+        None
+    }
 
     pub fn menu_tree() -> Option<String> {
         None
