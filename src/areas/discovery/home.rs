@@ -102,6 +102,17 @@ pub fn card_plays(card: &Card) -> bool {
         )
 }
 
+pub fn card_track(card: &Card) -> Track {
+    Track {
+        uri: card.uri.clone(),
+        title: card.title.clone(),
+        artist: card.subtitle.clone(),
+        cover: card.image.clone(),
+        explicit: card.explicit,
+        ..Track::default()
+    }
+}
+
 pub fn same_context(card_uri: &str, context: &str) -> bool {
     card_uri == context || (entity::is_liked_songs(card_uri) && entity::is_liked_songs(context))
 }
@@ -262,15 +273,10 @@ impl OpenMusic {
         }
         match card.kind {
             Kind::Track => {
-                let track = Track {
-                    uri: card.uri.clone(),
-                    title: card.title.clone(),
-                    artist: card.subtitle.clone(),
-                    cover: card.image.clone(),
-                    explicit: card.explicit,
-                    ..Track::default()
-                };
-                self.play(&[track], 0, cx);
+                let track = card_track(card);
+                if !self.refuses_track(Some(&track), None, cx) {
+                    self.play(&[track], 0, cx);
+                }
             }
             Kind::LikedSongs => {
                 let options = PlayOptions::titled(&card.title);
@@ -655,5 +661,22 @@ mod tests {
         assert!(!card_plays(&blocked));
         assert!(same_context("spotify:user:u:collection", LIKED_SONGS));
         assert!(!same_context("spotify:album:a", "spotify:album:b"));
+    }
+
+    #[test]
+    fn a_song_card_plays_a_track_the_explicit_filter_can_refuse() {
+        let mut song = crate::ui::cards::card("spotify:track:a", Kind::Track, "Creep", "x", None);
+        song.explicit = true;
+        let track = card_track(&song);
+        assert_eq!(track.uri, "spotify:track:a");
+        assert_eq!(track.title, "Creep");
+        let filtering = spotify_client::account::AccountInfo {
+            explicit_filtered: true,
+            ..Default::default()
+        };
+        assert!(crate::areas::account::view::filtered(
+            Some(&filtering),
+            &track
+        ));
     }
 }

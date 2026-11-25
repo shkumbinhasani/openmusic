@@ -298,6 +298,15 @@ impl OpenMusic {
         DIMMED.iter().any(|hook| hook(self, track, row, options))
     }
 
+    pub fn refuses_track(
+        &mut self,
+        track: Option<&Track>,
+        context: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.refuses_skipped(track, context, cx) || self.refuses_explicit(track, cx)
+    }
+
     pub fn drop_rows(
         &mut self,
         drag: &RowDrag,
@@ -413,12 +422,11 @@ impl OpenMusic {
                             })
                             .hover(move |row| row.bg(rgba(palette.press)))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                if this.refuses_skipped(queue.get(index), context.as_deref(), cx) {
+                                if this.refuses_track(queue.get(index), context.as_deref(), cx) {
                                     return;
                                 }
                                 match (&click, &context) {
                                     (Some(click), _) => click(this, &queue, index, window, cx),
-                                    (None, _) if this.refuses_explicit(queue.get(index), cx) => {}
                                     (None, _) if this.plays_local_row(&queue, index, cx) => {}
                                     (None, Some(context)) => {
                                         this.play_context(context, &queue, index, cx)

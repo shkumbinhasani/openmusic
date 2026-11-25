@@ -539,6 +539,9 @@ impl OpenMusic {
 
     pub fn open_hit(&mut self, hit: Hit, cx: &mut Context<Self>) {
         let track = hit.playable_track();
+        if self.refuses_track(track.as_ref(), None, cx) {
+            return;
+        }
         let page = page_for(hit.uri());
         self.remember_search(hit);
         match (track, page) {
@@ -552,6 +555,9 @@ impl OpenMusic {
         let Some(track) = tracks.get(index) else {
             return;
         };
+        if self.refuses_track(Some(track), None, cx) {
+            return;
+        }
         if self.discovery.is_unplayable(&track.uri) {
             self.show_toast("This song isn’t available.", None);
             return;
@@ -781,7 +787,9 @@ impl OpenMusic {
                             ..SearchResults::default()
                         };
                         self.discovery.search = Some(Ok(Box::new(results)));
-                        self.play(&[track], 0, cx);
+                        if !self.refuses_track(Some(&track), None, cx) {
+                            self.play(&[track], 0, cx);
+                        }
                     }
                     Err(error) => self.discovery.search = Some(Err(error)),
                 }
