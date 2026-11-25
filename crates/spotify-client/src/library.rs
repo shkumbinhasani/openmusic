@@ -1,3 +1,8 @@
+mod liked;
+mod page;
+mod recents;
+mod rootlist;
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -8,6 +13,97 @@ use crate::{
     dealer::Message,
     pathfinder::{self, Operation},
 };
+pub use liked::{
+    FETCH_LIBRARY_TRACKS, LIKED_PAGE_SIZE, LikedPage, liked, liked_variables, parse_liked,
+};
+pub use page::{
+    ALPHABETICAL, CREATOR, CUSTOM_ORDER, Chip, FEATURES, ItemKind, LIBRARY_V3, LIKED_SONGS,
+    LibraryError, LibraryItem, LibraryPage, LibraryQuery, PAGE_SIZE, PLAYLISTS, RECENTLY_ADDED,
+    RECENTS, YOUR_EPISODES, count_label, fallback_page, folder_detail, iso_ms, now_ms, page,
+    parse_page, variables, wants_fallback,
+};
+pub use recents::{
+    Activity, Content, DAY_MS, FETCH_ENTITIES_FOR_RECENTLY_PLAYED, PlayedContext,
+    RECENTLY_PLAYED_LIMIT, RECENTS_LIST, RECENTS_PAGE, RECENTS_PAGE_SIZE, RecentDay, RecentEntry,
+    RecentGroup, RecentKind, RecentsPage, context_uri, day_label, day_of, decorate, decorated,
+    fallback_recents, group_count, is_your_episodes, lookup_entry, merge_played, parse_played,
+    parse_recents, recent_contexts, recent_days, recently_played, recently_played_path, recents,
+    recents_variables,
+};
+pub use rootlist::{
+    ROOT_HASH, RootEntry, RootFolder, RootItem, RootNode, RootPage, Rootlist, decode_name,
+    folder_hash, folder_uri, rootlist,
+};
+
+pub const PIN_LIBRARY_ITEM: Operation = Operation::mutation(
+    "pinLibraryItem",
+    "896ebcb47815681340860d121cb5d494e157e2a78d3950385cd54e0393c67148",
+);
+pub const UNPIN_LIBRARY_ITEM: Operation = Operation::mutation(
+    "unpinLibraryItem",
+    "896ebcb47815681340860d121cb5d494e157e2a78d3950385cd54e0393c67148",
+);
+pub const DEFAULT_PIN_LIMIT: u32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinResult {
+    Done,
+    LimitReached(u32),
+    InFolder,
+    NotSupported,
+    NotInLibrary,
+    Refused,
+}
+
+pub fn pinnable_uri(uri: &str, user: &str) -> String {
+    match uri {
+        "spotify:collection:tracks" | "spotify:collection" => {
+            format!("spotify:user:{user}:collection")
+        }
+        "spotify:collection:your-episodes" => {
+            format!("spotify:user:{user}:collection:your-episodes")
+        }
+        uri => uri.to_owned(),
+    }
+}
+
+pub fn pin_request(uri: &str, user: &str, pinned: bool) -> (Operation, Value) {
+    let operation = if pinned {
+        PIN_LIBRARY_ITEM
+    } else {
+        UNPIN_LIBRARY_ITEM
+    };
+    (
+        operation,
+        json!({ "pinnableItemUri": pinnable_uri(uri, user) }),
+    )
+}
+
+pub fn parse_pin(data: &Value) -> PinResult {
+    let result = &data["pinItemInLibrary"];
+    match result["pinResult"].as_str() {
+        Some("SUCCESSFUL") => PinResult::Done,
+        Some("FAILED_ITEM_LIMIT_REACHED") => PinResult::LimitReached(
+            result["pinLimit"]
+                .as_u64()
+                .map_or(DEFAULT_PIN_LIMIT, |limit| limit as u32),
+        ),
+        Some("FAILED_ITEM_IN_FOLDER") => PinResult::InFolder,
+        Some("FAILED_ITEM_NOT_SUPPORTED") => PinResult::NotSupported,
+        Some("FAILED_NOT_IN_YOUR_LIBRARY") => PinResult::NotInLibrary,
+        _ => PinResult::Refused,
+    }
+}
+
+pub async fn pin(api: &Api, user: &str, uri: &str, pinned: bool) -> Result<PinResult> {
+    let (operation, variables) = pin_request(uri, user, pinned);
+    let data = pathfinder::mutate(api, operation, variables).await?;
+    Ok(if pinned {
+        parse_pin(&data)
+    } else {
+        PinResult::Done
+    })
+}
 
 pub const ARE_ENTITIES_IN_LIBRARY: Operation = Operation::query(
     "areEntitiesInLibrary",
@@ -126,6 +222,44 @@ pub fn collection_push(message: &Message) -> Option<Vec<(String, bool)>> {
     )
 }
 
+pub const LIBRARY_SETS: &[&str] = &[
+    "collection",
+    "artist",
+    "show",
+    "listenlater",
+    "author",
+    "ylpin",
+    "concerts",
+    "concert-campaigns",
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LibraryPush {
+    Collection { set: String, liked_added: bool },
+    Rootlist,
+}
+
+pub fn library_push(message: &Message) -> Option<LibraryPush> {
+    if let Some(rest) = message.uri.strip_prefix("hm://collection/") {
+        let set = rest.split('/').next()?;
+        if !LIBRARY_SETS.contains(&set) {
+            return None;
+        }
+        let liked_added = set == "collection"
+            && collection_push(message).is_some_and(|changes| {
+                changes
+                    .iter()
+                    .any(|(uri, saved)| *saved && uri.starts_with("spotify:track:"))
+            });
+        return Some(LibraryPush::Collection {
+            set: set.to_owned(),
+            liked_added,
+        });
+    }
+    let rest = message.uri.strip_prefix("hm://playlist/v2/user/")?;
+    (rest.split('/').nth(1) == Some("rootlist")).then_some(LibraryPush::Rootlist)
+}
+
 fn item_uri(kind: &str, id: &str) -> Option<String> {
     if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         let gid = (0..16)
@@ -221,6 +355,112 @@ mod tests {
         );
         let plain = collection_push(&message("hm://collection/artist/someone/json", body)).unwrap();
         assert_eq!(plain.len(), 2);
+    }
+
+    #[test]
+    fn pins_with_the_web_player_uris() {
+        assert_eq!(
+            pinnable_uri("spotify:collection:tracks", "someone"),
+            "spotify:user:someone:collection"
+        );
+        assert_eq!(
+            pinnable_uri("spotify:collection:your-episodes", "someone"),
+            "spotify:user:someone:collection:your-episodes"
+        );
+        assert_eq!(
+            pinnable_uri("spotify:playlist:37i9dQZF1FgnTBfUlzkeKt", "someone"),
+            "spotify:playlist:37i9dQZF1FgnTBfUlzkeKt"
+        );
+        let (operation, variables) = pin_request("spotify:collection:tracks", "someone", true);
+        assert_eq!(operation, PIN_LIBRARY_ITEM);
+        assert_eq!(
+            variables,
+            json!({"pinnableItemUri": "spotify:user:someone:collection"})
+        );
+        let (operation, variables) =
+            pin_request("spotify:user:someone:folder:1a2b", "someone", false);
+        assert_eq!(operation, UNPIN_LIBRARY_ITEM);
+        assert_eq!(
+            variables,
+            json!({"pinnableItemUri": "spotify:user:someone:folder:1a2b"})
+        );
+    }
+
+    #[test]
+    fn reads_pin_results() {
+        let result = |value: Value| parse_pin(&json!({ "pinItemInLibrary": value }));
+        assert_eq!(
+            result(json!({"pinResult": "SUCCESSFUL", "pinLimit": 4})),
+            PinResult::Done
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_LIMIT_REACHED", "pinLimit": 5})),
+            PinResult::LimitReached(5)
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_LIMIT_REACHED"})),
+            PinResult::LimitReached(4)
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_IN_FOLDER"})),
+            PinResult::InFolder
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_ITEM_NOT_SUPPORTED"})),
+            PinResult::NotSupported
+        );
+        assert_eq!(
+            result(json!({"pinResult": "FAILED_NOT_IN_YOUR_LIBRARY"})),
+            PinResult::NotInLibrary
+        );
+        assert_eq!(result(Value::Null), PinResult::Refused);
+    }
+
+    #[test]
+    fn sorts_out_library_pushes() {
+        let liked = json!({"items": [
+            {"type": "track", "identifier": "4uLU6hMCjMI75M1A2tKUQC", "removed": false}
+        ]});
+        assert_eq!(
+            library_push(&message("hm://collection/collection/someone/json", liked)),
+            Some(LibraryPush::Collection {
+                set: "collection".into(),
+                liked_added: true
+            })
+        );
+        let unliked = json!({"items": [
+            {"type": "track", "identifier": "4uLU6hMCjMI75M1A2tKUQC", "removed": true},
+            {"type": "album", "identifier": "00000000000000000000000000000001", "removed": false}
+        ]});
+        assert_eq!(
+            library_push(&message("hm://collection/collection/someone/json", unliked)),
+            Some(LibraryPush::Collection {
+                set: "collection".into(),
+                liked_added: false
+            })
+        );
+        assert_eq!(
+            library_push(&message("hm://collection/ylpin/someone/json", Value::Null)),
+            Some(LibraryPush::Collection {
+                set: "ylpin".into(),
+                liked_added: false
+            })
+        );
+        assert_eq!(
+            library_push(&message(
+                "hm://playlist/v2/user/someone/rootlist",
+                Value::Null
+            )),
+            Some(LibraryPush::Rootlist)
+        );
+        for uri in [
+            "hm://collection/ignoreinrecs/someone/json",
+            "hm://playlist/v2/playlist/0000000000000000000001",
+            "hm://playlist/v2/user/someone/other",
+            "hm://pusher/v1/connections/x",
+        ] {
+            assert_eq!(library_push(&message(uri, Value::Null)), None, "{uri}");
+        }
     }
 
     #[test]

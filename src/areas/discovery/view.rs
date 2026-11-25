@@ -418,12 +418,15 @@ impl OpenMusic {
                     .child(
                         div()
                             .mt_3()
+                            .flex()
+                            .gap_2()
                             .child(
                                 self.text_control("play-artist", "Play", true, palette, cx)
                                     .w(px(96.)),
                             )
+                            .children(self.library_button(loaded, palette, cx))
                             .when(has_menu, |actions| {
-                                actions.flex().gap_2().child(self.menu_button(
+                                actions.child(self.menu_button(
                                     "more-artist",
                                     &artist.name,
                                     palette,

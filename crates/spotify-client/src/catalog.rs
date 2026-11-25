@@ -508,14 +508,14 @@ pub struct Collection {
     pub metadata: HashMap<String, String>,
 }
 
-fn filled(value: &Value) -> Option<String> {
+pub(crate) fn filled(value: &Value) -> Option<String> {
     value
         .as_str()
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
 }
 
-fn playlist_cover(attributes: &Value) -> Option<String> {
+pub(crate) fn playlist_cover(attributes: &Value) -> Option<String> {
     if let Some(url) = attributes["pictureSize"]
         .as_array()
         .into_iter()
@@ -547,37 +547,7 @@ pub async fn username(api: &Api) -> Result<String> {
 }
 
 pub async fn playlists(api: &Api, user: &str) -> Result<Vec<Playlist>> {
-    let value: Value = api
-        .get_json(&format!(
-            "/playlist/v2/user/{user}/rootlist?decorate=revision,attributes,length,owner&from=0&length=200"
-        ))
-        .await?;
-    let contents = &value["contents"];
-    let items = contents["items"].as_array().cloned().unwrap_or_default();
-    let meta = contents["metaItems"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    Ok(items
-        .iter()
-        .zip(meta.iter())
-        .filter_map(|(item, meta)| {
-            let uri = item["uri"].as_str()?;
-            if !uri.starts_with("spotify:playlist:") {
-                return None;
-            }
-            let attributes = &meta["attributes"];
-            Some(Playlist {
-                uri: uri.to_owned(),
-                name: attributes["name"].as_str().unwrap_or("Untitled").to_owned(),
-                description: strip_tags(attributes["description"].as_str().unwrap_or_default()),
-                cover: playlist_cover(attributes),
-                length: meta["length"].as_u64().unwrap_or_default() as u32,
-                format: filled(&attributes["format"]),
-                owner: filled(&meta["ownerUsername"]),
-            })
-        })
-        .collect())
+    Ok(crate::library::rootlist(api, user).await?.playlists())
 }
 
 pub async fn collection(api: &Api, uri: &str) -> Result<Collection> {
