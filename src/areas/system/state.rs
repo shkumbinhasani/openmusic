@@ -10,6 +10,7 @@ use serde_json::json;
 use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
+    menu_bar::{self, MenuState},
     now_playing::{self, Snapshot},
     shortcuts,
     worker::Event,
@@ -17,16 +18,19 @@ use super::{
 use crate::{
     app::{OpenMusic, Page, Session, intent::Intent},
     menus::{
-        GoBack, GoForward, GoHome, Handle, HideApp, HideOthers, Minimize, Next, PlayPause,
-        Previous, SeekBackward, SeekForward, ShowAll, ShowShortcuts, ToggleFullScreen,
-        TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
+        About, BringAllToFront, GoBack, GoForward, GoHome, Handle, HideApp, HideOthers, Minimize,
+        Next, PlayPause, Previous, SeekBackward, SeekForward, ShowAll, ShowShortcuts,
+        ToggleFullScreen, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
     },
     ui::tracks::{RowDrag, RowDrop},
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SystemPrefs {}
+pub struct SystemPrefs {
+    pub notify_on_track_change: bool,
+    pub mini_player_when_minimized: bool,
+}
 
 pub const TRACK_SEEK_MS: i32 = 5_000;
 pub const EPISODE_SEEK_MS: i32 = 15_000;
@@ -60,6 +64,7 @@ pub struct State {
     pub published: Option<(Snapshot, Instant)>,
     pub waiting: Option<bool>,
     pub publishes: u64,
+    pub menu: Option<MenuState>,
     pub throttle: Throttle,
     pub shortcuts: bool,
 }
@@ -131,8 +136,28 @@ impl OpenMusic {
         })
     }
 
+    pub fn menu_state(&self) -> MenuState {
+        MenuState {
+            playing: self.playback.now.playing,
+            shuffle: self.shuffle_mode(),
+            repeat: self.repeat_mode(),
+            saved: self.track().and_then(|track| self.is_saved(&track.uri)),
+            episode: self.playback.now.episode
+                || self
+                    .track()
+                    .is_some_and(|track| track.uri.starts_with("spotify:episode:")),
+            notify: self.settings.system.notify_on_track_change,
+            mini_on_minimize: self.settings.system.mini_player_when_minimized,
+        }
+    }
+
     pub fn sync_system(&mut self) {
         self.sync_now_playing();
+        let menu = self.menu_state();
+        if self.system.menu.as_ref() != Some(&menu) {
+            menu_bar::sync(&menu);
+            self.system.menu = Some(menu);
+        }
     }
 
     fn sync_now_playing(&mut self) {
@@ -160,6 +185,14 @@ impl OpenMusic {
                     self.system.publishes += 1;
                 }
             }
+        }
+    }
+
+    fn liked_label(&self) -> &'static str {
+        match self.track().and_then(|track| self.is_saved(&track.uri)) {
+            Some(true) => "saved",
+            Some(false) => "not-saved",
+            None => "unknown",
         }
     }
 }
@@ -235,6 +268,23 @@ pub fn debug(
                 }
             });
         }
+        "menubar" => {
+            app.sync_system();
+            let native = menu_bar::items();
+            let owned = cx.get_menus().unwrap_or_default();
+            let mut lines = Vec::new();
+            let mut available = |action: &dyn gpui::Action| {
+                window.is_action_available(action, cx) || cx.is_action_available(action)
+            };
+            for (index, menu) in native.iter().enumerate() {
+                lines.push(menu.title.clone());
+                let items = owned
+                    .get(index)
+                    .map_or(&[][..], |menu| menu.items.as_slice());
+                menu_bar::describe(&menu.children, items, 1, &mut available, &mut lines);
+            }
+            write(directory, "menubar.txt", lines.join("\n"));
+        }
         "shortcuts" => {
             match rest {
                 "" => app.toggle_shortcuts(window, cx),
@@ -261,8 +311,10 @@ pub fn debug(
 
 pub fn state_fragment(app: &OpenMusic) -> String {
     format!(
-        "published={} shortcuts={}",
-        app.system.publishes, app.system.shortcuts
+        "published={} liked={} shortcuts={}",
+        app.system.publishes,
+        app.liked_label(),
+        app.system.shortcuts
     )
 }
 
@@ -310,9 +362,11 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         window.minimize_window()
     });
     route(cx, handle, |_: &Zoom, _, window, _| window.zoom_window());
+    cx.on_action(|_: &About, _| menu_bar::about());
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &BringAllToFront, _| menu_bar::arrange_in_front());
 }
 
 pub fn on_press(
