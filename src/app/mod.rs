@@ -232,6 +232,7 @@ impl OpenMusic {
                     .collect();
                 let _ = std::fs::write(directory.join("saved.txt"), lines.join("\n"));
             }
+            "toast" if rest == "undo" => self.undo_toast(cx),
             "toast" => self.show_toast(rest, None),
             "dialog" => {
                 if rest.is_empty() {
