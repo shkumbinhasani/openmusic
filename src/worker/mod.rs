@@ -161,15 +161,8 @@ pub struct Covers {
 
 impl Covers {
     pub fn request(&mut self, urls: impl IntoIterator<Item = String>, http: &reqwest::Client) {
-        if self.requested.len() > 512 {
-            self.requested.clear();
-        }
         for url in urls {
-            let waiting = self
-                .requested
-                .get(&url)
-                .is_some_and(|failed| failed.is_none_or(|at| at.elapsed() < COVER_RETRY));
-            if waiting {
+            if !wants_fetch(self.requested.get(&url).copied(), Instant::now()) {
                 continue;
             }
             self.requested.insert(url.clone(), None);
@@ -207,6 +200,21 @@ impl Covers {
         for url in urls {
             self.requested.remove(&url);
         }
+    }
+
+    fn failed(&mut self, url: String) {
+        let now = Instant::now();
+        self.requested
+            .retain(|_, failed| failed.is_none_or(|at| now.duration_since(at) < COVER_RETRY));
+        self.requested.insert(url, Some(now));
+    }
+}
+
+fn wants_fetch(requested: Option<Option<Instant>>, now: Instant) -> bool {
+    match requested {
+        None => true,
+        Some(None) => false,
+        Some(Some(failed)) => now.duration_since(failed) >= COVER_RETRY,
     }
 }
 
@@ -421,9 +429,7 @@ async fn connected(
                     Some(jpeg) => {
                         let _ = events.send(Event::Cover { url, jpeg });
                     }
-                    None => {
-                        ctx.covers.requested.insert(url, Some(Instant::now()));
-                    }
+                    None => ctx.covers.failed(url),
                 }
             }
         }
@@ -487,4 +493,30 @@ pub fn trusted_image(url: &str) -> bool {
                 .host_str()
                 .is_some_and(|host| host.ends_with(".scdn.co") || host.ends_with(".spotifycdn.com"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asks_again_only_for_covers_that_failed_a_while_ago() {
+        let now = Instant::now();
+        assert!(wants_fetch(None, now));
+        assert!(!wants_fetch(Some(None), now));
+        assert!(!wants_fetch(Some(Some(now)), now + Duration::from_secs(1)));
+        assert!(wants_fetch(Some(Some(now)), now + COVER_RETRY));
+    }
+
+    #[test]
+    fn keeps_loaded_covers_and_drops_old_failures() {
+        let mut covers = Covers::default();
+        covers.requested.insert("loaded".into(), None);
+        let long_ago = Instant::now() - COVER_RETRY - Duration::from_secs(1);
+        covers.requested.insert("gave up".into(), Some(long_ago));
+        covers.failed("missing".into());
+        assert_eq!(covers.requested.len(), 2);
+        assert_eq!(covers.requested.get("loaded"), Some(&None));
+        assert!(covers.requested.get("missing").is_some_and(Option::is_some));
+    }
 }
