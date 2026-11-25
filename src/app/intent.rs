@@ -88,13 +88,17 @@ impl OpenMusic {
             Intent::ToggleShuffle => self.toggle_shuffle(cx),
             Intent::CycleRepeat => self.cycle_repeat(cx),
             Intent::ToggleLike => self.toggle_like(),
-            Intent::PlayContext(uri) => self.send(Command::PlayContext {
-                uri,
-                index: 0,
-                track_uri: None,
-                origin: connect::ORIGIN,
-                options: PlayOptions::default(),
-            }),
+            Intent::PlayContext(uri) => {
+                if !self.needs_premium_here(false, cx) {
+                    self.send(Command::PlayContext {
+                        uri,
+                        index: 0,
+                        track_uri: None,
+                        origin: connect::ORIGIN,
+                        options: PlayOptions::default(),
+                    });
+                }
+            }
             Intent::ShowMainWindow => self.show_main_window(window, cx),
             Intent::ToggleMiniPlayer => self.toggle_mini_player(window, cx),
             Intent::Navigate(page) => self.navigate(page),
