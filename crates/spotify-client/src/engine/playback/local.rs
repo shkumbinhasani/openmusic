@@ -115,6 +115,7 @@ impl Engine {
         };
         self.discard_prepared();
         self.pause_local().await;
+        self.pause_elsewhere().await;
         self.audio.unloaded = self.playing.is_some();
         self.audio.local = Some(queue);
         self.load_local(true);

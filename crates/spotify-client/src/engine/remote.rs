@@ -196,6 +196,22 @@ impl Engine {
         self.remote.jam.is_some()
     }
 
+    pub(super) async fn pause_elsewhere(&mut self) {
+        let playing = self
+            .playback
+            .as_ref()
+            .is_some_and(|playback| playback.playing);
+        let Some(target) = self
+            .remote_target()
+            .filter(|_| playing && !self.redirected())
+        else {
+            return;
+        };
+        let _ = self
+            .send_command(&target, json!({"endpoint": "pause"}))
+            .await;
+    }
+
     fn command_target(&self) -> String {
         self.playback
             .as_ref()
