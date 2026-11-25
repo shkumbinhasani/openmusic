@@ -1,3 +1,7 @@
+pub mod browse;
+pub mod browse_view;
+pub mod home;
+pub mod home_view;
 pub mod search;
 pub mod search_view;
 pub mod state;

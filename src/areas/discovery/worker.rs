@@ -1,28 +1,47 @@
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use spotify_client::{
-    Api, Track, catalog,
+    Api, Track,
+    browse::{self, BrowseAll, BrowsePage},
+    catalog,
     catalog::Artist,
     dealer::Message,
+    home::{self, Home, Section},
     pathfinder::PathfinderError,
     search::{self, Hit, SearchKind, SearchPage, SearchResults, Suggestions},
 };
 
+use super::state::SectionSource;
 use crate::worker::{Ctx, Mutation, cache};
 
 pub const SUGGEST_DELAY: Duration = Duration::from_millis(200);
 
+static CACHE: Mutex<()> = Mutex::new(());
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Discovery {
-    pub tracks: Vec<Track>,
-    pub from_top_tracks: bool,
-    pub mix: Option<Mix>,
+    pub home: Option<Home>,
+    pub browse: Option<BrowseAll>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct Mix {
-    pub seed: String,
-    pub tracks: Vec<Track>,
+impl Discovery {
+    pub fn is_empty(&self) -> bool {
+        self.home.is_none() && self.browse.is_none()
+    }
+
+    pub fn images(&self) -> Vec<String> {
+        self.home
+            .iter()
+            .flat_map(Home::images)
+            .chain(
+                self.browse
+                    .iter()
+                    .flat_map(|all| &all.tiles)
+                    .filter_map(|card| card.image.clone()),
+            )
+            .collect()
+    }
 }
 
 pub enum Command {
@@ -37,14 +56,38 @@ pub enum Command {
     RecentSearches,
     RememberSearches(Vec<String>),
     ForgetSearches(Vec<String>),
-    Discover,
-    Recommend(Box<Track>),
+    Home(String),
+    HomeSection(String),
+    BrowseAll,
+    Browse {
+        uri: String,
+        offset: u32,
+    },
+    BrowseSection {
+        uri: String,
+        offset: u32,
+    },
     Artist(String),
 }
 
 pub enum Event {
     Discovered(Discovery),
-    Recommendations(Option<Mix>),
+    Home {
+        facet: String,
+        result: Result<Box<Home>, String>,
+    },
+    BrowseAll(Result<BrowseAll, String>),
+    Browse {
+        uri: String,
+        offset: u32,
+        result: Result<Box<BrowsePage>, String>,
+    },
+    Section {
+        uri: String,
+        source: SectionSource,
+        offset: u32,
+        result: Result<Box<Section>, String>,
+    },
     Search {
         query: String,
         result: Result<Box<SearchResults>, String>,
@@ -88,12 +131,24 @@ impl Event {
                 result: Ok(hits), ..
             } => return hits.iter().filter_map(|hit| hit.image().cloned()).collect(),
             Self::DirectTrack(Ok(track)) => vec![track],
-            Self::Discovered(home) => home
-                .tracks
-                .iter()
-                .chain(home.mix.iter().flat_map(|mix| &mix.tracks))
-                .collect(),
-            Self::Recommendations(Some(mix)) => mix.tracks.iter().collect(),
+            Self::Discovered(discovery) => return discovery.images(),
+            Self::Home {
+                result: Ok(home), ..
+            } => return home.images(),
+            Self::BrowseAll(Ok(all)) => {
+                return all
+                    .tiles
+                    .iter()
+                    .filter_map(|card| card.image.clone())
+                    .collect();
+            }
+            Self::Browse {
+                result: Ok(page), ..
+            } => return page.images(),
+            Self::Section {
+                result: Ok(section),
+                ..
+            } => return section.images().collect(),
             Self::Artist {
                 result: Ok(artist), ..
             } => {
@@ -154,8 +209,17 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         Command::ForgetSearches(uris) => ctx
             .writes
             .push(Mutation::new(write_keys(&uris), forget_searches(api, uris))),
-        Command::Discover => ctx.tasks.spawn_keyed("discover", discover(api)),
-        Command::Recommend(seed) => ctx.tasks.spawn_keyed("recommend", recommend(api, *seed)),
+        Command::Home(facet) => ctx.tasks.spawn_keyed("home", load_home(api, facet)),
+        Command::HomeSection(uri) => ctx
+            .tasks
+            .spawn_keyed(format!("section:{uri}"), home_section(api, uri)),
+        Command::BrowseAll => ctx.tasks.spawn_keyed("browse-all", browse_all(api)),
+        Command::Browse { uri, offset } => ctx
+            .tasks
+            .spawn_keyed(format!("browse:{uri}"), browse_page(api, uri, offset)),
+        Command::BrowseSection { uri, offset } => ctx
+            .tasks
+            .spawn_keyed(format!("section:{uri}"), browse_section(api, uri, offset)),
         Command::Artist(uri) => ctx.tasks.spawn(artist(api, uri)),
     }
 }
@@ -167,6 +231,22 @@ fn search_error(error: anyhow::Error) -> String {
         Some(stale @ PathfinderError::StaleHash(_)) => stale.to_string(),
         _ => "Spotify search is unavailable. Try again.".to_owned(),
     }
+}
+
+fn page_error(error: anyhow::Error, fallback: &str) -> String {
+    match error.downcast_ref::<PathfinderError>() {
+        Some(stale @ PathfinderError::StaleHash(_)) => stale.to_string(),
+        _ => fallback.to_owned(),
+    }
+}
+
+fn update_cache(update: impl FnOnce(&mut Discovery)) {
+    let _guard = CACHE.lock();
+    let mut discovery = cache::load()
+        .and_then(|library| library.discovery)
+        .unwrap_or_default();
+    update(&mut discovery);
+    cache::save_discovery(&discovery);
 }
 
 fn write_keys(uris: &[String]) -> Vec<String> {
@@ -268,23 +348,75 @@ async fn forget_searches(api: Api, uris: Vec<String>) -> Result<crate::worker::E
     .into())
 }
 
-async fn discover(api: Api) -> crate::worker::Event {
-    let tracks = catalog::liked(&api, 8).await.unwrap_or_default();
-    let mix = match tracks.first() {
-        Some(seed) => mix(&api, seed).await,
-        None => None,
-    };
-    let discovery = Discovery {
-        tracks,
-        from_top_tracks: false,
-        mix,
-    };
-    cache::save_discovery(&discovery);
-    Event::Discovered(discovery).into()
+async fn load_home(api: Api, facet: String) -> crate::worker::Event {
+    let result = home::home(&api, &facet, &home::time_zone())
+        .await
+        .map_err(|error| page_error(error, "Couldn’t load Home. Try again."));
+    if facet.is_empty()
+        && let Ok(home) = &result
+    {
+        let home = home.clone();
+        update_cache(move |discovery| discovery.home = Some(home));
+    }
+    Event::Home {
+        facet,
+        result: result.map(Box::new),
+    }
+    .into()
 }
 
-async fn recommend(api: Api, seed: Track) -> crate::worker::Event {
-    Event::Recommendations(mix(&api, &seed).await).into()
+async fn home_section(api: Api, uri: String) -> crate::worker::Event {
+    let result = home::home_section(&api, &uri, &home::time_zone())
+        .await
+        .map(Box::new)
+        .map_err(|error| page_error(error, "Couldn’t load this section. Try again."));
+    Event::Section {
+        uri,
+        source: SectionSource::Home,
+        offset: 0,
+        result,
+    }
+    .into()
+}
+
+async fn browse_all(api: Api) -> crate::worker::Event {
+    let result = browse::browse_all(&api)
+        .await
+        .map_err(|error| page_error(error, "Couldn’t load Browse all. Try again."));
+    if let Ok(all) = &result
+        && !all.tiles.is_empty()
+    {
+        let all = all.clone();
+        update_cache(move |discovery| discovery.browse = Some(all));
+    }
+    Event::BrowseAll(result).into()
+}
+
+async fn browse_page(api: Api, uri: String, offset: u32) -> crate::worker::Event {
+    let result = browse::browse_page(&api, &uri, offset)
+        .await
+        .map(Box::new)
+        .map_err(|error| page_error(error, "Couldn’t load this page. Try again."));
+    Event::Browse {
+        uri,
+        offset,
+        result,
+    }
+    .into()
+}
+
+async fn browse_section(api: Api, uri: String, offset: u32) -> crate::worker::Event {
+    let result = browse::browse_section(&api, &uri, offset)
+        .await
+        .map(Box::new)
+        .map_err(|error| page_error(error, "Couldn’t load this section. Try again."));
+    Event::Section {
+        uri,
+        source: SectionSource::Browse,
+        offset,
+        result,
+    }
+    .into()
 }
 
 async fn artist(api: Api, uri: String) -> crate::worker::Event {
@@ -294,10 +426,29 @@ async fn artist(api: Api, uri: String) -> crate::worker::Event {
     Event::Artist { uri, result }.into()
 }
 
-async fn mix(api: &Api, seed: &Track) -> Option<Mix> {
-    let tracks = catalog::station(api, &seed.uri).await.ok()?;
-    (!tracks.is_empty()).then(|| Mix {
-        seed: seed.title.clone(),
-        tracks,
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_old_station_caches_as_empty() {
+        let old =
+            r#"{"tracks": [], "from_top_tracks": false, "mix": {"seed": "Song", "tracks": []}}"#;
+        let discovery: Discovery = serde_json::from_str(old).unwrap();
+        assert!(discovery.is_empty());
+        let saved = Discovery {
+            home: Some(Home {
+                greeting: "Good morning".into(),
+                ..Home::default()
+            }),
+            browse: None,
+        };
+        let text = serde_json::to_string(&saved).unwrap();
+        let back: Discovery = serde_json::from_str(&text).unwrap();
+        assert!(!back.is_empty());
+        assert_eq!(
+            back.home.map(|home| home.greeting).as_deref(),
+            Some("Good morning")
+        );
+    }
 }

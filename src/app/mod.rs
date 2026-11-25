@@ -488,7 +488,6 @@ impl OpenMusic {
             }
             Event::NowPlaying(now) => {
                 self.request_lyrics(&now);
-                self.recommend_from(&now);
                 self.set_now_playing(now);
                 self.follow_lyrics();
                 if let Some(uri) = self.track().map(|track| track.uri.clone()) {

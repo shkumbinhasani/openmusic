@@ -41,7 +41,7 @@ const SHELVES: [(SearchKind, &str); 9] = [
     (SearchKind::Genres, "search-genres"),
 ];
 
-fn card_bones(key: &'static str, count: usize, card_side: Pixels, palette: Palette) -> Div {
+pub fn card_bones(key: &'static str, count: usize, card_side: Pixels, palette: Palette) -> Div {
     div().flex().gap_4().children((0..count).map(move |index| {
         div()
             .w(card_side)
@@ -68,7 +68,7 @@ fn card_bones(key: &'static str, count: usize, card_side: Pixels, palette: Palet
     }))
 }
 
-fn heading_bone(key: &'static str, palette: Palette) -> Div {
+pub fn heading_bone(key: &'static str, palette: Palette) -> Div {
     bone(key, 99, palette)
         .w(px(140.))
         .h(px(20.))
@@ -497,13 +497,20 @@ impl OpenMusic {
                         .child(card_bones("search-recent-bones", 4, card_side, palette)),
                 )
             })
-            .when(recent.items.is_empty() && !recent.pending, |page| {
-                page.child(
-                    div()
-                        .text_color(rgb(palette.muted))
-                        .child("Search for songs, artists, albums, playlists, and podcasts. Press Return to see every result."),
-                )
-            })
+            .children(self.browse_all_section(card_side, palette, cx))
+            .when(
+                recent.items.is_empty()
+                    && !recent.pending
+                    && self.discovery.browse_all.all.is_none()
+                    && !self.discovery.browse_all.pending,
+                |page| {
+                    page.child(
+                        div()
+                            .text_color(rgb(palette.muted))
+                            .child("Search for songs, artists, albums, playlists, and podcasts. Press Return to see every result."),
+                    )
+                },
+            )
             .into_any_element()
     }
 

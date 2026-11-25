@@ -386,6 +386,7 @@ impl OpenMusic {
     pub fn open_search_tab(&mut self, tab: SearchTab) {
         if self.discovery.search_query.is_empty() {
             self.load_recent_searches(false);
+            self.load_browse_all(false);
             return;
         }
         if let Some(kind) = tab.kind() {
@@ -661,6 +662,7 @@ impl OpenMusic {
             self.discovery.search = None;
             self.discovery.search_pending = false;
             self.discovery.search_tabs.clear();
+            self.load_browse_all(false);
         }
         let suggest = &mut self.discovery.suggest;
         if !focused {

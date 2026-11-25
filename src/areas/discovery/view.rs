@@ -1,15 +1,10 @@
-use std::sync::Arc;
-
-use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, prelude::*, px, rgb};
 use spotify_client::{
     Track,
     entity::{Card, Kind},
 };
 
-use super::{
-    search::SONG_ROWS,
-    state::{SearchTab, SectionSource},
-};
+use super::{search::SONG_ROWS, state::SearchTab};
 use crate::{
     app::{OpenMusic, Page},
     icons,
@@ -18,263 +13,13 @@ use crate::{
         cards::card,
         components::{artwork, bone, skeleton_header, skeleton_rows},
         dock::DockItem,
-        menu::{Group, MenuItem, Row, Surface, Target},
+        menu::{Group, MenuItem, Row, Target},
         sidebar::NavEntry,
         tracks::RowOptions,
     },
 };
 
 impl OpenMusic {
-    pub fn discover(
-        &self,
-        card_side: Pixels,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mix = self.discovery.station();
-        div()
-            .flex()
-            .flex_col()
-            .gap_7()
-            .child(
-                div()
-                    .text_size(px(30.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("Listen Now"),
-            )
-            .when_some(mix, |page, mix| {
-                let featured = &mix.tracks[0];
-                let hero_track = featured.clone();
-                let hero = div()
-                    .flex()
-                    .items_center()
-                    .gap_6()
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_menu(
-                            None,
-                            move |_| Some(Target::track(hero_track.clone(), None, Surface::Header)),
-                            cx,
-                        ),
-                    )
-                    .child(
-                        artwork(self.cover_for(featured), px(176.), px(16.), palette).shadow_lg(),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .items_start()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(palette.accent))
-                                    .truncate()
-                                    .w_full()
-                                    .child(format!(
-                                        "STATION · INSPIRED BY {}",
-                                        mix.seed.to_uppercase()
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(28.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .truncate()
-                                    .w_full()
-                                    .child(featured.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(palette.muted))
-                                    .truncate()
-                                    .w_full()
-                                    .child(featured.artist.clone()),
-                            )
-                            .child(
-                                div().mt_3().child(
-                                    self.text_control("play-station", "Play", true, palette, cx)
-                                        .w(px(96.)),
-                                ),
-                            ),
-                    );
-                let page = page.child(hero);
-                if mix.tracks.len() > 1 {
-                    page.child(self.mix_tracks(&mix.tracks, card_side, palette, cx))
-                } else {
-                    page
-                }
-            })
-            .when(!self.discovery.home.tracks.is_empty(), |page| {
-                page.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_size(px(19.))
-                                .font_weight(FontWeight::BOLD)
-                                .child(if self.discovery.home.from_top_tracks {
-                                    "In Your Rotation"
-                                } else {
-                                    "From Your Liked Songs"
-                                }),
-                        )
-                        .child(self.rows(
-                            &self.discovery.home.tracks,
-                            "home-track",
-                            0,
-                            Some("spotify:collection:tracks"),
-                            palette,
-                            cx,
-                        )),
-                )
-            })
-            .when(
-                mix.is_none() && self.discovery.home.tracks.is_empty(),
-                |page| {
-                    if self.discovery.discovery_pending {
-                        page.child(skeleton_header("home-hero", false, palette))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    .child(
-                                        bone("home-title", 0, palette)
-                                            .w(px(220.))
-                                            .h(px(20.))
-                                            .rounded(px(5.)),
-                                    )
-                                    .child(div().flex().gap_4().children((0..4).map(|index| {
-                                        div()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(
-                                                bone("home-card", index * 3, palette)
-                                                    .size(card_side)
-                                                    .rounded(px(12.)),
-                                            )
-                                            .child(
-                                                bone("home-card", index * 3 + 1, palette)
-                                                    .w(gpui::relative(0.7))
-                                                    .h(px(12.))
-                                                    .rounded(px(4.)),
-                                            )
-                                            .child(
-                                                bone("home-card", index * 3 + 2, palette)
-                                                    .w(gpui::relative(0.45))
-                                                    .h(px(11.))
-                                                    .rounded(px(4.)),
-                                            )
-                                    }))),
-                            )
-                            .child(skeleton_rows("home-rows", 4, false, palette))
-                    } else {
-                        page.child(
-                            div()
-                                .py_4()
-                                .text_color(rgb(palette.muted))
-                                .child("Play a song to get recommendations from Spotify."),
-                        )
-                    }
-                },
-            )
-    }
-
-    fn mix_tracks(
-        &self,
-        tracks: &[Track],
-        card_side: Pixels,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let queue: Arc<[Track]> = tracks.into();
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .text_size(px(19.))
-                    .font_weight(FontWeight::BOLD)
-                    .child("Up Next on This Station"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .children(
-                        tracks
-                            .iter()
-                            .enumerate()
-                            .skip(1)
-                            .take(4)
-                            .map(|(index, track)| {
-                                let queue = queue.clone();
-                                let card_track = track.clone();
-                                div()
-                                    .id(("mix-card", index))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.play(&queue, index, cx)
-                                    }))
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        self.on_menu(
-                                            None,
-                                            move |_| {
-                                                Some(Target::track(
-                                                    card_track.clone(),
-                                                    None,
-                                                    Surface::Card,
-                                                ))
-                                            },
-                                            cx,
-                                        ),
-                                    )
-                                    .child(
-                                        artwork(self.cover_for(track), card_side, px(12.), palette)
-                                            .shadow_md(),
-                                    )
-                                    .child(
-                                        div()
-                                            .w_full()
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .truncate()
-                                                    .child(track.title.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(palette.muted))
-                                                    .truncate()
-                                                    .child(track.artist.clone()),
-                                            ),
-                                    )
-                            }),
-                    ),
-            )
-            .when(tracks.len() > 5, |section| {
-                section.child(self.rows(tracks, "mix-track", 5, None, palette, cx))
-            })
-    }
-
     pub fn artist_page(
         &self,
         uri: &str,
@@ -501,29 +246,6 @@ impl OpenMusic {
     }
 }
 
-impl OpenMusic {
-    pub fn browse_page(
-        &self,
-        _uri: &str,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-
-    pub fn section_page(
-        &self,
-        _uri: &str,
-        _source: SectionSource,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-}
-
 pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     Vec::new()
 }
@@ -534,7 +256,7 @@ pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
             "nav-home",
             100,
             icons::HOME,
-            "Listen Now",
+            "Home",
             app.page == Page::Home,
             |app, _, _| app.navigate(Page::Home),
         ),

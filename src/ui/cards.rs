@@ -231,6 +231,16 @@ impl OpenMusic {
                     .child(
                         div()
                             .w_full()
+                            .when_some(card.reason.clone(), |text, reason| {
+                                text.child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(palette.accent))
+                                        .truncate()
+                                        .child(reason),
+                                )
+                            })
                             .child(
                                 div()
                                     .text_size(px(13.))
@@ -445,13 +455,29 @@ impl OpenMusic {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> Div {
+        let chips: Vec<(SharedString, bool)> = chips
+            .iter()
+            .enumerate()
+            .map(|(index, label)| (label.clone(), selected == Some(index)))
+            .collect();
+        self.chip_strip(key, &chips, pick, palette, cx)
+    }
+
+    pub fn chip_strip(
+        &self,
+        key: &'static str,
+        chips: &[(SharedString, bool)],
+        pick: impl Fn(&mut OpenMusic, usize, &mut Window, &mut Context<OpenMusic>) + 'static,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let pick = Rc::new(pick);
         div()
             .flex()
             .flex_wrap()
             .gap_2()
-            .children(chips.iter().enumerate().map(|(index, label)| {
-                let chosen = selected == Some(index);
+            .children(chips.iter().enumerate().map(|(index, (label, chosen))| {
+                let chosen = *chosen;
                 let pick = pick.clone();
                 let chip = if chosen {
                     div()
