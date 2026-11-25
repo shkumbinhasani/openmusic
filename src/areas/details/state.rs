@@ -5,11 +5,16 @@ use std::{
 
 use gpui::{App, Context, Entity, ScrollHandle, Window};
 use gpui_component::WindowExt;
-use spotify_client::{catalog::Link, share};
+use spotify_client::{
+    catalog::Link,
+    details::{Ban, BanProvider, hide_context},
+    share,
+};
 
 use super::{
     credits::{self, CreditsView},
     embed::EmbedView,
+    feedback::Sets,
     go::{ContentScroll, Highlight},
     menu,
     worker::{Command, Event},
@@ -28,6 +33,7 @@ pub struct State {
     pub credits: credits::Cache,
     pub credits_view: Option<(String, Entity<CreditsView>)>,
     pub embed_view: Option<(String, Entity<EmbedView>)>,
+    pub sets: Sets,
     pub artists: HashMap<String, Vec<Link>>,
     pub highlight: Option<Highlight>,
     pub radio: Option<String>,
@@ -50,6 +56,30 @@ impl State {
 
 pub fn load(_app: &mut OpenMusic, _page: &Page) {}
 
+fn load_sets(app: &mut OpenMusic) {
+    app.details.sets.loading();
+    app.send(Command::LoadSets);
+}
+
+fn lookup_editable(app: &mut OpenMusic) {
+    let Some(context) = app
+        .playback
+        .now
+        .context_uri
+        .as_deref()
+        .and_then(hide_context)
+        .filter(|context| context.starts_with("spotify:playlist:"))
+    else {
+        return;
+    };
+    let known = menu::Facts::of(app).editable(&context).is_some();
+    if known || app.details.sets.editable.contains_key(&context) {
+        return;
+    }
+    app.details.sets.editable.insert(context.clone(), None);
+    app.send(Command::Editable(context));
+}
+
 pub fn on_event(
     app: &mut OpenMusic,
     event: Event,
@@ -57,6 +87,32 @@ pub fn on_event(
     cx: &mut Context<OpenMusic>,
 ) {
     match event {
+        Event::Sets(result) => app.details.sets.apply(result),
+        Event::Excluded {
+            uri,
+            excluded,
+            result,
+        } => {
+            app.details
+                .sets
+                .excluded_written(&uri, excluded, result.is_ok());
+            if let Err(message) = result {
+                app.show_toast(message, None);
+            }
+        }
+        Event::Hidden {
+            ban,
+            hidden,
+            result,
+        } => {
+            app.details.sets.hidden_written(&ban, hidden, &result);
+            if let Err(message) = result {
+                app.show_toast(message, None);
+            }
+        }
+        Event::Editable { uri, editable } => {
+            app.details.sets.editable.insert(uri, editable);
+        }
         Event::TrackArtists { uri, artists } => {
             app.details.artists.insert(uri, artists);
         }
@@ -88,7 +144,50 @@ pub fn on_event(
     }
 }
 
-pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {}
+pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+    load_sets(app);
+}
+
+fn sets_report(app: &OpenMusic) -> String {
+    let sets = &app.details.sets;
+    let mut lines = vec![format!(
+        "load={} excluded={} hidden={} format={}",
+        sets.load.name(),
+        sets.excluded.len(),
+        sets.hidden_count(),
+        sets.last_format.map_or("none", |format| format.name()),
+    )];
+    let mut excluded: Vec<&String> = sets.excluded.iter().collect();
+    excluded.sort();
+    lines.extend(excluded.into_iter().map(|uri| format!("excluded {uri}")));
+    let mut hidden: Vec<String> = sets
+        .hidden
+        .iter()
+        .flat_map(|(context, tracks)| {
+            tracks
+                .iter()
+                .map(move |track| format!("hidden {track} in {context}"))
+        })
+        .collect();
+    hidden.sort();
+    lines.extend(hidden);
+    let mut editable: Vec<String> = sets
+        .editable
+        .iter()
+        .map(|(uri, editable)| format!("editable {uri} {editable:?}"))
+        .collect();
+    editable.sort();
+    lines.extend(editable);
+    lines.join("\n")
+}
+
+fn switch(value: &str) -> Option<bool> {
+    match value {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
 
 pub fn signed_out(app: &mut OpenMusic) {
     app.details = State::default();
@@ -191,6 +290,22 @@ pub fn debug(
                 .unwrap_or_default();
             app.show_credits((*uri).to_owned(), title, window, cx);
         }
+        ("sets", []) => write("sets.txt", sets_report(app)),
+        ("sets", ["reload"]) => load_sets(app),
+        ("exclude", [uri, value]) => {
+            if let Some(excluded) = switch(value) {
+                app.set_excluded((*uri).to_owned(), excluded);
+            }
+        }
+        ("hide", [track, context, value]) => {
+            if let (Some(context), Some(hidden)) = (hide_context(context), switch(value)) {
+                let ban = Ban {
+                    track: (*track).to_owned(),
+                    context,
+                };
+                app.set_hidden(ban, BanProvider::Context, hidden);
+            }
+        }
         ("radio", [seed]) => app.start_radio((*seed).to_owned()),
         ("goalbum", [album, track]) => app.go_to_album((*album).to_owned(), (*track).to_owned()),
         ("artists", [uri]) => {
@@ -224,12 +339,18 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         .embed_view
         .as_ref()
         .map(|(uri, _)| format!("embed={uri}"));
+    let sets = Some(format!(
+        "sets={} excluded={} hidden={}",
+        details.sets.load.name(),
+        details.sets.excluded.len(),
+        details.sets.hidden_count(),
+    ));
     let highlight = details
         .highlight
         .as_ref()
         .map(|highlight| format!("highlight={}", highlight.track));
     let radio = details.radio.as_ref().map(|seed| format!("radio={seed}"));
-    [credits, embed, highlight, radio]
+    [credits, embed, sets, highlight, radio]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -261,7 +382,11 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     if !matches!(app.session, Session::Connected) {
         return;
     }
+    if app.details.sets.due() {
+        load_sets(app);
+    }
     app.lookup_artists();
+    lookup_editable(app);
     if app.tick_highlight() {
         cx.notify();
     }

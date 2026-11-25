@@ -1,6 +1,7 @@
 pub mod credits;
 pub mod dialog;
 pub mod embed;
+pub mod feedback;
 pub mod go;
 pub mod menu;
 pub mod share;

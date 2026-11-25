@@ -2,12 +2,24 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use prost::Message;
+use reqwest::Method;
 use serde_json::{Value, json};
-use spotify_proto::{extendedmetadata::ExtensionKind, metadata};
+use spotify_proto::{
+    collection::{
+        itemdata::{
+            ItemData, PlayContextBansItemData, item_data::Data,
+            play_context_bans_item_data::ItemProvider,
+        },
+        proto::v2::{CollectionItem, PageRequest, PageResponse, WriteRequest},
+    },
+    extendedmetadata::ExtensionKind,
+    metadata,
+};
 
 use crate::{
-    api::{Api, HttpStatus},
-    catalog::{self, Link},
+    api::{Api, Body, HttpStatus},
+    catalog::{self, Capabilities, Link},
+    collection::{self, IGNORE_IN_RECS, PAGE_LIMIT, PLAY_CONTEXT_BANS},
     entity,
     pathfinder::{self, Operation},
 };
@@ -307,6 +319,249 @@ fn refused(error: &anyhow::Error) -> bool {
         })
 }
 
+pub fn hide_context(uri: &str) -> Option<String> {
+    let parts: Vec<&str> = uri.split(':').collect();
+    match parts.as_slice() {
+        ["spotify", kind @ ("playlist" | "album"), id] if !id.is_empty() => {
+            Some(format!("spotify:{kind}:{id}"))
+        }
+        ["spotify", "user", _, "playlist", id] if !id.is_empty() => {
+            Some(format!("spotify:playlist:{id}"))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Ban {
+    pub track: String,
+    pub context: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BanProvider {
+    #[default]
+    Context,
+    Autoplay,
+}
+
+impl BanProvider {
+    pub fn of(provider: Option<&str>) -> Option<Self> {
+        match provider {
+            None | Some("" | "context") => Some(Self::Context),
+            Some("autoplay") => Some(Self::Autoplay),
+            Some(_) => None,
+        }
+    }
+
+    fn item_provider(self) -> ItemProvider {
+        match self {
+            Self::Context => ItemProvider::ProviderContext,
+            Self::Autoplay => ItemProvider::ProviderAutoplay,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteFormat {
+    Protobuf,
+    Json,
+}
+
+impl WriteFormat {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Protobuf => "protobuf",
+            Self::Json => "json",
+        }
+    }
+}
+
+pub fn client_update_id() -> String {
+    format!("{:016x}", rand::random::<u64>())
+}
+
+pub fn bans_page_request(user: &str, token: Option<&str>) -> Vec<u8> {
+    PageRequest {
+        username: user.to_owned(),
+        set: PLAY_CONTEXT_BANS.to_owned(),
+        pagination_token: token.unwrap_or_default().to_owned(),
+        limit: PAGE_LIMIT as i32,
+    }
+    .encode_to_vec()
+}
+
+pub fn parse_bans_page(bytes: &[u8]) -> Result<(Vec<Ban>, Option<String>)> {
+    let page = PageResponse::decode(bytes)?;
+    let bans = page
+        .items
+        .into_iter()
+        .filter(|item| !item.is_removed && !item.uri.is_empty())
+        .filter_map(|item| {
+            Some(Ban {
+                context: hide_context(item.context_uri.as_deref()?)?,
+                track: item.uri,
+            })
+        })
+        .collect();
+    let next = Some(page.next_page_token).filter(|token| !token.is_empty());
+    Ok((bans, next))
+}
+
+async fn proto_post(api: &Api, path: &str, body: Vec<u8>) -> Result<Vec<u8>> {
+    api.request(
+        Method::POST,
+        path,
+        Body::Bytes(body, collection::PROTOBUF),
+        collection::PROTOBUF,
+    )
+    .await
+}
+
+pub fn json_bans(items: Vec<collection::Item>) -> Vec<Ban> {
+    items
+        .into_iter()
+        .filter_map(|item| {
+            Some(Ban {
+                context: hide_context(item.context_uri.as_deref()?)?,
+                track: item.uri,
+            })
+        })
+        .collect()
+}
+
+pub async fn bans(api: &Api, user: &str) -> Result<Vec<Ban>> {
+    match protobuf_bans(api, user).await {
+        Ok(bans) => Ok(bans),
+        Err(_) => Ok(json_bans(
+            collection::all(api, user, PLAY_CONTEXT_BANS).await?,
+        )),
+    }
+}
+
+async fn protobuf_bans(api: &Api, user: &str) -> Result<Vec<Ban>> {
+    let mut bans = Vec::new();
+    let mut seen = HashSet::new();
+    let mut token: Option<String> = None;
+    loop {
+        let bytes = proto_post(
+            api,
+            "/collection/v2/paging",
+            bans_page_request(user, token.as_deref()),
+        )
+        .await?;
+        let (page, next) = parse_bans_page(&bytes)?;
+        let added = page.len();
+        bans.extend(page);
+        match next {
+            Some(next) if added > 0 && seen.insert(next.clone()) => token = Some(next),
+            _ => break,
+        }
+    }
+    Ok(bans)
+}
+
+pub fn ban_write_request(
+    user: &str,
+    ban: &Ban,
+    provider: BanProvider,
+    hidden: bool,
+    client_update_id: &str,
+) -> Vec<u8> {
+    let data = PlayContextBansItemData {
+        item_provider: provider.item_provider() as i32,
+    };
+    WriteRequest {
+        username: user.to_owned(),
+        set: PLAY_CONTEXT_BANS.to_owned(),
+        items: vec![CollectionItem {
+            uri: ban.track.clone(),
+            added_at: 0,
+            is_removed: !hidden,
+            context_uri: Some(ban.context.clone()),
+            item_data: Some(ItemData {
+                save_source: None,
+                data: Some(Data::PlayContextBansItemData(data)),
+            }),
+        }],
+        client_update_id: client_update_id.to_owned(),
+    }
+    .encode_to_vec()
+}
+
+pub fn ban_write_json(user: &str, ban: &Ban, hidden: bool) -> Value {
+    collection::write_body(
+        user,
+        PLAY_CONTEXT_BANS,
+        &[collection::Write {
+            uri: ban.track.clone(),
+            context_uri: Some(ban.context.clone()),
+            removed: !hidden,
+        }],
+    )
+}
+
+pub async fn set_banned(
+    api: &Api,
+    user: &str,
+    ban: &Ban,
+    provider: BanProvider,
+    hidden: bool,
+) -> Result<WriteFormat> {
+    let request = ban_write_request(user, ban, provider, hidden, &client_update_id());
+    let protobuf = match proto_post(api, "/collection/v2/write", request).await {
+        Ok(_) => return Ok(WriteFormat::Protobuf),
+        Err(error) => error,
+    };
+    let _: Value = api
+        .json(
+            Method::POST,
+            "/collection/v2/write",
+            &ban_write_json(user, ban, hidden),
+        )
+        .await
+        .map_err(|json| json.context(format!("protobuf write failed too: {protobuf}")))?;
+    Ok(WriteFormat::Json)
+}
+
+pub async fn excluded(api: &Api, user: &str) -> Result<Vec<String>> {
+    Ok(collection::all(api, user, IGNORE_IN_RECS)
+        .await?
+        .into_iter()
+        .map(|item| item.uri)
+        .collect())
+}
+
+pub async fn set_excluded(api: &Api, user: &str, uri: &str, excluded: bool) -> Result<()> {
+    collection::write(
+        api,
+        user,
+        IGNORE_IN_RECS,
+        &[collection::Write {
+            uri: uri.to_owned(),
+            context_uri: None,
+            removed: !excluded,
+        }],
+    )
+    .await
+}
+
+pub fn playlist_path(uri: &str) -> Option<String> {
+    let playlist = hide_context(uri)?;
+    let id = playlist.strip_prefix("spotify:playlist:")?;
+    Some(format!(
+        "/playlist/v2/playlist/{id}?decorate=revision,length,attributes,timestamp,owner,capabilities&from=0&length=0"
+    ))
+}
+
+pub async fn playlist_editable(api: &Api, uri: &str) -> Result<bool> {
+    let Some(path) = playlist_path(uri) else {
+        return Ok(false);
+    };
+    let value: Value = api.get_json(&path).await?;
+    Ok(Capabilities::from_playlist(&value["capabilities"]).edit_items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +806,162 @@ mod tests {
             NoRadio.to_string(),
             "Radio is not available because personalized recommendations are turned off"
         );
+    }
+
+    #[test]
+    fn hides_only_in_playlists_and_albums() {
+        let cases = [
+            (RADIO, Some(RADIO)),
+            (
+                "spotify:user:someone:playlist:37i9dQZF1E8Redacted001",
+                Some(RADIO),
+            ),
+            (
+                "spotify:album:1b5KESuOMQomF3wntoLAsk",
+                Some("spotify:album:1b5KESuOMQomF3wntoLAsk"),
+            ),
+            ("spotify:collection:tracks", None),
+            ("spotify:user:someone:collection", None),
+            ("spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", None),
+            ("spotify:station:track:70LcF31zb1H0PyJoS1Sx1r", None),
+            ("spotify:playlist:", None),
+        ];
+        for (uri, context) in cases {
+            assert_eq!(hide_context(uri).as_deref(), context, "{uri}");
+        }
+        assert_eq!(BanProvider::of(None), Some(BanProvider::Context));
+        assert_eq!(BanProvider::of(Some("context")), Some(BanProvider::Context));
+        assert_eq!(
+            BanProvider::of(Some("autoplay")),
+            Some(BanProvider::Autoplay)
+        );
+        assert_eq!(BanProvider::of(Some("queue")), None);
+    }
+
+    #[test]
+    fn reads_banned_songs_from_protobuf_pages() {
+        assert_eq!(
+            PageRequest::decode(bans_page_request("someone", Some("next")).as_slice()).unwrap(),
+            PageRequest {
+                username: "someone".into(),
+                set: "playcontextbans".into(),
+                pagination_token: "next".into(),
+                limit: 300,
+            }
+        );
+        let item = |uri: &str, context: Option<&str>, removed: bool| CollectionItem {
+            uri: uri.into(),
+            added_at: 1_725_636_253,
+            is_removed: removed,
+            context_uri: context.map(str::to_owned),
+            item_data: None,
+        };
+        let page = PageResponse {
+            items: vec![
+                item(SONG, Some(RADIO), false),
+                item(
+                    "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+                    Some("spotify:user:someone:playlist:37i9dQZF1E8Redacted001"),
+                    false,
+                ),
+                item("spotify:track:gone", Some(RADIO), true),
+                item("spotify:track:loose", None, false),
+            ],
+            next_page_token: "token".into(),
+            sync_token: "sync".into(),
+        };
+        let (bans, next) = parse_bans_page(&page.encode_to_vec()).unwrap();
+        assert_eq!(
+            bans,
+            [
+                Ban {
+                    track: SONG.into(),
+                    context: RADIO.into(),
+                },
+                Ban {
+                    track: "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into(),
+                    context: RADIO.into(),
+                },
+            ]
+        );
+        assert_eq!(next.as_deref(), Some("token"));
+        let (empty, next) = parse_bans_page(&[]).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(next, None);
+        let json = collection::parse_page(&json!({"items": [
+            {"uri": SONG, "added_at": "1725636253", "context_uri": RADIO},
+            {"uri": "spotify:track:loose", "added_at": 1},
+            {"uri": "spotify:track:artist", "context_uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb"}
+        ]}));
+        assert_eq!(
+            json_bans(json.items),
+            [Ban {
+                track: SONG.into(),
+                context: RADIO.into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn writes_bans_like_the_desktop_core() {
+        let ban = Ban {
+            track: SONG.into(),
+            context: RADIO.into(),
+        };
+        let request = WriteRequest::decode(
+            ban_write_request(
+                "someone",
+                &ban,
+                BanProvider::Autoplay,
+                true,
+                "0123456789abcdef",
+            )
+            .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(request.username, "someone");
+        assert_eq!(request.set, "playcontextbans");
+        assert_eq!(request.client_update_id, "0123456789abcdef");
+        let item = &request.items[0];
+        assert_eq!(item.uri, SONG);
+        assert_eq!(item.context_uri.as_deref(), Some(RADIO));
+        assert!(!item.is_removed);
+        assert_eq!(
+            item.item_data.as_ref().and_then(|data| data.data.clone()),
+            Some(Data::PlayContextBansItemData(PlayContextBansItemData {
+                item_provider: ItemProvider::ProviderAutoplay as i32,
+            }))
+        );
+        let shown = WriteRequest::decode(
+            ban_write_request("someone", &ban, BanProvider::Context, false, "x").as_slice(),
+        )
+        .unwrap();
+        assert!(shown.items[0].is_removed);
+        assert_eq!(
+            ban_write_json("someone", &ban, true),
+            json!({"username": "someone", "set": "playcontextbans", "items": [
+                {"uri": SONG, "context_uri": RADIO}
+            ]})
+        );
+        assert_eq!(
+            ban_write_json("someone", &ban, false)["items"][0]["is_removed"],
+            json!(true)
+        );
+        let id = client_update_id();
+        assert_eq!(id.len(), 16);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(WriteFormat::Protobuf.name(), "protobuf");
+        assert_eq!(WriteFormat::Json.name(), "json");
+    }
+
+    #[test]
+    fn asks_playlists_for_their_capabilities() {
+        assert_eq!(
+            playlist_path("spotify:user:someone:playlist:37i9dQZF1E8Redacted001").as_deref(),
+            Some(
+                "/playlist/v2/playlist/37i9dQZF1E8Redacted001?decorate=revision,length,attributes,timestamp,owner,capabilities&from=0&length=0"
+            )
+        );
+        assert_eq!(playlist_path("spotify:album:1b5KESuOMQomF3wntoLAsk"), None);
     }
 }

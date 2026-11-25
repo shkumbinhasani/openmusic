@@ -1,0 +1,424 @@
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    time::{Duration, Instant},
+};
+
+use gpui::Context;
+use spotify_client::{
+    details::{Ban, BanProvider, WriteFormat, hide_context},
+    entity,
+};
+
+use super::{
+    menu::Facts,
+    worker::{Command, Snapshot},
+};
+use crate::{
+    app::OpenMusic,
+    areas::playback,
+    ui::menu::{Group, MenuItem, TrackTarget},
+};
+
+pub const RETRY_AFTER: Duration = Duration::from_secs(30);
+
+pub const EXCLUDE: &str = "Exclude from your taste profile";
+pub const INCLUDE: &str = "Include in your taste profile";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Load {
+    #[default]
+    Idle,
+    Loading,
+    Ready,
+    Failed(Instant),
+}
+
+impl Load {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Loading => "loading",
+            Self::Ready => "ready",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Sets {
+    pub load: Load,
+    pub excluded: HashSet<String>,
+    pub hidden: HashMap<String, HashSet<String>>,
+    pub editable: HashMap<String, Option<bool>>,
+    pub last_format: Option<WriteFormat>,
+    excluding: HashMap<String, usize>,
+    hiding: HashMap<Ban, usize>,
+}
+
+impl Sets {
+    pub fn ready(&self) -> bool {
+        self.load == Load::Ready
+    }
+
+    pub fn is_excluded(&self, uri: &str) -> bool {
+        self.excluded.contains(uri)
+    }
+
+    pub fn is_hidden(&self, track: &str, context: &str) -> bool {
+        self.hidden
+            .get(context)
+            .is_some_and(|tracks| tracks.contains(track))
+    }
+
+    pub fn hidden_count(&self) -> usize {
+        self.hidden.values().map(HashSet::len).sum()
+    }
+
+    fn mark_excluded(&mut self, uri: &str, excluded: bool) {
+        if excluded {
+            self.excluded.insert(uri.to_owned());
+        } else {
+            self.excluded.remove(uri);
+        }
+    }
+
+    fn mark_hidden(&mut self, ban: &Ban, hidden: bool) {
+        if hidden {
+            self.hidden
+                .entry(ban.context.clone())
+                .or_default()
+                .insert(ban.track.clone());
+        } else if let Some(tracks) = self.hidden.get_mut(&ban.context) {
+            tracks.remove(&ban.track);
+            if tracks.is_empty() {
+                self.hidden.remove(&ban.context);
+            }
+        }
+    }
+
+    pub fn loading(&mut self) {
+        if self.load != Load::Ready {
+            self.load = Load::Loading;
+        }
+    }
+
+    pub fn apply(&mut self, result: Result<Snapshot, String>) {
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                if self.load != Load::Ready {
+                    self.load = Load::Failed(Instant::now());
+                }
+                return;
+            }
+        };
+        let excluding: Vec<(String, bool)> = self
+            .excluding
+            .keys()
+            .map(|uri| (uri.clone(), self.is_excluded(uri)))
+            .collect();
+        let hiding: Vec<(Ban, bool)> = self
+            .hiding
+            .keys()
+            .map(|ban| (ban.clone(), self.is_hidden(&ban.track, &ban.context)))
+            .collect();
+        self.excluded = snapshot.excluded.into_iter().collect();
+        self.hidden.clear();
+        for ban in snapshot.hidden {
+            self.mark_hidden(&ban, true);
+        }
+        for (uri, excluded) in excluding {
+            self.mark_excluded(&uri, excluded);
+        }
+        for (ban, hidden) in hiding {
+            self.mark_hidden(&ban, hidden);
+        }
+        self.load = Load::Ready;
+    }
+
+    pub fn due(&self) -> bool {
+        matches!(self.load, Load::Failed(at) if at.elapsed() >= RETRY_AFTER)
+    }
+
+    fn finish<K: std::hash::Hash + Eq>(writes: &mut HashMap<K, usize>, key: &K) -> usize {
+        let left = writes.get(key).map_or(0, |count| count.saturating_sub(1));
+        if left == 0 {
+            writes.remove(key);
+        } else if let Some(count) = writes.get_mut(key) {
+            *count = left;
+        }
+        left
+    }
+
+    pub fn excluded_written(&mut self, uri: &str, excluded: bool, ok: bool) {
+        let left = Self::finish(&mut self.excluding, &uri.to_owned());
+        if !ok && left == 0 {
+            self.mark_excluded(uri, !excluded);
+        }
+    }
+
+    pub fn hidden_written(
+        &mut self,
+        ban: &Ban,
+        hidden: bool,
+        result: &Result<WriteFormat, String>,
+    ) {
+        let left = Self::finish(&mut self.hiding, ban);
+        match result {
+            Ok(format) => self.last_format = Some(*format),
+            Err(_) if left == 0 => self.mark_hidden(ban, !hidden),
+            Err(_) => {}
+        }
+    }
+}
+
+pub fn exclude_message(uri: &str, excluded: bool) -> &'static str {
+    let playlist = !uri.starts_with("spotify:track:");
+    match (playlist, excluded) {
+        (false, true) => {
+            "Listening to this track will have less impact on your taste profile and recommendations."
+        }
+        (false, false) => {
+            "Listening to this track will impact your taste profile and recommendations."
+        }
+        (true, true) => {
+            "Listening to this playlist will have less impact on your taste profile and recommendations."
+        }
+        (true, false) => {
+            "Listening to this playlist will impact your taste profile and recommendations."
+        }
+    }
+}
+
+fn exclude_item(uri: &str, facts: &Facts) -> MenuItem {
+    let excluded = facts.sets.is_excluded(uri);
+    let uri = uri.to_owned();
+    MenuItem::action(
+        if excluded { INCLUDE } else { EXCLUDE },
+        move |app, _, _| app.set_excluded(uri.clone(), !excluded),
+    )
+    .key("x")
+    .symbol(if excluded {
+        "plus.circle"
+    } else {
+        "minus.circle"
+    })
+    .enabled(facts.sets.ready())
+}
+
+fn hide_title(context: &str, hidden: bool) -> &'static str {
+    match (context.starts_with("spotify:album:"), hidden) {
+        (false, false) => "Hide in this playlist",
+        (false, true) => "Show in this playlist",
+        (true, false) => "Hide in this album",
+        (true, true) => "Show in this album",
+    }
+}
+
+fn hide_item(target: &TrackTarget, facts: &Facts) -> Option<MenuItem> {
+    let context = target.context.as_deref().and_then(hide_context)?;
+    let provider = BanProvider::of(target.provider.as_deref())?;
+    let hidden = facts.sets.is_hidden(&target.track.uri, &context);
+    if !hidden && facts.editable(&context) == Some(true) {
+        return None;
+    }
+    let title = hide_title(&context, hidden);
+    let ban = Ban {
+        track: target.track.uri.clone(),
+        context,
+    };
+    Some(
+        MenuItem::action(title, move |app, _, _| {
+            app.set_hidden(ban.clone(), provider, !hidden)
+        })
+        .symbol(if hidden { "eye" } else { "eye.slash" })
+        .enabled(facts.sets.ready()),
+    )
+}
+
+pub fn track_items(target: &TrackTarget, facts: &Facts) -> Vec<(Group, MenuItem)> {
+    if !target.track.is_track() {
+        return Vec::new();
+    }
+    hide_item(target, facts)
+        .into_iter()
+        .chain([exclude_item(&target.track.uri, facts)])
+        .map(|item| (Group::Feedback, item))
+        .collect()
+}
+
+pub fn playlist_items(uri: &str, facts: &Facts) -> Vec<(Group, MenuItem)> {
+    if entity::is_liked_songs(uri) {
+        return Vec::new();
+    }
+    let Some(playlist) = hide_context(uri).filter(|uri| uri.starts_with("spotify:playlist:"))
+    else {
+        return Vec::new();
+    };
+    vec![(Group::Feedback, exclude_item(&playlist, facts))]
+}
+
+impl OpenMusic {
+    pub fn context_name(&self, context: &str) -> String {
+        let loaded = self
+            .playlists
+            .collection
+            .as_ref()
+            .and_then(|(uri, result)| Some((uri, result.as_ref().ok()?)))
+            .filter(|(uri, _)| hide_context(uri).as_deref() == Some(context))
+            .map(|(_, collection)| collection.name.clone());
+        let sidebar = || {
+            self.library
+                .playlists
+                .iter()
+                .find(|playlist| playlist.uri == context)
+                .map(|playlist| playlist.name.clone())
+        };
+        loaded.or_else(sidebar).unwrap_or_else(|| {
+            if context.starts_with("spotify:album:") {
+                "this album".into()
+            } else {
+                "this playlist".into()
+            }
+        })
+    }
+
+    pub fn set_excluded(&mut self, uri: String, excluded: bool) {
+        let sets = &mut self.details.sets;
+        if !sets.ready() {
+            return;
+        }
+        sets.mark_excluded(&uri, excluded);
+        *sets.excluding.entry(uri.clone()).or_default() += 1;
+        self.show_toast(exclude_message(&uri, excluded), None);
+        self.send(Command::Exclude { uri, excluded });
+    }
+
+    pub fn set_hidden(&mut self, ban: Ban, provider: BanProvider, hidden: bool) {
+        let sets = &mut self.details.sets;
+        if !sets.ready() {
+            return;
+        }
+        sets.mark_hidden(&ban, hidden);
+        *sets.hiding.entry(ban.clone()).or_default() += 1;
+        if hidden {
+            let name = self.context_name(&ban.context);
+            let again = ban.clone();
+            self.show_toast(
+                format!("Hidden in {name}."),
+                Some(Rc::new(
+                    move |app: &mut OpenMusic, cx: &mut Context<OpenMusic>| {
+                        app.set_hidden(again.clone(), provider, false);
+                        cx.notify();
+                    },
+                )),
+            );
+            if self.playing_in(&ban) {
+                self.send(playback::worker::Command::Next);
+            }
+        }
+        self.send(Command::Hide {
+            ban,
+            provider,
+            hidden,
+        });
+    }
+
+    fn playing_in(&self, ban: &Ban) -> bool {
+        let now = &self.playback.now;
+        now.track
+            .as_ref()
+            .is_some_and(|track| track.uri == ban.track)
+            && now.context_uri.as_deref().and_then(hide_context).as_deref() == Some(&ban.context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SONG: &str = "spotify:track:70LcF31zb1H0PyJoS1Sx1r";
+    const RADIO: &str = "spotify:playlist:37i9dQZF1E8Redacted001";
+
+    fn ban() -> Ban {
+        Ban {
+            track: SONG.into(),
+            context: RADIO.into(),
+        }
+    }
+
+    #[test]
+    fn keeps_writes_in_flight_when_a_snapshot_lands() {
+        let mut sets = Sets::default();
+        sets.apply(Ok(Snapshot::default()));
+        assert!(sets.ready());
+        sets.mark_hidden(&ban(), true);
+        *sets.hiding.entry(ban()).or_default() += 1;
+        sets.mark_excluded(RADIO, true);
+        *sets.excluding.entry(RADIO.into()).or_default() += 1;
+        sets.apply(Ok(Snapshot {
+            excluded: vec!["spotify:playlist:other".into()],
+            hidden: Vec::new(),
+        }));
+        assert!(sets.is_hidden(SONG, RADIO));
+        assert!(sets.is_excluded(RADIO));
+        assert!(sets.is_excluded("spotify:playlist:other"));
+        assert_eq!(sets.hidden_count(), 1);
+    }
+
+    #[test]
+    fn rolls_back_only_the_last_failed_write() {
+        let mut sets = Sets::default();
+        sets.apply(Ok(Snapshot::default()));
+        sets.mark_hidden(&ban(), true);
+        *sets.hiding.entry(ban()).or_default() += 1;
+        sets.mark_hidden(&ban(), false);
+        *sets.hiding.entry(ban()).or_default() += 1;
+        sets.hidden_written(&ban(), true, &Err("no".into()));
+        assert!(!sets.is_hidden(SONG, RADIO));
+        sets.hidden_written(&ban(), false, &Err("no".into()));
+        assert!(sets.is_hidden(SONG, RADIO));
+        assert!(sets.hiding.is_empty());
+        sets.hidden_written(&ban(), true, &Ok(WriteFormat::Json));
+        assert_eq!(sets.last_format, Some(WriteFormat::Json));
+
+        sets.mark_excluded(SONG, true);
+        *sets.excluding.entry(SONG.into()).or_default() += 1;
+        sets.excluded_written(SONG, true, false);
+        assert!(!sets.is_excluded(SONG));
+        sets.mark_excluded(SONG, true);
+        *sets.excluding.entry(SONG.into()).or_default() += 1;
+        sets.excluded_written(SONG, true, true);
+        assert!(sets.is_excluded(SONG));
+    }
+
+    #[test]
+    fn retries_a_failed_load_later() {
+        let mut sets = Sets::default();
+        sets.loading();
+        assert_eq!(sets.load, Load::Loading);
+        sets.apply(Err("offline".into()));
+        assert_eq!(sets.load.name(), "failed");
+        assert!(!sets.due());
+        sets.load = Load::Failed(Instant::now() - RETRY_AFTER);
+        assert!(sets.due());
+        sets.apply(Ok(Snapshot::default()));
+        sets.apply(Err("offline".into()));
+        assert!(sets.ready());
+        sets.loading();
+        assert!(sets.ready());
+    }
+
+    #[test]
+    fn words_the_taste_profile_toasts_like_spotify() {
+        assert_eq!(
+            exclude_message(SONG, true),
+            "Listening to this track will have less impact on your taste profile and recommendations."
+        );
+        assert_eq!(
+            exclude_message(RADIO, false),
+            "Listening to this playlist will impact your taste profile and recommendations."
+        );
+    }
+}

@@ -1,5 +1,5 @@
 use gpui::{AnyElement, Context, Pixels, prelude::*};
-use spotify_client::Track;
+use spotify_client::{Track, details::hide_context};
 
 use super::{
     go,
@@ -64,8 +64,13 @@ pub fn row_accessories(
     }
 }
 
-pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
-    false
+pub fn row_dimmed(app: &OpenMusic, track: &Track, _row: Row, options: &RowOptions) -> bool {
+    track.is_track()
+        && options
+            .context
+            .as_deref()
+            .and_then(hide_context)
+            .is_some_and(|context| app.details.sets.is_hidden(&track.uri, &context))
 }
 
 pub fn row_highlighted(app: &OpenMusic, track: &Track) -> bool {
