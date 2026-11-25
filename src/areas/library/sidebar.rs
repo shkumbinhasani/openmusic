@@ -665,7 +665,7 @@ impl OpenMusic {
                     palette,
                     cx,
                 ))
-            } else if library.has_more() {
+            } else if library.loading && library.has_more() {
                 list.child(self.library_skeleton(2, palette))
             } else {
                 list

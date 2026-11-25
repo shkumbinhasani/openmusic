@@ -691,7 +691,7 @@ impl OpenMusic {
                         palette,
                         cx,
                     )),
-                    None if recent.has_more() => {
+                    None if recent.loading && recent.has_more() => {
                         list.child(skeleton_rows("recent-more", 2, false, palette))
                     }
                     None => list,

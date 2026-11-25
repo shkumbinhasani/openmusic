@@ -539,7 +539,9 @@ impl OpenMusic {
             self.track_list(&collection.tracks, TRACK_ROW, 0, &options, palette, cx)
                 .when(collection.next.is_some(), |list| {
                     list.child(scroll_sentinel(&self.playlists.sentinel))
-                        .child(skeleton_rows("collection-more", 3, album, palette))
+                        .when(self.playlists.loading_more, |list| {
+                            list.child(skeleton_rows("collection-more", 3, album, palette))
+                        })
                 })
         };
         page.child(header).child(rows)

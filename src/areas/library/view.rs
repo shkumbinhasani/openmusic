@@ -303,7 +303,7 @@ impl OpenMusic {
                             palette,
                             cx,
                         ))
-                    } else if folder.has_more() {
+                    } else if folder.loading && folder.has_more() {
                         body.child(self.grid_skeleton(4, card_side, palette))
                     } else {
                         body

@@ -415,7 +415,7 @@ impl OpenMusic {
                             palette,
                             cx,
                         ))
-                    } else if grid.has_more() {
+                    } else if grid.loading && grid.has_more() {
                         body.child(self.grid_skeleton(4, card_side, palette))
                     } else {
                         body

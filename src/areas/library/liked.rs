@@ -653,7 +653,7 @@ impl OpenMusic {
                         palette,
                         cx,
                     )),
-                    None if liked.has_more() => {
+                    None if liked.loading && liked.has_more() => {
                         list.child(skeleton_rows("liked-more", 2, false, palette))
                     }
                     None => list,
