@@ -5,11 +5,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use spotify_client::account::AccountInfo;
 
-use super::worker::Event;
+use super::worker::{Command, Event};
 use crate::{
     app::{OpenMusic, Page, Session, settings::Settings},
     menus::{self, Handle, OpenSettings, SignOut},
-    ui::tracks::{RowDrag, RowDrop},
+    ui::{
+        menu::{MenuItem, Place, Row},
+        tracks::{RowDrag, RowDrop},
+    },
     worker,
 };
 
@@ -47,13 +50,23 @@ impl ProfileListKind {
     }
 }
 
+pub const CHIP: &str = "account-chip";
+pub const CHIP_ROW: Row = (CHIP, 0);
+pub const ACCOUNT_URL: &str = "https://www.spotify.com/account/overview/";
+
 #[derive(Default)]
 pub struct State {
     pub info: Option<AccountInfo>,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 impl State {
-    pub fn covers(&self, _urls: &mut HashSet<String>) {}
+    pub fn covers(&self, urls: &mut HashSet<String>) {
+        if let Some(info) = &self.info {
+            urls.extend(info.avatar.clone());
+        }
+    }
 }
 
 impl OpenMusic {
@@ -67,6 +80,57 @@ impl OpenMusic {
             self.navigate(Page::Settings);
         }
     }
+
+    pub fn refresh_account(&mut self) {
+        self.account.loading = true;
+        self.send(Command::Refresh);
+    }
+
+    pub fn open_account_menu(&mut self) {
+        let Some(info) = self.account() else {
+            self.navigate(Page::Settings);
+            return;
+        };
+        let profile = Page::Profile(info.uri.clone());
+        let items = vec![
+            MenuItem::action("Profile", move |app, _, _| app.navigate(profile.clone()))
+                .symbol("person.crop.circle"),
+            MenuItem::action("Settings…", |app, window, cx| {
+                app.open_settings(window, cx)
+            })
+            .symbol("gearshape")
+            .key("cmd-,"),
+            MenuItem::action("Manage Account", |_, _, cx| cx.open_url(ACCOUNT_URL))
+                .symbol("arrow.up.forward.square"),
+            MenuItem::Separator,
+            MenuItem::action("Sign Out", |app, _, _| app.send(worker::Command::SignOut))
+                .symbol("rectangle.portrait.and.arrow.right"),
+        ];
+        if !self.show_menu(items, Place::Under(CHIP), Some(CHIP_ROW)) {
+            self.navigate(Page::Settings);
+        }
+    }
+}
+
+pub fn describe_account(info: &AccountInfo) -> String {
+    [
+        format!("username={}", info.username),
+        format!("name={}", info.name),
+        format!("uri={}", info.uri),
+        format!("product={}", info.product),
+        format!("plan={}", info.plan()),
+        format!("catalogue={}", info.catalogue),
+        format!("country={}", info.country),
+        format!("ads={}", info.ads),
+        format!("explicit_filtered={}", info.explicit_filtered),
+        format!("explicit_locked={}", info.explicit_locked),
+        format!(
+            "family_role={}",
+            info.family_role.as_deref().unwrap_or("none")
+        ),
+        format!("avatar={}", info.avatar.is_some()),
+    ]
+    .join("\n")
 }
 
 pub fn with_setting(settings: &Settings, path: &str, value: &str) -> Result<Settings, String> {
@@ -96,18 +160,31 @@ pub fn with_setting(settings: &Settings, path: &str, value: &str) -> Result<Sett
 pub fn load(_app: &mut OpenMusic, _page: &Page) {}
 
 pub fn on_event(
-    _app: &mut OpenMusic,
+    app: &mut OpenMusic,
     event: Event,
     _window: &mut Window,
     _cx: &mut Context<OpenMusic>,
 ) {
-    match event {}
+    match event {
+        Event::Account(result) => {
+            app.account.loading = false;
+            match result {
+                Ok(info) => {
+                    app.account.info = Some(info);
+                    app.account.error = None;
+                }
+                Err(message) => app.account.error = Some(message),
+            }
+        }
+    }
 }
 
-pub fn connected(_app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {}
+pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+    app.refresh_account();
+}
 
 pub fn signed_out(app: &mut OpenMusic) {
-    app.account.info = None;
+    app.account = State::default();
 }
 
 pub fn debug(
@@ -130,19 +207,39 @@ pub fn debug(
             }
         }
         "open-settings" => app.open_settings(window, cx),
+        "account" => {
+            if rest == "refresh" {
+                app.refresh_account();
+            }
+            let text = match (&app.account.info, &app.account.error) {
+                (Some(info), error) => {
+                    let mut text = describe_account(info);
+                    if let Some(error) = error {
+                        text.push_str(&format!("\nerror={error}"));
+                    }
+                    text
+                }
+                (None, Some(error)) => format!("error={error}"),
+                (None, None) => format!("loading={}", app.account.loading),
+            };
+            let _ = std::fs::write(directory.join("account.txt"), text);
+        }
+        "account-menu" => app.open_account_menu(),
         _ => return false,
     }
     true
 }
 
 pub fn state_fragment(app: &OpenMusic) -> String {
-    format!(
-        "plan={}",
-        app.account()
-            .map(|account| account.product.as_str())
-            .filter(|product| !product.is_empty())
-            .unwrap_or("unknown")
-    )
+    let plan = app
+        .account()
+        .map(|account| account.product.as_str())
+        .filter(|product| !product.is_empty())
+        .unwrap_or("unknown");
+    let user = app
+        .account()
+        .map_or("none", |account| account.username.as_str());
+    format!("plan={plan} user={user}")
 }
 
 pub fn register_actions(cx: &mut App, handle: &Handle) {
@@ -156,12 +253,18 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
 }
 
 pub fn on_press(
-    _app: &mut OpenMusic,
-    _key: &'static str,
+    app: &mut OpenMusic,
+    key: &'static str,
     _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    match key {
+        "account-manage" => cx.open_url(ACCOUNT_URL),
+        "account-sign-out" => app.send(worker::Command::SignOut),
+        "account-retry" => app.refresh_account(),
+        _ => return false,
+    }
+    true
 }
 
 pub fn row_dropped(
