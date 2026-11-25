@@ -643,6 +643,7 @@ fn build(name: &str, argument: &str, cx: &App) -> Option<Box<dyn Action>> {
         "SleepTimer" => Some(Box::new(SleepTimer {
             minutes: argument.parse().ok()?,
         })),
+        name if name.contains("::") => cx.build_action(name, None).ok(),
         name => cx.build_action(&format!("openmusic::{name}"), None).ok(),
     }
 }
