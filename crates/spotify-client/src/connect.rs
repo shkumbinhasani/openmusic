@@ -1004,16 +1004,6 @@ pub fn add_to_queue_command(uri: &str) -> Value {
     })
 }
 
-pub fn play_next_command(uris: &[String]) -> Value {
-    json!({
-        "endpoint": "play_as_next_in_queue",
-        "tracks": uris
-            .iter()
-            .map(|uri| json!({ "uri": uri, "uid": "", "metadata": {} }))
-            .collect::<Vec<_>>(),
-    })
-}
-
 pub const RESTART_AFTER_MS: u32 = 3000;
 
 pub fn previous_command(position_ms: u32, allowed: &Allowed) -> Option<Value> {
@@ -1125,6 +1115,18 @@ pub fn queue_with_added(next: &[ProvidedTrack], uris: &[String]) -> Vec<Provided
             break;
         }
     }
+    queue_inserted(next, at, uris)
+}
+
+pub fn queue_with_next(next: &[ProvidedTrack], uris: &[String]) -> Vec<ProvidedTrack> {
+    let at = next
+        .iter()
+        .take_while(|track| flagged(track, "is_narration"))
+        .count();
+    queue_inserted(next, at, uris)
+}
+
+fn queue_inserted(next: &[ProvidedTrack], at: usize, uris: &[String]) -> Vec<ProvidedTrack> {
     let added = uris.iter().map(|uri| {
         let mut track = ProvidedTrack {
             uri: uri.clone(),
@@ -2051,13 +2053,6 @@ mod tests {
             json!({"endpoint": "add_to_queue", "track": {"uri": "spotify:track:1", "metadata": {"is_queued": "true"}, "provider": "queue"}})
         );
         assert_eq!(
-            play_next_command(&["spotify:track:1".into(), "spotify:track:2".into()]),
-            json!({"endpoint": "play_as_next_in_queue", "tracks": [
-                {"uri": "spotify:track:1", "uid": "", "metadata": {}},
-                {"uri": "spotify:track:2", "uid": "", "metadata": {}},
-            ]})
-        );
-        assert_eq!(
             shuffle_play_command(
                 "spotify:playlist:1",
                 ORIGIN,
@@ -2314,6 +2309,35 @@ mod tests {
         assert_eq!(QueueItem::of(&plain).provider, "context");
         let queued = item("spotify:track:c", "q1", "queue", &[("provider", "queue")]);
         assert_eq!(QueueItem::of(&queued).provider, "queue");
+    }
+
+    #[test]
+    fn plays_items_next_ahead_of_the_queued_ones() {
+        let next = raw_next();
+        let added = queue_with_next(&next, &["spotify:track:a".into(), "spotify:track:b".into()]);
+        assert_eq!(added.len(), next.len() + 2);
+        assert_eq!(
+            uids(&added)[..3],
+            ["spotify:track:a", "spotify:track:b", "q1"]
+        );
+        assert_eq!(added[0].provider, "queue");
+        assert_eq!(added[1].metadata["is_queued"], "true");
+
+        let narrated = vec![
+            item(
+                "spotify:media:narration",
+                "n1",
+                "context",
+                &[("is_narration", "true")],
+            ),
+            item("spotify:track:1111111111111111111111", "q1", "queue", &[]),
+        ];
+        assert_eq!(
+            uids(&queue_with_next(&narrated, &["spotify:track:a".into()])),
+            vec!["n1", "spotify:track:a", "q1"]
+        );
+        let empty = queue_with_next(&[], &["spotify:track:a".into()]);
+        assert_eq!(uids(&empty), vec!["spotify:track:a"]);
     }
 
     #[test]

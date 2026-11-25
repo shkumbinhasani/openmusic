@@ -100,6 +100,7 @@ enum Edit {
     },
     Clear,
     Add(Vec<String>),
+    Next(Vec<String>),
 }
 
 impl Edit {
@@ -109,6 +110,7 @@ impl Edit {
                 Self::Remove(_) | Self::Clear => allowed.remove_from_queue,
                 Self::Move { .. } => allowed.reorder_queue,
                 Self::Add(_) => allowed.add_to_queue,
+                Self::Next(_) => allowed.play_next,
             }
     }
 
@@ -122,6 +124,7 @@ impl Edit {
             } => connect::queue_moved(next, moved, anchor, *after),
             Self::Clear => connect::queue_cleared(next),
             Self::Add(uris) => connect::queue_with_added(next, uris),
+            Self::Next(uris) => connect::queue_with_next(next, uris),
         }
     }
 }
@@ -245,12 +248,13 @@ impl Engine {
                 if uris.is_empty() {
                     return Ok(());
                 }
-                if !self.redirected() && !self.playing_model()?.allowed.play_next {
+                if self.redirected() {
+                    return self.add_to_queue(uris).await;
+                }
+                if !self.playing_model()?.allowed.play_next {
                     bail!("You can’t add songs to the queue right now.");
                 }
-                self.player_command(connect::play_next_command(&uris))
-                    .await
-                    .map_err(|error| keep_jam(error, "Couldn’t add that to the queue."))
+                self.edit_queue(Edit::Next(uris)).await
             }
             Control::RemoveFromQueue(keys) => self.edit_queue(Edit::Remove(keys)).await,
             Control::MoveInQueue {
