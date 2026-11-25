@@ -190,9 +190,7 @@ async fn search(api: Api, query: String) -> crate::worker::Event {
         ),
         Ok(Some(_)) => Event::Search {
             query,
-            result: Err(
-                "Paste a Spotify song link. Albums and playlists aren’t supported yet.".to_owned(),
-            ),
+            result: Err("OpenMusic can’t open this kind of Spotify link.".to_owned()),
         },
         Ok(None) => {
             let result = search::search(&api, &query)

@@ -157,6 +157,14 @@ fn is_link(text: &str) -> bool {
     !matches!(catalog::parse_link(text), Ok(None))
 }
 
+pub fn link_page(text: &str) -> Option<Page> {
+    let uri = catalog::parse_link(text).ok()??;
+    if uri.starts_with("spotify:track:") {
+        return None;
+    }
+    page_for(&uri)
+}
+
 fn starts_with_folded(text: &str, prefix: &str) -> bool {
     text.to_lowercase().starts_with(&prefix.to_lowercase())
 }
@@ -349,6 +357,11 @@ impl OpenMusic {
         }
         self.discovery.suggest.open = false;
         self.discovery.suggest.index = None;
+        if let Some(page) = link_page(&query) {
+            self.navigate(page);
+            cx.notify();
+            return;
+        }
         let tab = match self.page {
             Page::Search(tab) => tab,
             _ => SearchTab::All,
@@ -859,6 +872,12 @@ impl OpenMusic {
             "more" if matches!(self.page, Page::Search(_)) => {
                 self.more_search_results();
             }
+            "link" if !rest.is_empty() => {
+                let text = rest.to_owned();
+                self.input
+                    .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+                self.run_search(text, cx);
+            }
             "suggest" if rest.is_empty() => {
                 let suggest = &self.discovery.suggest;
                 let mut lines = vec![format!(
@@ -1107,6 +1126,49 @@ mod tests {
         assert_eq!(SearchTab::from_alias("albums"), Some(SearchTab::Albums));
         assert_eq!(SearchTab::Podcasts.shelf_title(), "Shows");
         assert_eq!(SearchTab::Users.label(), "Profiles");
+    }
+
+    #[test]
+    fn routes_pasted_links_to_their_pages() {
+        let cases = [
+            (
+                "https://open.spotify.com/album/6dVIqQ8qmQ5GBnJ9shOYGE?si=x",
+                Some(Page::Collection(
+                    "spotify:album:6dVIqQ8qmQ5GBnJ9shOYGE".into(),
+                )),
+            ),
+            (
+                "https://open.spotify.com/intl-de/artist/4Z8W4fKeB5YxbusRsdQVPb",
+                Some(Page::Artist("spotify:artist:4Z8W4fKeB5YxbusRsdQVPb".into())),
+            ),
+            (
+                "https://open.spotify.com/genre/0JQ5DAqbMKFDXXwE9BDJAr",
+                Some(Page::Browse("spotify:page:0JQ5DAqbMKFDXXwE9BDJAr".into())),
+            ),
+            (
+                "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M",
+                Some(Page::Collection(
+                    "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M".into(),
+                )),
+            ),
+            (
+                "https://open.spotify.com/show/5CfCWKI5pZ28U0uOzXkDHe",
+                Some(Page::Show("spotify:show:5CfCWKI5pZ28U0uOzXkDHe".into())),
+            ),
+            (
+                "https://open.spotify.com/user/someone",
+                Some(Page::Profile("spotify:user:someone".into())),
+            ),
+            (
+                "https://open.spotify.com/track/70LcF31zb1H0PyJoS1Sx1r",
+                None,
+            ),
+            ("https://open.spotify.com/album/short", None),
+            ("radiohead", None),
+        ];
+        for (text, page) in cases {
+            assert_eq!(link_page(text), page, "{text}");
+        }
     }
 
     #[test]
