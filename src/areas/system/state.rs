@@ -10,6 +10,7 @@ use serde_json::json;
 use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
+    dock_menu::{self, DockState, RECENT_LIMIT, recent_name},
     menu_bar::{self, MenuState},
     native_window,
     now_playing::{self, Snapshot},
@@ -20,9 +21,9 @@ use crate::{
     app::{OpenMusic, Page, Session, intent::Intent},
     menus::{
         About, BringAllToFront, CloseWindow, GoBack, GoForward, GoHome, Handle, HideApp,
-        HideOthers, Minimize, Next, PlayPause, Previous, SeekBackward, SeekForward, ShowAll,
-        ShowMainWindow, ShowShortcuts, ToggleFullScreen, TogglePlayback, VolumeDown, VolumeUp,
-        Zoom, route,
+        HideOthers, Minimize, Next, PlayPause, PlayRecent, Previous, SeekBackward, SeekForward,
+        ShowAll, ShowMainWindow, ShowShortcuts, ToggleFullScreen, TogglePlayback, VolumeDown,
+        VolumeUp, Zoom, route,
     },
     ui::tracks::{RowDrag, RowDrop},
 };
@@ -69,6 +70,8 @@ pub struct State {
     pub menu: Option<MenuState>,
     pub throttle: Throttle,
     pub shortcuts: bool,
+    pub dock: Option<DockState>,
+    pub dock_builds: u64,
 }
 
 impl State {
@@ -117,7 +120,7 @@ impl OpenMusic {
 
     pub fn act(&mut self, intent: Intent, window: &mut Window, cx: &mut Context<Self>) {
         self.perform(intent, window, cx);
-        self.sync_system();
+        self.sync_system(cx);
     }
 
     pub fn seek_key(&mut self, direction: i32, window: &mut Window, cx: &mut Context<Self>) {
@@ -175,13 +178,55 @@ impl OpenMusic {
         }
     }
 
-    pub fn sync_system(&mut self) {
+    pub fn sync_system(&mut self, cx: &mut App) {
+        self.sync_native();
+        self.sync_dock(cx);
+    }
+
+    pub fn sync_native(&mut self) {
         self.sync_now_playing();
         let menu = self.menu_state();
         if self.system.menu.as_ref() != Some(&menu) {
             menu_bar::sync(&menu);
             self.system.menu = Some(menu);
         }
+    }
+
+    pub fn dock_state(&self) -> DockState {
+        let connected = matches!(self.session, Session::Connected);
+        let track = self
+            .track()
+            .filter(|track| connected && !track.title.is_empty());
+        let recents = if connected {
+            self.recent_contexts()
+                .iter()
+                .filter_map(|recent| {
+                    recent_name(&recent.uri, &recent.name).map(|name| (recent.uri.clone(), name))
+                })
+                .take(RECENT_LIMIT)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        DockState {
+            connected,
+            title: track.map(|track| track.title.clone()),
+            artist: track.map(|track| track.artist.clone()),
+            playing: track.is_some() && self.playback.now.playing,
+            recents,
+            mini_open: false,
+        }
+    }
+
+    fn sync_dock(&mut self, cx: &mut App) {
+        let state = self.dock_state();
+        if self.system.dock.as_ref() == Some(&state) {
+            return;
+        }
+        cx.set_dock_menu(dock_menu::menu(&state));
+        dock_menu::strip_keys();
+        self.system.dock = Some(state);
+        self.system.dock_builds += 1;
     }
 
     fn sync_now_playing(&mut self) {
@@ -248,11 +293,11 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
         })
         .detach();
     }
-    app.sync_system();
+    app.sync_system(cx);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
-    app.sync_system();
+    app.sync_native();
 }
 
 fn write(directory: &Path, name: &str, contents: String) {
@@ -269,7 +314,7 @@ pub fn debug(
 ) -> bool {
     match verb {
         "nowplaying" => {
-            app.sync_system();
+            app.sync_system(cx);
             let mut dump = now_playing::dump();
             dump["published"] = json!(app.system.publishes);
             let text = serde_json::to_string_pretty(&dump).unwrap_or_default();
@@ -293,7 +338,7 @@ pub fn debug(
             });
         }
         "menubar" => {
-            app.sync_system();
+            app.sync_system(cx);
             let native = menu_bar::items();
             let owned = cx.get_menus().unwrap_or_default();
             let mut lines = Vec::new();
@@ -308,6 +353,24 @@ pub fn debug(
                 menu_bar::describe(&menu.children, items, 1, &mut available, &mut lines);
             }
             write(directory, "menubar.txt", lines.join("\n"));
+        }
+        "dock" => {
+            app.sync_system(cx);
+            let items = dock_menu::menu(app.system.dock.as_ref().unwrap_or(&DockState::default()));
+            let mut available = |action: &dyn gpui::Action| {
+                window.is_action_available(action, cx) || cx.is_action_available(action)
+            };
+            let mut lines = vec![format!("builds={}", app.system.dock_builds)];
+            lines.extend(dock_menu::describe(&items, &mut available));
+            lines.push(match dock_menu::native_items() {
+                Some(native) => format!(
+                    "native items={} keys={}",
+                    native.len(),
+                    native.iter().filter(|(_, key)| *key).count()
+                ),
+                None => "native none".to_owned(),
+            });
+            write(directory, "dock.txt", lines.join("\n"));
         }
         "window" => {
             match rest {
@@ -357,11 +420,12 @@ fn window_label(state: native_window::WindowState) -> &'static str {
 
 pub fn state_fragment(app: &OpenMusic) -> String {
     format!(
-        "published={} liked={} shortcuts={} window={}",
+        "published={} liked={} shortcuts={} window={} dock={}",
         app.system.publishes,
         app.liked_label(),
         app.system.shortcuts,
         window_label(native_window::state()),
+        app.system.dock_builds,
     )
 }
 
@@ -415,6 +479,9 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     route(cx, handle, |_: &ShowMainWindow, app, window, cx| {
         app.act(Intent::ShowMainWindow, window, cx)
     });
+    route(cx, handle, |action: &PlayRecent, app, window, cx| {
+        app.act(Intent::PlayContext(action.uri.clone()), window, cx)
+    });
     cx.on_action(|_: &About, _| menu_bar::about());
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -445,8 +512,8 @@ pub fn row_dropped(
     false
 }
 
-pub fn tick(app: &mut OpenMusic, _cx: &mut Context<OpenMusic>) {
-    app.sync_system();
+pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    app.sync_system(cx);
 }
 
 #[cfg(test)]
