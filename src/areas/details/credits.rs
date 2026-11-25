@@ -11,7 +11,7 @@ use gpui::{
 use gpui_component::WindowExt;
 use spotify_client::details::{Contributor, Credits};
 
-use super::{dialog, worker::Command};
+use super::{dialog, state::Shown, worker::Command};
 use crate::{
     app::{OpenMusic, Page},
     ui::{Palette, components::bone},
@@ -141,7 +141,6 @@ impl CreditsView {
     ) {
         window.close_dialog(cx);
         let _ = self.app.update(cx, |app, cx| {
-            app.details.credits_view = None;
             then(app);
             cx.notify();
         });
@@ -373,15 +372,9 @@ impl OpenMusic {
             title,
             result: cached.map(Ok),
         });
-        self.details.close_dialogs(window, cx);
-        self.details.credits_view = Some((uri, view.clone()));
-        let close: dialog::Close = Rc::new(move |_, cx| {
-            let _ = app.update(cx, |app, cx| {
-                app.details.credits_view = None;
-                cx.notify();
-            });
-        });
-        window.open_dialog(cx, move |dialog, window, cx| {
+        let close = dialog::redraw(app);
+        let shown = Shown::Credits(uri, view.clone());
+        let build: dialog::Build = Rc::new(move |dialog, window, cx| {
             let subtitle = view.read(cx).subtitle();
             dialog::frame(
                 dialog,
@@ -393,6 +386,7 @@ impl OpenMusic {
             )
             .child(view.clone())
         });
+        self.details.show(shown, build, window, cx);
     }
 }
 

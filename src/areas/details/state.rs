@@ -4,7 +4,6 @@ use std::{
 };
 
 use gpui::{App, Context, Entity, ScrollHandle, Window};
-use gpui_component::WindowExt;
 use spotify_client::{
     catalog::Link,
     dealer::Message,
@@ -14,6 +13,7 @@ use spotify_client::{
 
 use super::{
     credits::{self, CreditsView},
+    dialog::{self, Slot},
     embed::EmbedView,
     feedback::Sets,
     go::{ContentScroll, Highlight},
@@ -30,11 +30,16 @@ use crate::{
     },
 };
 
+#[derive(Clone)]
+pub enum Shown {
+    Credits(String, Entity<CreditsView>),
+    Embed(String, Entity<EmbedView>),
+}
+
 #[derive(Default)]
 pub struct State {
     pub credits: credits::Cache,
-    pub credits_view: Option<(String, Entity<CreditsView>)>,
-    pub embed_view: Option<(String, Entity<EmbedView>)>,
+    pub dialog: Slot<Shown>,
     pub sets: Sets,
     pub artists: HashMap<String, Vec<Link>>,
     pub highlight: Option<Highlight>,
@@ -50,10 +55,34 @@ impl State {
         }
     }
 
-    pub fn close_dialogs(&mut self, window: &mut Window, cx: &mut Context<OpenMusic>) {
-        window.close_all_dialogs(cx);
-        self.credits_view = None;
-        self.embed_view = None;
+    pub fn credits_view(&self) -> Option<(String, Entity<CreditsView>)> {
+        match self.dialog.get()? {
+            Shown::Credits(uri, view) => Some((uri, view)),
+            Shown::Embed(..) => None,
+        }
+    }
+
+    pub fn embed_view(&self) -> Option<(String, Entity<EmbedView>)> {
+        match self.dialog.get()? {
+            Shown::Embed(uri, view) => Some((uri, view)),
+            Shown::Credits(..) => None,
+        }
+    }
+
+    pub fn show(
+        &mut self,
+        shown: Shown,
+        build: dialog::Build,
+        window: &mut Window,
+        cx: &mut Context<OpenMusic>,
+    ) {
+        if self
+            .embed_view()
+            .is_some_and(|(_, view)| view.read(cx).typing(window, cx))
+        {
+            self.dialog.close(window, cx);
+        }
+        self.dialog.show(shown, build, window, cx);
     }
 
     pub fn content_scroll(&self, page: &str) -> ScrollHandle {
@@ -170,8 +199,8 @@ pub fn on_event(
                 app.details.credits.insert(credits.clone());
                 app.lookup_saved(credits.linked_artists());
             }
-            if let Some((open, view)) = &app.details.credits_view
-                && *open == uri
+            if let Some((open, view)) = app.details.credits_view()
+                && open == uri
             {
                 view.update(cx, |view, cx| {
                     view.result = Some(result);
@@ -180,8 +209,8 @@ pub fn on_event(
             }
         }
         Event::CoverColor { uri, color } => {
-            if let Some((open, view)) = &app.details.embed_view
-                && *open == uri
+            if let Some((open, view)) = app.details.embed_view()
+                && open == uri
             {
                 view.update(cx, |view, cx| {
                     view.swatch = color;
@@ -287,17 +316,16 @@ pub fn debug(
         ("embed", ["dump"]) => write(
             "embed.txt",
             app.details
-                .embed_view
-                .as_ref()
+                .embed_view()
                 .map(|(_, view)| view.read(cx).describe())
                 .unwrap_or_else(|| "closed".into()),
         ),
-        ("embed" | "credits", ["close"]) => app.details.close_dialogs(window, cx),
+        ("embed" | "credits", ["close"]) => app.details.dialog.close(window, cx),
         ("embed", [setting, value @ ..])
-            if app.details.embed_view.is_some() && !value.is_empty() =>
+            if app.details.embed_view().is_some() && !value.is_empty() =>
         {
             let value = value.join(" ");
-            if let Some((_, view)) = app.details.embed_view.clone() {
+            if let Some((_, view)) = app.details.embed_view() {
                 view.update(cx, |view, cx| {
                     match *setting {
                         "theme" => {
@@ -328,7 +356,7 @@ pub fn debug(
             }
         }
         ("embed", ["copy"]) => {
-            if let Some((_, view)) = app.details.embed_view.clone() {
+            if let Some((_, view)) = app.details.embed_view() {
                 view.update(cx, |view, cx| view.copy(cx));
             }
         }
@@ -336,8 +364,7 @@ pub fn debug(
         ("credits", ["dump"]) => write(
             "credits.txt",
             app.details
-                .credits_view
-                .as_ref()
+                .credits_view()
                 .map(|(_, view)| view.read(cx).describe())
                 .unwrap_or_else(|| "closed".into()),
         ),
@@ -436,13 +463,9 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let details = &app.details;
     let credits = details
-        .credits_view
-        .as_ref()
+        .credits_view()
         .map(|(uri, _)| format!("credits={uri}"));
-    let embed = details
-        .embed_view
-        .as_ref()
-        .map(|(uri, _)| format!("embed={uri}"));
+    let embed = details.embed_view().map(|(uri, _)| format!("embed={uri}"));
     let sets = Some(format!(
         "sets={} excluded={} hidden={} banned={}",
         details.sets.load.name(),

@@ -1,18 +1,18 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    ClipboardItem, Context, Div, Entity, FontWeight, HighlightStyle, InteractiveText, SharedString,
-    StyledText, Subscription, Task, Window, div, prelude::*, px, rgb, rgba,
+    App, ClipboardItem, Context, Div, Entity, Focusable, FontWeight, HighlightStyle,
+    InteractiveText, SharedString, StyledText, Subscription, Task, Window, div, prelude::*, px,
+    rgb, rgba,
 };
 use gpui_component::{
-    WindowExt,
     checkbox::Checkbox,
     input::{Input, InputEvent, InputState},
     tooltip::Tooltip,
 };
 use spotify_client::share::{self, Embed, Kind, Size, Theme, Width};
 
-use super::{dialog, worker::Command};
+use super::{dialog, state::Shown, worker::Command};
 use crate::{app::OpenMusic, ui::Palette};
 
 const WIDTH: f32 = 520.;
@@ -123,6 +123,12 @@ impl EmbedView {
                 .update(cx, |input, cx| input.set_value(label, window, cx));
         }
         cx.notify();
+    }
+
+    pub fn typing(&self, window: &Window, cx: &App) -> bool {
+        [&self.width_input, &self.start_input]
+            .into_iter()
+            .any(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub fn copy(&mut self, cx: &mut Context<Self>) {
@@ -424,17 +430,11 @@ impl OpenMusic {
         };
         let view = cx.new(|cx| EmbedView::new(uri.clone(), kind, start, window, cx));
         self.send(Command::CoverColor(uri.clone()));
-        self.details.close_dialogs(window, cx);
-        self.details.embed_view = Some((uri, view.clone()));
-        let app = cx.weak_entity();
-        let close: dialog::Close = Rc::new(move |_, cx| {
-            let _ = app.update(cx, |app, cx| {
-                app.details.embed_view = None;
-                cx.notify();
-            });
-        });
-        window.open_dialog(cx, move |dialog, window, _| {
+        let close = dialog::redraw(cx.weak_entity());
+        let shown = Shown::Embed(uri, view.clone());
+        let build: dialog::Build = Rc::new(move |dialog, window, _| {
             dialog::frame(dialog, window, WIDTH, title, None, close.clone()).child(view.clone())
         });
+        self.details.show(shown, build, window, cx);
     }
 }
