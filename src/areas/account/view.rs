@@ -7,6 +7,7 @@ use spotify_client::{
     account::{AccountInfo, Explicit},
 };
 
+use super::profile;
 use super::state::{
     CHIP, CHIP_ROW, CLEAR_CACHE_KEY, FREE_MESSAGE, FREE_NOTICE, LANGUAGE_KEY, LANGUAGES,
     PREMIUM_KEY, PREMIUM_URL, cache_label, language_name,
@@ -512,8 +513,8 @@ impl OpenMusic {
     }
 }
 
-pub fn menu_items(_target: &Target, _app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    Vec::new()
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    profile::menu_items(target, app)
 }
 
 pub fn nav_entries(_app: &OpenMusic) -> Vec<NavEntry> {

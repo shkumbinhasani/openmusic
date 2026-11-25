@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, div, prelude::*, px,
-    rgb,
+    AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, Stateful, div,
+    prelude::*, px, rgb,
 };
 use spotify_client::{
     entity::{Card, Kind},
@@ -24,6 +24,7 @@ use crate::{
 };
 
 pub const MORE_PROFILE: &str = "more-profile";
+pub const FOLLOW_PROFILE: &str = "profile-follow";
 const CARD_TEXT: f32 = 50.;
 const SHELF_LIMIT: usize = 12;
 
@@ -332,8 +333,42 @@ impl OpenMusic {
         };
         let more = self
             .has_menu(&target)
-            .then(|| self.menu_button(MORE_PROFILE, &view.profile.name, palette, cx))?;
-        Some(div().mt_3().flex().items_center().gap_2().child(more))
+            .then(|| self.menu_button(MORE_PROFILE, &view.profile.name, palette, cx));
+        let follow = self.follow_button(view, palette, cx);
+        if more.is_none() && follow.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .mt_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(follow)
+                .children(more),
+        )
+    }
+
+    fn follow_button(
+        &self,
+        view: &ProfileView,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let profile = &view.profile;
+        if profile.is_current_user || self.is_own_profile(&profile.uri) {
+            return None;
+        }
+        let following = self
+            .account
+            .profiles
+            .known_following(&profile.uri)
+            .unwrap_or(profile.is_following);
+        if !profile.allow_follows && !following {
+            return None;
+        }
+        let label = if following { "Following" } else { "Follow" };
+        Some(self.text_control(FOLLOW_PROFILE, label, false, palette, cx))
     }
 
     pub fn profile_page(

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use spotify_client::{
     Api, Track,
@@ -9,9 +9,10 @@ use spotify_client::{
 };
 
 use super::state::{AccountPrefs, ProfileListKind, chosen_language, system_language};
-use crate::worker::{Ctx, cache};
+use crate::worker::{Ctx, Mutation, cache};
 
 const SECOND_LOOK: Duration = Duration::from_secs(5);
+const LOOKUP_BATCH: usize = 50;
 
 pub enum Command {
     Refresh,
@@ -24,6 +25,11 @@ pub enum Command {
         kind: ProfileListKind,
         offset: usize,
     },
+    Follow {
+        uris: Vec<String>,
+        follow: bool,
+    },
+    FollowLookup(Vec<String>),
 }
 
 pub struct ProfileView {
@@ -103,6 +109,15 @@ pub enum Event {
         offset: usize,
         result: Result<Listing, String>,
     },
+    Followed {
+        states: Vec<(String, bool)>,
+        message: Option<String>,
+    },
+    FollowFailed {
+        uris: Vec<String>,
+        message: String,
+    },
+    FollowState(Vec<(String, bool)>),
 }
 
 impl Event {
@@ -119,7 +134,10 @@ impl Event {
             Self::Account(Err(_))
             | Self::Cache { .. }
             | Self::Profile { .. }
-            | Self::ProfileList { .. } => Vec::new(),
+            | Self::ProfileList { .. }
+            | Self::Followed { .. }
+            | Self::FollowFailed { .. }
+            | Self::FollowState(_) => Vec::new(),
         }
     }
 }
@@ -137,6 +155,14 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
             "profile-list",
             profile_list(ctx.api.clone(), uri, kind, offset),
         ),
+        Command::Follow { uris, follow } => {
+            let keys = uris.iter().map(|uri| format!("follow:{uri}")).collect();
+            let api = ctx.api.clone();
+            ctx.writes.push(Mutation::new(keys, async move {
+                Ok(follow_users(api, uris, follow).await)
+            }));
+        }
+        Command::FollowLookup(uris) => ctx.tasks.spawn(follow_lookup(ctx.api.clone(), uris)),
     }
 }
 
@@ -287,4 +313,97 @@ async fn profile_list(
         result,
     }
     .into()
+}
+
+pub fn follow_message(follow: bool) -> &'static str {
+    if follow {
+        "Couldn’t follow this profile. Try again."
+    } else {
+        "Couldn’t unfollow this profile. Try again."
+    }
+}
+
+async fn follow_users(api: Api, uris: Vec<String>, follow: bool) -> crate::worker::Event {
+    let written = match social::set_following(&api, &uris, follow).await {
+        Ok(written) => written,
+        Err(_) => {
+            return Event::FollowFailed {
+                uris,
+                message: follow_message(follow).to_owned(),
+            }
+            .into();
+        }
+    };
+    let unknown: Vec<String> = written
+        .iter()
+        .filter(|(_, state)| state.is_none())
+        .map(|(uri, _)| uri.clone())
+        .collect();
+    let checked: HashMap<String, bool> = if unknown.is_empty() {
+        HashMap::new()
+    } else {
+        social::is_following(&api, &unknown)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    };
+    let states = settle(written, &checked, follow);
+    let refused = states.iter().any(|(_, state)| *state != follow);
+    Event::Followed {
+        states,
+        message: refused.then(|| follow_message(follow).to_owned()),
+    }
+    .into()
+}
+
+pub fn settle(
+    written: Vec<(String, Option<bool>)>,
+    checked: &HashMap<String, bool>,
+    follow: bool,
+) -> Vec<(String, bool)> {
+    written
+        .into_iter()
+        .map(|(uri, state)| {
+            let state = state
+                .or_else(|| checked.get(&uri).copied())
+                .unwrap_or(follow);
+            (uri, state)
+        })
+        .collect()
+}
+
+async fn follow_lookup(api: Api, uris: Vec<String>) -> crate::worker::Event {
+    let mut states = Vec::new();
+    for batch in uris.chunks(LOOKUP_BATCH) {
+        if let Ok(found) = social::is_following(&api, batch).await {
+            states.extend(found);
+        }
+    }
+    Event::FollowState(states).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settles_follow_results() {
+        let written = vec![
+            ("spotify:user:a".to_owned(), Some(true)),
+            ("spotify:user:b".to_owned(), Some(false)),
+            ("spotify:user:c".to_owned(), None),
+            ("spotify:user:d".to_owned(), None),
+        ];
+        let checked = HashMap::from([("spotify:user:c".to_owned(), false)]);
+        assert_eq!(
+            settle(written, &checked, true),
+            vec![
+                ("spotify:user:a".to_owned(), true),
+                ("spotify:user:b".to_owned(), false),
+                ("spotify:user:c".to_owned(), false),
+                ("spotify:user:d".to_owned(), true),
+            ]
+        );
+    }
 }

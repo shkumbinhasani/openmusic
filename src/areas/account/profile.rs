@@ -1,7 +1,10 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use gpui::Context;
-use spotify_client::social::{ProfileRef, RefKind};
+use spotify_client::social::{ProfileRef, RefKind, username};
 
 use super::{
     state::ProfileListKind,
@@ -9,7 +12,10 @@ use super::{
 };
 use crate::{
     app::{OpenMusic, Page},
-    ui::components::Sentinel,
+    ui::{
+        components::Sentinel,
+        menu::{Group, MenuItem, Target},
+    },
 };
 
 pub const OWN_ONLY: &str = "Only you can see your top artists and tracks, on your own profile.";
@@ -55,6 +61,14 @@ pub struct Profiles {
     pub list: Option<ProfileList>,
     pub filter: FollowFilter,
     pub sentinel: Sentinel,
+    pub following: HashMap<String, bool>,
+    pub pending: HashMap<String, PendingFollow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingFollow {
+    pub before: Option<bool>,
+    pub counted: bool,
 }
 
 impl Profiles {
@@ -83,9 +97,145 @@ impl Profiles {
             .as_ref()
             .filter(|list| list.uri == uri && list.kind == kind)
     }
+
+    pub fn known_following(&self, uri: &str) -> Option<bool> {
+        self.following.get(uri).copied().or_else(|| {
+            self.loaded(uri)
+                .filter(|view| !view.profile.is_current_user)
+                .map(|view| view.profile.is_following)
+        })
+    }
+
+    pub fn unknown_users<'a>(
+        &self,
+        people: impl IntoIterator<Item = &'a ProfileRef>,
+    ) -> Vec<String> {
+        let mut seen = HashSet::new();
+        people
+            .into_iter()
+            .filter(|person| person.kind() == RefKind::User)
+            .filter(|person| !self.following.contains_key(&person.uri))
+            .filter(|person| !self.pending.contains_key(&person.uri))
+            .filter(|person| seen.insert(person.uri.clone()))
+            .map(|person| person.uri.clone())
+            .collect()
+    }
+
+    fn adjust(&mut self, uri: &str, before: Option<bool>, after: bool) -> bool {
+        let Some((_, Ok(view))) = self.profile.as_mut() else {
+            return false;
+        };
+        let profile = &mut view.profile;
+        let viewed = profile.uri == uri;
+        let before = before.or_else(|| viewed.then_some(profile.is_following));
+        if before.is_none_or(|before| before == after) {
+            return false;
+        }
+        let step = |count: &mut u64| {
+            *count = if after {
+                count.saturating_add(1)
+            } else {
+                count.saturating_sub(1)
+            }
+        };
+        if viewed && !profile.is_current_user {
+            step(&mut profile.followers);
+        }
+        if profile.is_current_user && !viewed {
+            step(&mut profile.following);
+        }
+        true
+    }
+
+    pub fn begin_follow(
+        &mut self,
+        uris: &[String],
+        follow: bool,
+        own: Option<&str>,
+    ) -> Vec<String> {
+        let mut sent = Vec::new();
+        for uri in uris {
+            if self.pending.contains_key(uri)
+                || username(uri).is_none()
+                || own == Some(uri.as_str())
+                || sent.contains(uri)
+            {
+                continue;
+            }
+            let before = self.known_following(uri);
+            if before == Some(follow) {
+                continue;
+            }
+            self.following.insert(uri.clone(), follow);
+            let counted = self.adjust(uri, before, follow);
+            self.pending
+                .insert(uri.clone(), PendingFollow { before, counted });
+            sent.push(uri.clone());
+        }
+        sent
+    }
+
+    pub fn finish_follow(&mut self, states: Vec<(String, bool)>) {
+        for (uri, state) in states {
+            let pending = self.pending.remove(&uri);
+            let shown = self.following.insert(uri.clone(), state);
+            if pending.is_some_and(|pending| pending.counted) && shown != Some(state) {
+                self.adjust(&uri, shown, state);
+            }
+        }
+    }
+
+    pub fn fail_follow(&mut self, uris: &[String]) {
+        for uri in uris {
+            let Some(pending) = self.pending.remove(uri) else {
+                continue;
+            };
+            let shown = match pending.before {
+                Some(before) => self.following.insert(uri.clone(), before),
+                None => self.following.remove(uri),
+            };
+            if let Some(shown) = shown.filter(|_| pending.counted) {
+                self.adjust(uri, Some(shown), !shown);
+            }
+        }
+    }
+
+    pub fn learn_following(&mut self, states: Vec<(String, bool)>) {
+        for (uri, state) in states {
+            if !self.pending.contains_key(&uri) {
+                self.following.insert(uri, state);
+            }
+        }
+    }
 }
 
 impl OpenMusic {
+    pub fn is_own_profile(&self, uri: &str) -> bool {
+        self.account().is_some_and(|account| account.uri == uri)
+            || self
+                .account
+                .profiles
+                .loaded(uri)
+                .is_some_and(|view| view.profile.is_current_user)
+    }
+
+    pub fn set_following(&mut self, uris: Vec<String>, follow: bool) {
+        let own = self.account().map(|account| account.uri.clone());
+        let sent = self
+            .account
+            .profiles
+            .begin_follow(&uris, follow, own.as_deref());
+        if !sent.is_empty() {
+            self.send(Command::Follow { uris: sent, follow });
+        }
+    }
+
+    fn look_up_following(&mut self, uris: Vec<String>) {
+        if !uris.is_empty() {
+            self.send(Command::FollowLookup(uris));
+        }
+    }
+
     pub fn load_profile(&mut self, uri: &str) {
         let profiles = &mut self.account.profiles;
         if profiles.loaded(uri).is_none() {
@@ -141,7 +291,15 @@ pub fn on_profile(app: &mut OpenMusic, uri: String, result: Result<Box<ProfileVi
     if result.is_err() && profiles.loaded(&uri).is_some() {
         return;
     }
+    let mut unknown = Vec::new();
+    if let Ok(view) = &result {
+        if !view.profile.is_current_user {
+            profiles.learn_following(vec![(uri.clone(), view.profile.is_following)]);
+        }
+        unknown = profiles.unknown_users(view.followers.iter().chain(&view.following));
+    }
     profiles.profile = Some((uri, result.map(|view| *view)));
+    app.look_up_following(unknown);
 }
 
 pub fn on_list(
@@ -160,6 +318,79 @@ pub fn on_list(
     {
         merge(list, offset, result);
     }
+    let profiles = &app.account.profiles;
+    let unknown = match profiles.list_for(&uri, kind) {
+        Some(ProfileList {
+            result: Some(Ok(Listing::People(people))),
+            ..
+        }) => profiles.unknown_users(people),
+        _ => Vec::new(),
+    };
+    app.look_up_following(unknown);
+}
+
+pub fn on_followed(app: &mut OpenMusic, states: Vec<(String, bool)>, message: Option<String>) {
+    app.account.profiles.finish_follow(states);
+    if let Some(message) = message {
+        app.show_toast(message, None);
+    }
+}
+
+pub fn on_follow_failed(app: &mut OpenMusic, uris: Vec<String>, message: String) {
+    app.account.profiles.fail_follow(&uris);
+    app.show_toast(message, None);
+}
+
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    let Target::User { uri } = target else {
+        return Vec::new();
+    };
+    if app.is_own_profile(uri) || username(uri).is_none() {
+        return Vec::new();
+    }
+    let profiles = &app.account.profiles;
+    let Some(following) = profiles.known_following(uri) else {
+        return Vec::new();
+    };
+    let closed = profiles
+        .loaded(uri)
+        .is_some_and(|view| !view.profile.allow_follows);
+    if closed && !following {
+        return Vec::new();
+    }
+    let pending = profiles.pending.contains_key(uri);
+    let uri = uri.clone();
+    let item = if following {
+        MenuItem::action("Unfollow", move |app, _, _| {
+            app.set_following(vec![uri.clone()], false)
+        })
+        .symbol("person.badge.minus")
+    } else {
+        MenuItem::action("Follow", move |app, _, _| {
+            app.set_following(vec![uri.clone()], true)
+        })
+        .symbol("person.badge.plus")
+    };
+    vec![(Group::Library, item.enabled(!pending))]
+}
+
+pub fn describe_following(profiles: &Profiles, uris: &[String]) -> String {
+    uris.iter()
+        .map(|uri| {
+            let state = match profiles.known_following(uri) {
+                Some(true) => "following",
+                Some(false) => "not-following",
+                None => "unknown",
+            };
+            let pending = if profiles.pending.contains_key(uri) {
+                " pending"
+            } else {
+                ""
+            };
+            format!("{uri} {state}{pending}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn merge(list: &mut ProfileList, offset: usize, result: Result<Listing, String>) {
@@ -317,6 +548,24 @@ pub fn debug(app: &mut OpenMusic, verb: &str, rest: &str, directory: &Path) -> b
                 .map_or("none".to_owned(), describe_list);
             let _ = std::fs::write(directory.join("profiles.txt"), text);
         }
+        "follow-user" => {
+            let (uri, state) = rest.split_once(' ').unwrap_or((rest, "on"));
+            if !uri.is_empty() {
+                app.set_following(vec![uri.to_owned()], state.trim() != "off");
+            }
+            let text = describe_following(&app.account.profiles, &[uri.to_owned()]);
+            let _ = std::fs::write(directory.join("follow.txt"), text);
+        }
+        "follows" => {
+            let uris: Vec<String> = rest.split_whitespace().map(str::to_owned).collect();
+            let text = describe_following(&app.account.profiles, &uris);
+            let _ = std::fs::write(directory.join("follows.txt"), text);
+            let ready: Vec<String> = uris
+                .into_iter()
+                .filter(|uri| !app.account.profiles.pending.contains_key(uri))
+                .collect();
+            app.look_up_following(ready);
+        }
         _ => return false,
     }
     true
@@ -342,6 +591,131 @@ mod tests {
             name: format!("Mix {id}"),
             ..PlaylistRef::default()
         }
+    }
+
+    fn viewing(uri: &str, current: bool, following: bool, followers: u64) -> Profiles {
+        let view = ProfileView {
+            profile: Profile {
+                uri: uri.into(),
+                name: "Name".into(),
+                is_current_user: current,
+                is_following: following,
+                allow_follows: true,
+                followers,
+                following: 20,
+                ..Profile::default()
+            },
+            top: None,
+            followers: Vec::new(),
+            following: Vec::new(),
+        };
+        Profiles {
+            profile: Some((uri.into(), Ok(view))),
+            ..Profiles::default()
+        }
+    }
+
+    fn counts(profiles: &Profiles) -> (u64, u64) {
+        let Some((_, Ok(view))) = &profiles.profile else {
+            panic!("no profile");
+        };
+        (view.profile.followers, view.profile.following)
+    }
+
+    #[test]
+    fn follows_a_profile_and_keeps_the_count() {
+        let friend = "spotify:user:friend".to_owned();
+        let mut profiles = viewing(&friend, false, false, 2);
+        assert_eq!(profiles.known_following(&friend), Some(false));
+        let sent = profiles.begin_follow(&[friend.clone(), friend.clone()], true, None);
+        assert_eq!(sent, vec![friend.clone()]);
+        assert_eq!(profiles.known_following(&friend), Some(true));
+        assert_eq!(counts(&profiles), (3, 20));
+        assert!(
+            profiles
+                .begin_follow(std::slice::from_ref(&friend), false, None)
+                .is_empty()
+        );
+        profiles.finish_follow(vec![(friend.clone(), true)]);
+        assert!(profiles.pending.is_empty());
+        assert_eq!(counts(&profiles), (3, 20));
+        assert!(
+            profiles
+                .begin_follow(std::slice::from_ref(&friend), true, None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rolls_back_a_failed_follow() {
+        let friend = "spotify:user:friend".to_owned();
+        let mut profiles = viewing(&friend, false, true, 5);
+        profiles.begin_follow(std::slice::from_ref(&friend), false, None);
+        assert_eq!(counts(&profiles), (4, 20));
+        profiles.fail_follow(std::slice::from_ref(&friend));
+        assert_eq!(profiles.known_following(&friend), Some(true));
+        assert_eq!(counts(&profiles), (5, 20));
+        assert!(profiles.pending.is_empty());
+
+        profiles.begin_follow(std::slice::from_ref(&friend), false, None);
+        profiles.finish_follow(vec![(friend.clone(), true)]);
+        assert_eq!(profiles.known_following(&friend), Some(true));
+        assert_eq!(counts(&profiles), (5, 20));
+    }
+
+    #[test]
+    fn counts_who_you_follow_on_your_own_profile() {
+        let own = "spotify:user:someone".to_owned();
+        let friend = "spotify:user:friend".to_owned();
+        let stranger = "spotify:user:stranger".to_owned();
+        let mut profiles = viewing(&own, true, false, 1);
+        assert_eq!(profiles.known_following(&own), None);
+        assert!(
+            profiles
+                .begin_follow(std::slice::from_ref(&own), true, Some(&own))
+                .is_empty()
+        );
+        profiles.learn_following(vec![(friend.clone(), true)]);
+        profiles.begin_follow(std::slice::from_ref(&friend), false, Some(&own));
+        assert_eq!(counts(&profiles), (1, 19));
+        profiles.begin_follow(std::slice::from_ref(&stranger), true, Some(&own));
+        assert_eq!(counts(&profiles), (1, 19));
+        assert_eq!(profiles.known_following(&stranger), Some(true));
+        profiles.fail_follow(std::slice::from_ref(&stranger));
+        assert_eq!(profiles.known_following(&stranger), None);
+        assert_eq!(counts(&profiles), (1, 19));
+        profiles.fail_follow(std::slice::from_ref(&friend));
+        assert_eq!(profiles.known_following(&friend), Some(true));
+        assert_eq!(counts(&profiles), (1, 20));
+        assert!(
+            profiles
+                .begin_follow(&["spotify:artist:x".to_owned()], true, Some(&own))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn learns_follow_states_without_touching_pending_ones() {
+        let friend = "spotify:user:friend".to_owned();
+        let other = "spotify:user:other".to_owned();
+        let mut profiles = Profiles::default();
+        profiles.begin_follow(std::slice::from_ref(&friend), true, None);
+        profiles.learn_following(vec![(friend.clone(), false), (other.clone(), false)]);
+        assert_eq!(profiles.known_following(&friend), Some(true));
+        assert_eq!(profiles.known_following(&other), Some(false));
+        let people = vec![
+            person("spotify:user:friend"),
+            person("spotify:user:other"),
+            person("spotify:user:new"),
+            person("spotify:user:new"),
+            person("spotify:artist:0000000000000000000001"),
+        ];
+        assert_eq!(profiles.unknown_users(&people), vec!["spotify:user:new"]);
+        let text = describe_following(&profiles, &[friend, other, "spotify:user:new".into()]);
+        assert_eq!(
+            text,
+            "spotify:user:friend following pending\nspotify:user:other not-following\nspotify:user:new unknown"
+        );
     }
 
     #[test]

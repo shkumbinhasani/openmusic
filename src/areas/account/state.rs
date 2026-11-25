@@ -7,7 +7,7 @@ use spotify_client::account::{AccountInfo, Explicit};
 
 use super::{
     profile::{self, Profiles},
-    profile_view::MORE_PROFILE,
+    profile_view::{FOLLOW_PROFILE, MORE_PROFILE},
     worker::{Command, Event},
 };
 use crate::{
@@ -480,6 +480,9 @@ pub fn on_event(
             offset,
             result,
         } => profile::on_list(app, uri, kind, offset, result),
+        Event::Followed { states, message } => profile::on_followed(app, states, message),
+        Event::FollowFailed { uris, message } => profile::on_follow_failed(app, uris, message),
+        Event::FollowState(states) => app.account.profiles.learn_following(states),
         Event::Cache { bytes, cleared } => {
             app.account.cache = Some(bytes);
             if cleared {
@@ -545,7 +548,9 @@ pub fn debug(
             let _ = std::fs::write(directory.join("account.txt"), text);
         }
         "account-menu" => app.open_account_menu(),
-        "profile" | "profiles" => return profile::debug(app, verb, rest, directory),
+        "profile" | "profiles" | "follow-user" | "follows" => {
+            return profile::debug(app, verb, rest, directory);
+        }
         "cache" => {
             match rest {
                 "refresh" => app.refresh_cache_size(),
@@ -607,8 +612,9 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         .as_ref()
         .map_or("none", |(uri, _)| uri.as_str());
     format!(
-        "plan={plan} user={user} explicit={explicit} language={} profile={profile}",
-        app.language()
+        "plan={plan} user={user} explicit={explicit} language={} profile={profile} follows_pending={}",
+        app.language(),
+        app.account.profiles.pending.len()
     )
 }
 
@@ -636,6 +642,13 @@ pub fn on_press(
         PREMIUM_KEY => cx.open_url(PREMIUM_URL),
         LANGUAGE_KEY => app.open_language_menu(),
         CLEAR_CACHE_KEY => app.confirm_clear_cache(window, cx),
+        FOLLOW_PROFILE => {
+            if let Page::Profile(uri) = &app.page {
+                let uri = uri.clone();
+                let following = app.account.profiles.known_following(&uri).unwrap_or(false);
+                app.set_following(vec![uri], !following);
+            }
+        }
         MORE_PROFILE => {
             if let Page::Profile(uri) = &app.page {
                 let target = Target::User { uri: uri.clone() };
