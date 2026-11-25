@@ -4,13 +4,16 @@ pub fn directory() -> Option<PathBuf> {
     std::env::var_os("OPENMUSIC_DEBUG_DIR").map(PathBuf::from)
 }
 
-#[cfg(unix)]
 pub fn write_token(token: &str) {
+    if let Some(directory) = directory() {
+        write_private(&directory.join("token"), token);
+    }
+}
+
+#[cfg(unix)]
+pub fn write_private(path: &std::path::Path, contents: &str) {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
 
-    let Some(path) = directory().map(|directory| directory.join("token")) else {
-        return;
-    };
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -18,12 +21,14 @@ pub fn write_token(token: &str) {
         .mode(0o600)
         .open(path);
     if let Ok(mut file) = file {
-        let _ = file.write_all(token.as_bytes());
+        let _ = file.write_all(contents.as_bytes());
     }
 }
 
 #[cfg(not(unix))]
-pub fn write_token(_: &str) {}
+pub fn write_private(path: &std::path::Path, contents: &str) {
+    let _ = std::fs::write(path, contents);
+}
 
 #[cfg(target_os = "macos")]
 pub fn capture(path: PathBuf, done: impl FnOnce(Result<(), String>) + Send + 'static) {
