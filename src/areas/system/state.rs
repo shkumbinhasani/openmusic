@@ -11,6 +11,7 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use super::{
     menu_bar::{self, MenuState},
+    native_window,
     now_playing::{self, Snapshot},
     shortcuts,
     worker::Event,
@@ -18,9 +19,10 @@ use super::{
 use crate::{
     app::{OpenMusic, Page, Session, intent::Intent},
     menus::{
-        About, BringAllToFront, GoBack, GoForward, GoHome, Handle, HideApp, HideOthers, Minimize,
-        Next, PlayPause, Previous, SeekBackward, SeekForward, ShowAll, ShowShortcuts,
-        ToggleFullScreen, TogglePlayback, VolumeDown, VolumeUp, Zoom, route,
+        About, BringAllToFront, CloseWindow, GoBack, GoForward, GoHome, Handle, HideApp,
+        HideOthers, Minimize, Next, PlayPause, Previous, SeekBackward, SeekForward, ShowAll,
+        ShowMainWindow, ShowShortcuts, ToggleFullScreen, TogglePlayback, VolumeDown, VolumeUp,
+        Zoom, route,
     },
     ui::tracks::{RowDrag, RowDrop},
 };
@@ -74,19 +76,41 @@ impl State {
 }
 
 pub fn install(cx: &mut App) {
-    cx.on_window_closed(|cx| {
-        if cx.windows().is_empty() {
-            cx.quit();
-        }
-    })
-    .detach();
+    if cfg!(not(target_os = "macos")) {
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+    }
 }
 
-pub fn window_opened(_window: &mut Window, _cx: &mut App) {}
+pub fn window_opened(window: &mut Window, cx: &mut App) {
+    if native_window::install(window) {
+        window.on_window_should_close(cx, |_, _| {
+            native_window::hide();
+            false
+        });
+    }
+}
 
 impl OpenMusic {
-    pub fn show_main_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
-        window.activate_window();
+    pub fn show_main_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if native_window::state().installed {
+            native_window::show();
+        } else {
+            window.activate_window();
+        }
+        cx.activate(true);
+    }
+
+    pub fn close_main_window(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if native_window::state().installed {
+            native_window::hide();
+        } else {
+            window.remove_window();
+        }
     }
 
     pub fn toggle_mini_player(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
@@ -285,6 +309,16 @@ pub fn debug(
             }
             write(directory, "menubar.txt", lines.join("\n"));
         }
+        "window" => {
+            match rest {
+                "hide" => app.close_main_window(window, cx),
+                "close" => native_window::close(),
+                "show" => app.act(Intent::ShowMainWindow, window, cx),
+                "state" | "" => {}
+                _ => return false,
+            }
+            write(directory, "window.txt", native_window::state().describe());
+        }
         "shortcuts" => {
             match rest {
                 "" => app.toggle_shortcuts(window, cx),
@@ -309,12 +343,25 @@ pub fn debug(
     true
 }
 
+fn window_label(state: native_window::WindowState) -> &'static str {
+    if !state.installed {
+        "unknown"
+    } else if state.miniaturized {
+        "minimized"
+    } else if state.visible {
+        "shown"
+    } else {
+        "hidden"
+    }
+}
+
 pub fn state_fragment(app: &OpenMusic) -> String {
     format!(
-        "published={} liked={} shortcuts={}",
+        "published={} liked={} shortcuts={} window={}",
         app.system.publishes,
         app.liked_label(),
-        app.system.shortcuts
+        app.system.shortcuts,
+        window_label(native_window::state()),
     )
 }
 
@@ -362,6 +409,12 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         window.minimize_window()
     });
     route(cx, handle, |_: &Zoom, _, window, _| window.zoom_window());
+    route(cx, handle, |_: &CloseWindow, app, window, cx| {
+        app.close_main_window(window, cx)
+    });
+    route(cx, handle, |_: &ShowMainWindow, app, window, cx| {
+        app.act(Intent::ShowMainWindow, window, cx)
+    });
     cx.on_action(|_: &About, _| menu_bar::about());
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -370,12 +423,16 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
 }
 
 pub fn on_press(
-    _app: &mut OpenMusic,
-    _key: &'static str,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    app: &mut OpenMusic,
+    key: &'static str,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    match key {
+        native_window::REOPEN => app.act(Intent::ShowMainWindow, window, cx),
+        _ => return false,
+    }
+    true
 }
 
 pub fn row_dropped(

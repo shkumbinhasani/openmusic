@@ -1,4 +1,5 @@
 pub mod menu_bar;
+pub mod native_window;
 pub mod now_playing;
 pub mod shortcuts;
 pub mod state;
