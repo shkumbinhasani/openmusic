@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::{
     api::Api,
     catalog,
+    collection::{self, Write},
     dealer::Message,
     pathfinder::{self, Operation},
 };
@@ -187,6 +188,77 @@ pub fn save_request(uris: &[String], saved: bool) -> (Operation, Value) {
     }
 }
 
+pub fn collection_set(uri: &str) -> Option<&'static str> {
+    if !savable(uri) {
+        return None;
+    }
+    Some(match uri.split(':').nth(1)? {
+        "track" | "album" => "collection",
+        "artist" => collection::ARTIST,
+        "show" => "show",
+        "episode" => collection::LISTEN_LATER,
+        "author" => "author",
+        _ => return None,
+    })
+}
+
+pub fn by_set(uris: &[String]) -> Vec<(&'static str, Vec<usize>)> {
+    let mut sets: Vec<(&'static str, Vec<usize>)> = Vec::new();
+    for (index, uri) in uris.iter().enumerate() {
+        let Some(set) = collection_set(uri) else {
+            continue;
+        };
+        match sets.iter_mut().find(|(known, _)| *known == set) {
+            Some((_, indices)) => indices.push(index),
+            None => sets.push((set, vec![index])),
+        }
+    }
+    sets
+}
+
+pub async fn contains_in_sets(api: &Api, user: &str, uris: &[String]) -> Result<Vec<Option<bool>>> {
+    let mut found = vec![None; uris.len()];
+    for (set, indices) in by_set(uris) {
+        for chunk in indices.chunks(BATCH) {
+            let items: Vec<(String, Option<String>)> = chunk
+                .iter()
+                .map(|&index| (uris[index].clone(), None))
+                .collect();
+            let answers = collection::contains(api, user, set, &items).await?;
+            for (&index, saved) in chunk.iter().zip(answers) {
+                found[index] = Some(saved);
+            }
+        }
+    }
+    Ok(found)
+}
+
+pub fn set_writes(uris: &[String], saved: bool) -> Vec<(&'static str, Vec<Write>)> {
+    by_set(uris)
+        .into_iter()
+        .map(|(set, indices)| {
+            let writes = indices
+                .into_iter()
+                .map(|index| Write {
+                    uri: uris[index].clone(),
+                    context_uri: None,
+                    removed: !saved,
+                })
+                .collect();
+            (set, writes)
+        })
+        .collect()
+}
+
+pub async fn save_in_sets(api: &Api, user: &str, uris: &[String], saved: bool) -> Result<()> {
+    for (set, writes) in set_writes(uris, saved) {
+        for chunk in writes.chunks(BATCH) {
+            collection::write(api, user, set, chunk).await?;
+        }
+    }
+    Ok(())
+}
+
 pub fn collection_push(message: &Message) -> Option<Vec<(String, bool)>> {
     let set = message
         .uri
@@ -278,6 +350,52 @@ mod tests {
     use base64::Engine;
 
     use super::*;
+
+    #[test]
+    fn sorts_saved_items_into_their_collection_sets() {
+        let uris: Vec<String> = [
+            "spotify:track:70LcF31zb1H0PyJoS1Sx1r",
+            "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb",
+            "spotify:album:6400dnyeDyD2mIFHfkwHXN",
+            "spotify:playlist:37i9dQZF1E8Redacted001",
+            "spotify:episode:0123456789abcdefghijkl",
+            "spotify:show:0123456789abcdefghijkl",
+            "spotify:author:0123456789abcdefghijkl",
+        ]
+        .map(str::to_owned)
+        .into();
+        assert_eq!(
+            by_set(&uris),
+            [
+                ("collection", vec![0, 2]),
+                ("artist", vec![1]),
+                ("listenlater", vec![4]),
+                ("show", vec![5]),
+                ("author", vec![6]),
+            ]
+        );
+        let writes = set_writes(&uris[..2], false);
+        assert_eq!(
+            writes
+                .iter()
+                .map(|(set, writes)| collection::write_body("someone", set, writes))
+                .collect::<Vec<_>>(),
+            [
+                json!({"username": "someone", "set": "collection", "items": [
+                    {"uri": "spotify:track:70LcF31zb1H0PyJoS1Sx1r", "is_removed": true}
+                ]}),
+                json!({"username": "someone", "set": "artist", "items": [
+                    {"uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", "is_removed": true}
+                ]}),
+            ]
+        );
+        assert_eq!(
+            collection::write_body("someone", "collection", &set_writes(&uris[..1], true)[0].1),
+            json!({"username": "someone", "set": "collection", "items": [
+                {"uri": "spotify:track:70LcF31zb1H0PyJoS1Sx1r"}
+            ]})
+        );
+    }
 
     fn message(uri: &str, payload: Value) -> Message {
         Message {
