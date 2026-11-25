@@ -105,6 +105,10 @@ pub struct ReportPrepared {
     pub gain_db: Option<f32>,
 }
 
+fn reported_speed(speed: f32) -> f64 {
+    (f64::from(speed) * 100.).round() / 100.
+}
+
 fn gain_text(gain_db: Option<f32>) -> String {
     gain_db.map_or_else(|| "none".to_owned(), |gain| format!("{gain:.2}dB"))
 }
@@ -442,7 +446,7 @@ impl Engine {
     pub(super) fn state_payload(&self, state_ref: Option<Value>, source: &str) -> Value {
         let sub_state = self.playing.as_ref().map(|playing| {
             json!({
-                "playback_speed": if playing.paused { 0. } else { playing.speed },
+                "playback_speed": if playing.paused { 0. } else { reported_speed(playing.speed) },
                 "position": playing.position_ms,
                 "duration": playing.duration_ms,
                 "media_type": "AUDIO",
@@ -967,7 +971,9 @@ impl Engine {
                 let current = self.playing.as_ref().map(|playing| playing.generation);
                 if generation == 0 || Some(generation) == current {
                     self.report("error").await;
-                    let _ = message;
+                    self.audio
+                        .updates
+                        .push(Update::Notice(format!("Playback stopped. {message}")));
                 }
             }
         }
@@ -1039,5 +1045,42 @@ impl Engine {
             self.player.pause();
             self.report("pause").await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_speeds_with_two_decimals() {
+        assert_eq!(reported_speed(1.2), 1.2);
+        assert_eq!(reported_speed(1.25), 1.25);
+        assert_eq!(reported_speed(1.), 1.);
+    }
+
+    #[test]
+    fn writes_the_audio_report() {
+        let report = AudioReport {
+            playing: Some(ReportItem {
+                generation: 3,
+                uri: "spotify:episode:x".into(),
+                source: "external".into(),
+                speed: 1.5,
+                gain_db: Some(-2.587),
+                ..ReportItem::default()
+            }),
+            local: Some("index=1/2".into()),
+            sleep: SleepState::EndOfTrack,
+            ..AudioReport::default()
+        };
+        let text = report.to_string();
+        assert!(text.contains("source=external"));
+        assert!(text.contains("gain=-2.59dB"));
+        assert!(text.contains("speed=1.5"));
+        assert!(text.contains("prepared none"));
+        assert!(text.contains("quiet=0.000"));
+        assert!(text.contains("local index=1/2"));
+        assert!(text.ends_with("sleep end_of_track\n"));
     }
 }
