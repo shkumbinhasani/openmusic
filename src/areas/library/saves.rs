@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use gpui_component::tooltip::Tooltip;
@@ -124,6 +127,22 @@ fn toggled(known: Option<bool>) -> bool {
     known != Some(true)
 }
 
+fn settle_likes(
+    writes: &mut HashMap<String, bool>,
+    pending: &HashMap<String, Option<bool>>,
+    known: &HashMap<String, bool>,
+) -> bool {
+    let mut failed = false;
+    writes.retain(|uri, saved| {
+        if pending.contains_key(uri) {
+            return true;
+        }
+        failed |= known.get(uri) != Some(saved);
+        false
+    });
+    failed
+}
+
 impl OpenMusic {
     pub fn toggle_saved(&mut self, uri: &str) {
         self.make_saved(uri, toggled(self.is_saved(uri)));
@@ -168,6 +187,12 @@ impl OpenMusic {
             if saved {
                 self.library.liked.stale = true;
             }
+            self.library.liked_writes.extend(
+                changes
+                    .iter()
+                    .filter(|uri| saves(uri) == Some(Saves::Like))
+                    .map(|uri| (uri.clone(), saved)),
+            );
         }
         if likes < changes.len() {
             self.library.resync = true;
@@ -358,6 +383,13 @@ pub fn tick(app: &mut OpenMusic) -> bool {
             changed = true;
         }
     }
+    if settle_likes(
+        &mut app.library.liked_writes,
+        &app.saved.pending,
+        &app.saved.known,
+    ) {
+        app.library.resync = true;
+    }
     if app.library.resync && app.saved.pending.is_empty() {
         app.library.resync = false;
         app.reload_library_views();
@@ -457,6 +489,34 @@ mod tests {
         assert_eq!(header_uri(&Page::Liked), None);
         assert_eq!(liked_count("64 songs"), Some(64));
         assert_eq!(liked_count(""), None);
+    }
+
+    #[test]
+    fn resyncs_only_once_a_like_write_has_failed() {
+        let like = |id: &str| format!("spotify:track:{id}");
+        let mut writes: HashMap<String, bool> = [
+            (like("kept"), true),
+            (like("lost"), true),
+            (like("gone"), false),
+            (like("late"), true),
+        ]
+        .into_iter()
+        .collect();
+        let mut pending = HashMap::from([(like("late"), None)]);
+        let mut known = HashMap::from([
+            (like("kept"), true),
+            (like("lost"), false),
+            (like("gone"), false),
+            (like("late"), true),
+        ]);
+        assert!(settle_likes(&mut writes, &pending, &known));
+        assert_eq!(writes.keys().collect::<Vec<_>>(), [&like("late")]);
+        pending.clear();
+        assert!(!settle_likes(&mut writes, &pending, &known));
+        assert!(writes.is_empty());
+        writes.insert(like("late"), true);
+        known.remove(&like("late"));
+        assert!(settle_likes(&mut writes, &pending, &known));
     }
 
     #[test]

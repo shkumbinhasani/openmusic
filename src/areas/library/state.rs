@@ -87,6 +87,7 @@ pub struct State {
     pub asked: HashMap<String, Instant>,
     pub when_known: Option<(String, bool, Instant)>,
     pub resync: bool,
+    pub liked_writes: HashMap<String, bool>,
     pub liked: Liked,
     pub grid: Grid,
     pub recent: Recents,
