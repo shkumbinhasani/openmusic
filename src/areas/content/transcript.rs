@@ -15,6 +15,7 @@ use crate::{
 };
 
 const SIDE: f32 = 48.;
+const SYNC_ROOM: f32 = 100.;
 const OVERDRAW: f32 = 800.;
 pub const SYNC_KEY: &str = "transcript-sync";
 
@@ -61,7 +62,8 @@ impl TranscriptView {
 
 fn title_block(heading: String, palette: Palette) -> gpui::Div {
     div()
-        .px(px(SIDE))
+        .pl(px(SIDE))
+        .pr(px(SYNC_ROOM))
         .pt(px(40.))
         .flex()
         .flex_col()
@@ -184,7 +186,8 @@ impl OpenMusic {
             };
             if line.heading {
                 return div()
-                    .px(px(SIDE + 12.))
+                    .pl(px(SIDE + 12.))
+                    .pr(px(SYNC_ROOM))
                     .pt(px(if index > 1 { 20. } else { 4. }))
                     .pb_1()
                     .flex()
@@ -200,7 +203,8 @@ impl OpenMusic {
             let start = line.start_ms;
             let entity = entity.clone();
             div()
-                .px(px(SIDE - 12.))
+                .pl(px(SIDE - 12.))
+                .pr(px(SYNC_ROOM))
                 .child(
                     div()
                         .id(("transcript-line", index))
