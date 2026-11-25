@@ -448,7 +448,7 @@ mod tests {
 
     use super::*;
 
-    const SHOW: &str = "spotify:show:5CfCWKI5pZ28U0uOzXkDHe";
+    const SHOW: &str = "spotify:show:0000000000000000000005";
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
