@@ -605,16 +605,18 @@ pub fn merge(list: &mut ProfileList, offset: usize, result: Result<Listing, Stri
     let Some(Ok(Listing::Playlists { items, total })) = list.result.as_mut() else {
         return;
     };
-    match result {
-        Ok(Listing::Playlists {
-            items: more,
-            total: reported,
-        }) if !more.is_empty() => {
-            let known: HashSet<String> = items.iter().map(|item| item.uri.clone()).collect();
-            items.extend(more.into_iter().filter(|item| !known.contains(&item.uri)));
-            *total = reported.max(items.len() as u64);
-        }
-        _ => *total = items.len() as u64,
+    let before = items.len();
+    if let Ok(Listing::Playlists {
+        items: more,
+        total: reported,
+    }) = result
+    {
+        let known: HashSet<String> = items.iter().map(|item| item.uri.clone()).collect();
+        items.extend(more.into_iter().filter(|item| !known.contains(&item.uri)));
+        *total = reported;
+    }
+    if items.len() == before || *total < items.len() as u64 {
+        *total = items.len() as u64;
     }
 }
 
@@ -1125,6 +1127,33 @@ mod tests {
             }),
         );
         assert_eq!(playlists(&list).1, 3);
+    }
+
+    #[test]
+    fn stops_paging_when_a_page_adds_nothing_new() {
+        let mut list = ProfileList {
+            uri: "spotify:user:someone".into(),
+            kind: ProfileListKind::Playlists,
+            result: None,
+            loading_more: false,
+        };
+        merge(
+            &mut list,
+            0,
+            Ok(Listing::Playlists {
+                items: vec![playlist(1), playlist(2)],
+                total: 4,
+            }),
+        );
+        merge(
+            &mut list,
+            2,
+            Ok(Listing::Playlists {
+                items: vec![playlist(1), playlist(2)],
+                total: 4,
+            }),
+        );
+        assert_eq!(playlists(&list), (vec!["Mix 1".into(), "Mix 2".into()], 2));
     }
 
     #[test]
