@@ -461,6 +461,8 @@ impl OpenMusic {
             playing: self.playback.now.playing,
             shuffle: self.shuffle_mode(),
             repeat: self.repeat_mode(),
+            shuffle_allowed: self.playback_allowed().shuffle,
+            repeat_allowed: self.repeat_allowed(),
             saved: self.track().and_then(|track| self.is_saved(&track.uri)),
             episode: like == Some(Saves::Episodes),
             likable: like.is_some(),

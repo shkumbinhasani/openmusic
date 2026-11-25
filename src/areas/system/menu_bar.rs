@@ -43,6 +43,8 @@ pub struct MenuState {
     pub playing: bool,
     pub shuffle: Shuffle,
     pub repeat: Repeat,
+    pub shuffle_allowed: bool,
+    pub repeat_allowed: bool,
     pub saved: Option<bool>,
     pub episode: bool,
     pub likable: bool,
@@ -258,6 +260,8 @@ mod native {
         }
         mark(&playback, SHUFFLE, state.shuffle_check());
         mark(&playback, REPEAT, state.repeat_check());
+        enable(&playback, SHUFFLE, state.shuffle_allowed);
+        enable(&playback, REPEAT, state.repeat_allowed);
         retitle(&playback, &LIKE_TITLES, state.like_title());
         enable(&playback, state.like_title(), state.likable);
     }
@@ -351,6 +355,8 @@ mod tests {
             playing: false,
             shuffle: Shuffle::Off,
             repeat: Repeat::Off,
+            shuffle_allowed: true,
+            repeat_allowed: true,
             saved: None,
             episode: false,
             likable: true,
