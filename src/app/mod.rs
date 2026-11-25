@@ -375,6 +375,7 @@ impl OpenMusic {
         playback::state::tick(self, cx);
         playlists::state::tick(self, cx);
         system::state::tick(self, cx);
+        self.refresh_bar_menu();
         if !self.playback.now.playing {
             return;
         }
@@ -496,6 +497,7 @@ impl OpenMusic {
             Event::NowPlaying(now) => {
                 self.request_lyrics(&now);
                 self.set_now_playing(now);
+                self.refresh_bar_menu();
                 self.follow_lyrics();
                 if let Some(uri) = self.track().map(|track| track.uri.clone()) {
                     self.lookup_saved([uri]);
