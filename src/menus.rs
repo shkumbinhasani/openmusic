@@ -1,8 +1,9 @@
 use std::{path::Path, rc::Rc};
 
 use gpui::{
-    Action, AnyWindowHandle, App, Context, Focusable, KeyBinding, Menu, MenuItem, OsAction,
-    SystemMenuType, WeakEntity, Window, actions,
+    Action, AnyWindowHandle, App, Context, DummyKeyboardMapper, Focusable, KeyBinding,
+    KeyBindingContextPredicate, Keystroke, Menu, MenuItem, OsAction, SystemMenuType, WeakEntity,
+    Window, actions,
 };
 use gpui_component::input::{Copy, Cut, Paste, SelectAll};
 
@@ -84,50 +85,314 @@ const SLEEP_MINUTES: [(u32, &str); 7] = [
     (60, "1 Hour"),
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Category {
+    Basic,
+    Playback,
+    Navigation,
+    Window,
+}
+
+impl Category {
+    pub const ALL: [Category; 4] = [
+        Category::Basic,
+        Category::Playback,
+        Category::Navigation,
+        Category::Window,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Category::Basic => "Basic",
+            Category::Playback => "Playback",
+            Category::Navigation => "Navigation",
+            Category::Window => "Window",
+        }
+    }
+}
+
+pub struct Shortcut {
+    pub keys: &'static str,
+    pub action: fn() -> Box<dyn Action>,
+    pub context: Option<&'static str>,
+    pub category: Category,
+    pub label: &'static str,
+}
+
+fn boxed<A: Action + Default>() -> Box<dyn Action> {
+    Box::new(A::default())
+}
+
+const QUIET: Option<&str> = Some("!Input");
+
+const fn shortcut(
+    keys: &'static str,
+    action: fn() -> Box<dyn Action>,
+    context: Option<&'static str>,
+    category: Category,
+    label: &'static str,
+) -> Shortcut {
+    Shortcut {
+        keys,
+        action,
+        context,
+        category,
+        label,
+    }
+}
+
+use Category::{Basic, Navigation, Playback, Window as Windows};
+
+pub const SHORTCUTS: &[Shortcut] = &[
+    shortcut("cmd-l", boxed::<FocusSearch>, None, Basic, "Search"),
+    shortcut("cmd-f", boxed::<FocusSearch>, None, Basic, "Search"),
+    shortcut("cmd-k", boxed::<FocusSearch>, None, Basic, "Search"),
+    shortcut(
+        "cmd-/",
+        boxed::<ShowShortcuts>,
+        None,
+        Basic,
+        "Keyboard shortcuts",
+    ),
+    shortcut(
+        "shift-/",
+        boxed::<ShowShortcuts>,
+        QUIET,
+        Basic,
+        "Keyboard shortcuts",
+    ),
+    shortcut("cmd-,", boxed::<OpenSettings>, None, Basic, "Settings"),
+    shortcut("cmd-n", boxed::<NewPlaylist>, None, Basic, "New playlist"),
+    shortcut(
+        "shift-cmd-n",
+        boxed::<NewFolder>,
+        None,
+        Basic,
+        "New playlist folder",
+    ),
+    shortcut("cmd-h", boxed::<HideApp>, None, Basic, "Hide OpenMusic"),
+    shortcut("alt-cmd-h", boxed::<HideOthers>, None, Basic, "Hide others"),
+    shortcut("cmd-q", boxed::<Quit>, None, Basic, "Quit OpenMusic"),
+    shortcut(
+        "space",
+        boxed::<TogglePlayback>,
+        QUIET,
+        Playback,
+        "Play or pause",
+    ),
+    shortcut("cmd-right", boxed::<Next>, None, Playback, "Next"),
+    shortcut("cmd-left", boxed::<Previous>, None, Playback, "Previous"),
+    shortcut(
+        "shift-cmd-right",
+        boxed::<SeekForward>,
+        None,
+        Playback,
+        "Seek forward",
+    ),
+    shortcut(
+        "shift-cmd-left",
+        boxed::<SeekBackward>,
+        None,
+        Playback,
+        "Seek backward",
+    ),
+    shortcut("cmd-s", boxed::<ToggleShuffle>, None, Playback, "Shuffle"),
+    shortcut("cmd-r", boxed::<CycleRepeat>, None, Playback, "Repeat"),
+    shortcut("cmd-up", boxed::<VolumeUp>, None, Playback, "Volume up"),
+    shortcut(
+        "cmd-down",
+        boxed::<VolumeDown>,
+        None,
+        Playback,
+        "Volume down",
+    ),
+    shortcut(
+        "alt-shift-b",
+        boxed::<ToggleLike>,
+        QUIET,
+        Playback,
+        "Save to Liked Songs",
+    ),
+    shortcut(
+        "shift-cmd-j",
+        boxed::<StartJam>,
+        None,
+        Playback,
+        "Start a Jam",
+    ),
+    shortcut("alt-cmd-left", boxed::<GoBack>, None, Navigation, "Go back"),
+    shortcut("cmd-[", boxed::<GoBack>, None, Navigation, "Go back"),
+    shortcut("alt-left", boxed::<GoBack>, QUIET, Navigation, "Go back"),
+    shortcut(
+        "alt-cmd-right",
+        boxed::<GoForward>,
+        None,
+        Navigation,
+        "Go forward",
+    ),
+    shortcut("cmd-]", boxed::<GoForward>, None, Navigation, "Go forward"),
+    shortcut(
+        "alt-right",
+        boxed::<GoForward>,
+        QUIET,
+        Navigation,
+        "Go forward",
+    ),
+    shortcut("alt-shift-h", boxed::<GoHome>, QUIET, Navigation, "Home"),
+    shortcut(
+        "alt-shift-j",
+        boxed::<GoNowPlaying>,
+        QUIET,
+        Navigation,
+        "Now playing",
+    ),
+    shortcut(
+        "alt-shift-q",
+        boxed::<ShowQueue>,
+        QUIET,
+        Navigation,
+        "Queue",
+    ),
+    shortcut(
+        "alt-shift-s",
+        boxed::<GoToLikedSongs>,
+        QUIET,
+        Navigation,
+        "Liked Songs",
+    ),
+    shortcut(
+        "alt-shift-y",
+        boxed::<GoToRecents>,
+        QUIET,
+        Navigation,
+        "Recently played",
+    ),
+    shortcut(
+        "alt-shift-d",
+        boxed::<ShowDevices>,
+        QUIET,
+        Navigation,
+        "Devices",
+    ),
+    shortcut(
+        "alt-shift-u",
+        boxed::<ToggleFriendActivity>,
+        QUIET,
+        Navigation,
+        "Friend activity",
+    ),
+    shortcut(
+        "alt-cmd-1",
+        boxed::<ShowMainWindow>,
+        None,
+        Windows,
+        "Show main window",
+    ),
+    shortcut(
+        "alt-cmd-m",
+        boxed::<ToggleMiniPlayer>,
+        None,
+        Windows,
+        "Mini player",
+    ),
+    shortcut(
+        "ctrl-cmd-f",
+        boxed::<ToggleFullScreen>,
+        None,
+        Windows,
+        "Full screen",
+    ),
+    shortcut("cmd-m", boxed::<Minimize>, None, Windows, "Minimize"),
+    shortcut("cmd-w", boxed::<CloseWindow>, None, Windows, "Close window"),
+];
+
+impl Shortcut {
+    pub fn binding(&self) -> KeyBinding {
+        let predicate = self.context.map(|context| {
+            Rc::new(KeyBindingContextPredicate::parse(context).expect("valid key context"))
+        });
+        KeyBinding::load(
+            self.keys,
+            (self.action)(),
+            predicate,
+            false,
+            None,
+            &DummyKeyboardMapper,
+        )
+        .expect("valid key binding")
+    }
+}
+
 fn key_bindings() -> Vec<KeyBinding> {
-    let quiet = Some("!Input");
-    vec![
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-h", HideApp, None),
-        KeyBinding::new("alt-cmd-h", HideOthers, None),
-        KeyBinding::new("cmd-l", FocusSearch, None),
-        KeyBinding::new("cmd-f", FocusSearch, None),
-        KeyBinding::new("cmd-k", FocusSearch, None),
-        KeyBinding::new("space", TogglePlayback, quiet),
-        KeyBinding::new("cmd-right", Next, None),
-        KeyBinding::new("cmd-left", Previous, None),
-        KeyBinding::new("shift-cmd-right", SeekForward, None),
-        KeyBinding::new("shift-cmd-left", SeekBackward, None),
-        KeyBinding::new("cmd-s", ToggleShuffle, None),
-        KeyBinding::new("cmd-r", CycleRepeat, None),
-        KeyBinding::new("cmd-up", VolumeUp, None),
-        KeyBinding::new("cmd-down", VolumeDown, None),
-        KeyBinding::new("alt-shift-b", ToggleLike, quiet),
-        KeyBinding::new("shift-cmd-j", StartJam, None),
-        KeyBinding::new("alt-cmd-left", GoBack, None),
-        KeyBinding::new("cmd-[", GoBack, None),
-        KeyBinding::new("alt-left", GoBack, quiet),
-        KeyBinding::new("alt-cmd-right", GoForward, None),
-        KeyBinding::new("cmd-]", GoForward, None),
-        KeyBinding::new("alt-right", GoForward, quiet),
-        KeyBinding::new("alt-shift-h", GoHome, quiet),
-        KeyBinding::new("alt-shift-j", GoNowPlaying, quiet),
-        KeyBinding::new("alt-shift-q", ShowQueue, quiet),
-        KeyBinding::new("alt-shift-s", GoToLikedSongs, quiet),
-        KeyBinding::new("alt-shift-y", GoToRecents, quiet),
-        KeyBinding::new("alt-shift-d", ShowDevices, quiet),
-        KeyBinding::new("alt-shift-u", ToggleFriendActivity, quiet),
-        KeyBinding::new("cmd-n", NewPlaylist, None),
-        KeyBinding::new("shift-cmd-n", NewFolder, None),
-        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
-        KeyBinding::new("cmd-m", Minimize, None),
-        KeyBinding::new("alt-cmd-1", ShowMainWindow, None),
-        KeyBinding::new("alt-cmd-m", ToggleMiniPlayer, None),
-        KeyBinding::new("cmd-/", ShowShortcuts, None),
-        KeyBinding::new("shift-/", ShowShortcuts, quiet),
-    ]
+    SHORTCUTS.iter().map(Shortcut::binding).collect()
+}
+
+pub struct SheetRow {
+    pub label: &'static str,
+    pub keys: Vec<&'static str>,
+    pub action: fn() -> Box<dyn Action>,
+}
+
+pub fn sheet() -> Vec<(Category, Vec<SheetRow>)> {
+    Category::ALL
+        .into_iter()
+        .map(|category| {
+            let mut rows: Vec<SheetRow> = Vec::new();
+            for shortcut in SHORTCUTS
+                .iter()
+                .filter(|shortcut| shortcut.category == category)
+            {
+                match rows.iter_mut().find(|row| row.label == shortcut.label) {
+                    Some(row) => row.keys.push(shortcut.keys),
+                    None => rows.push(SheetRow {
+                        label: shortcut.label,
+                        keys: vec![shortcut.keys],
+                        action: shortcut.action,
+                    }),
+                }
+            }
+            (category, rows)
+        })
+        .filter(|(_, rows)| !rows.is_empty())
+        .collect()
+}
+
+pub fn glyphs(control: bool, alt: bool, shift: bool, command: bool, key: &str) -> String {
+    if shift && key == "/" && !control && !alt && !command {
+        return "?".into();
+    }
+    let mut label = String::new();
+    for (held, glyph) in [(control, '⌃'), (alt, '⌥'), (shift, '⇧'), (command, '⌘')] {
+        if held {
+            label.push(glyph);
+        }
+    }
+    match key {
+        "right" => label.push('→'),
+        "left" => label.push('←'),
+        "up" => label.push('↑'),
+        "down" => label.push('↓'),
+        "space" => label.push_str("Space"),
+        "escape" => label.push('⎋'),
+        "enter" => label.push('↩'),
+        "backspace" => label.push('⌫'),
+        "delete" => label.push('⌦'),
+        key => label.push_str(&key.to_uppercase()),
+    }
+    label
+}
+
+pub fn key_label(keys: &str) -> String {
+    match Keystroke::parse(keys) {
+        Ok(stroke) => glyphs(
+            stroke.modifiers.control,
+            stroke.modifiers.alt,
+            stroke.modifiers.shift,
+            stroke.modifiers.platform,
+            &stroke.key,
+        ),
+        Err(_) => keys.to_owned(),
+    }
 }
 
 fn menu_bar() -> Vec<Menu> {
@@ -327,4 +592,91 @@ pub fn debug(
     };
     let _ = std::fs::write(directory.join(file), result);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn every_shortcut_binds_once() {
+        let mut seen = HashSet::new();
+        for shortcut in SHORTCUTS {
+            let binding = shortcut.binding();
+            assert_eq!(binding.keystrokes().len(), 1, "{}", shortcut.keys);
+            assert!(
+                seen.insert((shortcut.keys, shortcut.context)),
+                "{} is bound twice",
+                shortcut.keys
+            );
+        }
+    }
+
+    #[test]
+    fn space_never_reaches_the_menu() {
+        let space = SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.keys == "space")
+            .unwrap();
+        assert!((space.action)().partial_eq(&TogglePlayback));
+        assert_eq!(space.context, Some("!Input"));
+        assert!(
+            !SHORTCUTS
+                .iter()
+                .any(|shortcut| (shortcut.action)().partial_eq(&PlayPause))
+        );
+    }
+
+    #[test]
+    fn menu_keys_come_first() {
+        let first = |action: &dyn Action| {
+            SHORTCUTS
+                .iter()
+                .find(|shortcut| (shortcut.action)().partial_eq(action))
+                .map(|shortcut| shortcut.keys)
+        };
+        assert_eq!(first(&FocusSearch), Some("cmd-l"));
+        assert_eq!(first(&GoBack), Some("alt-cmd-left"));
+        assert_eq!(first(&GoForward), Some("alt-cmd-right"));
+        assert_eq!(first(&ShowShortcuts), Some("cmd-/"));
+    }
+
+    #[test]
+    fn sheet_groups_keys_by_row() {
+        let sheet = sheet();
+        let categories: Vec<Category> = sheet.iter().map(|(category, _)| *category).collect();
+        assert_eq!(categories, Category::ALL);
+        let row = |label: &str| {
+            sheet
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .find(|row| row.label == label)
+                .unwrap()
+        };
+        assert_eq!(row("Search").keys, ["cmd-l", "cmd-f", "cmd-k"]);
+        assert_eq!(row("Go back").keys, ["alt-cmd-left", "cmd-[", "alt-left"]);
+        assert_eq!(row("Keyboard shortcuts").keys, ["cmd-/", "shift-/"]);
+        let total: usize = sheet
+            .iter()
+            .flat_map(|(_, rows)| rows)
+            .map(|row| row.keys.len())
+            .sum();
+        assert_eq!(total, SHORTCUTS.len());
+    }
+
+    #[test]
+    fn labels_use_mac_glyphs() {
+        assert_eq!(key_label("shift-cmd-right"), "⇧⌘→");
+        assert_eq!(key_label("cmd-left"), "⌘←");
+        assert_eq!(key_label("alt-shift-b"), "⌥⇧B");
+        assert_eq!(key_label("ctrl-cmd-f"), "⌃⌘F");
+        assert_eq!(key_label("alt-cmd-1"), "⌥⌘1");
+        assert_eq!(key_label("cmd-,"), "⌘,");
+        assert_eq!(key_label("space"), "Space");
+        assert_eq!(key_label("shift-/"), "?");
+        assert_eq!(key_label("cmd-/"), "⌘/");
+        assert_eq!(key_label("cmd-up"), "⌘↑");
+    }
 }
