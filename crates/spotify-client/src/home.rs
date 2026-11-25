@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::{
     api::Api,
     entity::{self, Card, Kind},
-    pathfinder::{self, Operation},
+    pathfinder::{self, Operation, PathfinderError},
 };
 
 pub const HOME: Operation = Operation::query(
@@ -261,8 +261,11 @@ fn merge_feed(sections: &mut Vec<Section>, mut section: Section) {
     sections.push(section);
 }
 
-pub fn parse_home(facet: &str, data: &Value) -> Home {
+pub fn parse_home(facet: &str, data: &Value) -> Result<Home> {
     let home = &data["home"];
+    if !home.is_object() {
+        bail!(PathfinderError::NoData);
+    }
     let greeting = label(&home["greeting"]);
     let chips = home["homeChips"]
         .as_array()
@@ -296,12 +299,12 @@ pub fn parse_home(facet: &str, data: &Value) -> Home {
             sections.push(section);
         }
     }
-    Home {
+    Ok(Home {
         facet: facet.to_owned(),
         greeting,
         chips,
         sections,
-    }
+    })
 }
 
 pub fn parse_home_section(uri: &str, data: &Value) -> Result<Section> {
@@ -331,7 +334,7 @@ pub fn parse_home_section(uri: &str, data: &Value) -> Result<Section> {
 
 pub async fn home(api: &Api, facet: &str, time_zone: &str) -> Result<Home> {
     let data = pathfinder::query(api, HOME, home_variables(facet, time_zone)).await?;
-    Ok(parse_home(facet, &data))
+    parse_home(facet, &data)
 }
 
 pub async fn home_section(api: &Api, uri: &str, time_zone: &str) -> Result<Section> {
@@ -537,7 +540,7 @@ mod tests {
 
     #[test]
     fn maps_greeting_and_chips() {
-        let home = parse_home("", &home_reply());
+        let home = parse_home("", &home_reply()).unwrap();
         assert_eq!(home.greeting, "Good afternoon");
         let chips: Vec<(&str, &str, usize)> = home
             .chips
@@ -559,7 +562,7 @@ mod tests {
 
     #[test]
     fn maps_home_sections_in_server_order() {
-        let home = parse_home("", &home_reply());
+        let home = parse_home("", &home_reply()).unwrap();
         let sections: Vec<(Layout, &str, usize)> = home
             .sections
             .iter()
@@ -602,7 +605,7 @@ mod tests {
 
     #[test]
     fn merges_feed_sections_with_reasons() {
-        let home = parse_home("", &home_reply());
+        let home = parse_home("", &home_reply()).unwrap();
         let feed = &home.sections[4];
         let cards: Vec<(&str, Option<&str>)> = feed
             .cards
@@ -630,7 +633,7 @@ mod tests {
                 .as_array_mut()
                 .unwrap();
         items.truncate(3);
-        let home = parse_home("", &reply);
+        let home = parse_home("", &reply).unwrap();
         assert_eq!(home.sections[0].cards.len(), 2);
         let mut reply = home_reply();
         let items =
@@ -640,8 +643,19 @@ mod tests {
         for index in 0..4 {
             items.push(album(&format!("extra{index}")));
         }
-        let home = parse_home("", &reply);
+        let home = parse_home("", &reply).unwrap();
         assert_eq!(home.sections[0].cards.len(), 9);
+    }
+
+    #[test]
+    fn refuses_a_reply_without_a_home() {
+        for reply in [json!({"home": null}), json!({})] {
+            let error = parse_home("", &reply).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<PathfinderError>(),
+                Some(&PathfinderError::NoData)
+            );
+        }
     }
 
     #[test]

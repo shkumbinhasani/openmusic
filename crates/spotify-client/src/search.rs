@@ -689,8 +689,16 @@ pub fn falls_back(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.is::<reqwest::Error>())
 }
 
+fn answered(data: &Value) -> Result<()> {
+    if !data["searchV2"].is_object() {
+        bail!(PathfinderError::NoData);
+    }
+    Ok(())
+}
+
 pub async fn search(api: &Api, query: &str) -> Result<SearchResults> {
     let data = pathfinder::query(api, SEARCH_DESKTOP, all_variables(query)).await?;
+    answered(&data)?;
     Ok(parse_results(query, &data))
 }
 
@@ -730,6 +738,7 @@ pub async fn search_kind(
 ) -> Result<SearchPage> {
     let variables = kind_variables(query, kind, offset, limit);
     let data = pathfinder::query(api, kind.operation(), variables).await?;
+    answered(&data)?;
     Ok(parse_page(kind, &data, offset))
 }
 
@@ -1259,6 +1268,14 @@ mod tests {
                 .unwrap_err();
         assert!(!falls_back(&busy));
         assert!(!falls_back(&anyhow::anyhow!("something else")));
+        let failed = pathfinder::interpret(
+            SEARCH_DESKTOP,
+            reqwest::StatusCode::OK,
+            br#"{"data":{"searchV2":null},"errors":[{"message":"boom"}]}"#,
+        )
+        .unwrap();
+        assert!(falls_back(&answered(&failed).unwrap_err()));
+        assert!(answered(&json!({"searchV2": {}})).is_ok());
     }
 
     #[tokio::test]

@@ -357,6 +357,7 @@ async fn load_home(api: Api, facet: String) -> crate::worker::Event {
         .map_err(|error| page_error(error, "Couldn’t load Home. Try again."));
     if facet.is_empty()
         && let Ok(home) = &result
+        && !home.sections.is_empty()
     {
         let home = home.clone();
         update_cache(move |discovery| discovery.home = Some(home));
