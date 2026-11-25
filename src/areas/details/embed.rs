@@ -367,7 +367,6 @@ fn field(input: &Entity<InputState>, width: f32, palette: Palette) -> Div {
         .flex_shrink_0()
         .flex()
         .items_center()
-        .px_2()
         .rounded_full()
         .bg(rgba(palette.press))
         .text_size(px(13.))
