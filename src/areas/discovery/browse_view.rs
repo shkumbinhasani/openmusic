@@ -424,10 +424,7 @@ impl OpenMusic {
                 &section.cards,
                 "section-card",
                 card_side,
-                &CardOptions::from(origin_for(&Page::Section {
-                    uri: uri.to_owned(),
-                    source,
-                })),
+                &CardOptions::from(origin_for(&self.page)),
                 palette,
                 cx,
             )
