@@ -343,6 +343,24 @@ impl OpenMusic {
         }
     }
 
+    pub fn resume_social(&mut self, cx: &mut Context<Self>) {
+        self.account.friends.loading = false;
+        self.account.profiles.block_pending.clear();
+        let privacy = &mut self.account.privacy;
+        privacy.loading = false;
+        let stale = privacy.value.is_some() || !privacy.pending.is_empty();
+        privacy.pending.clear();
+        if stale {
+            self.refresh_privacy();
+        }
+        if let Some(editor) = self.account.name_editor.clone() {
+            editor.update(cx, |editor, cx| {
+                editor.saving = false;
+                cx.notify();
+            });
+        }
+    }
+
     pub fn refresh_cache_size(&mut self) {
         if !self.account.cache_busy {
             self.send(Command::CacheSize);
@@ -521,9 +539,10 @@ pub fn on_event(
     }
 }
 
-pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<OpenMusic>) {
+pub fn connected(app: &mut OpenMusic, _window: &mut Window, cx: &mut Context<OpenMusic>) {
     app.send(Command::Language(app.settings.account.language.clone()));
     app.refresh_account();
+    app.resume_social(cx);
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
