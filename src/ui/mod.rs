@@ -303,7 +303,7 @@ impl OpenMusic {
             ((content_width.min(px(1060.)) - px(80.) - px(48.)) / 4.).clamp(px(110.), px(200.));
         Layout {
             roomy,
-            dock_roomy: width - panel_width >= px(ROOMY_WIDTH),
+            dock_roomy: self.dock_roomy(content_width, palette, cx),
             card_side,
             panel,
         }

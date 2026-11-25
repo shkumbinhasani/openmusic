@@ -1,4 +1,4 @@
-use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px, rgb, rgba};
+use gpui::{AnyElement, Context, FontWeight, Pixels, div, prelude::*, px, rgb, rgba};
 
 use super::{DOCK_HEIGHT, Palette, WINDOW_INSET};
 use crate::{
@@ -8,6 +8,8 @@ use crate::{
 };
 
 pub const BAR_WEIGHT: u32 = 500;
+const DOCK_GAP: f32 = 10.;
+const BAR_ROOM: f32 = 280.;
 
 pub struct DockItem {
     pub key: &'static str,
@@ -54,6 +56,15 @@ impl OpenMusic {
             .collect();
         items.sort_by_key(|item| item.weight);
         items
+    }
+
+    pub fn dock_roomy(&self, dock_width: Pixels, palette: Palette, cx: &mut Context<Self>) -> bool {
+        let widths: Vec<f32> = self
+            .dock_items(true, palette, cx)
+            .iter()
+            .map(|item| item.width)
+            .collect();
+        bar_room(f32::from(dock_width), &widths) >= BAR_ROOM
     }
 
     fn now_playing_bar(&self, palette: Palette) -> impl IntoElement {
@@ -135,9 +146,39 @@ impl OpenMusic {
             .h(px(DOCK_HEIGHT))
             .flex()
             .items_center()
-            .gap_2p5()
+            .gap(px(DOCK_GAP))
             .children(leading.into_iter().map(slot))
             .child(self.now_playing_bar(palette))
             .children(trailing.into_iter().map(slot))
+    }
+}
+
+fn bar_room(dock_width: f32, item_widths: &[f32]) -> f32 {
+    dock_width
+        - item_widths
+            .iter()
+            .map(|width| width + DOCK_GAP)
+            .sum::<f32>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALWAYS: [f32; 7] = [36., 48., 60., 48., 36., 48., 48.];
+    const WIDE_ONLY: [f32; 3] = [48., 48., 168.];
+
+    fn roomy_at(window: f32) -> bool {
+        let widths: Vec<f32> = ALWAYS.iter().chain(&WIDE_ONLY).copied().collect();
+        bar_room(window - 248., &widths) >= BAR_ROOM
+    }
+
+    #[test]
+    fn keeps_the_seek_bar_wide_before_adding_queue_devices_and_volume() {
+        assert!(!roomy_at(800.));
+        assert!(!roomy_at(1120.));
+        assert!(roomy_at(1280.));
+        assert!(roomy_at(1600.));
+        assert!(bar_room(1120. - 248., &ALWAYS) > 400.);
     }
 }
