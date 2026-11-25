@@ -34,6 +34,7 @@ use crate::{
 
 pub const JAM_POLL: Duration = Duration::from_secs(30);
 const JAM_PENDING: Duration = Duration::from_secs(15);
+const JAM_SETTLE: Duration = Duration::from_secs(5);
 pub const LINK_COPIED: &str = "Link copied to clipboard";
 pub const JAM_STARTED: &str = "Your Jam has started.";
 pub const JAM_ENDED: &str = "The Jam has ended.";
@@ -79,6 +80,7 @@ pub struct JamState {
     requested: HashSet<String>,
     departed: HashMap<String, i64>,
     noticed: bool,
+    written: Option<Instant>,
 }
 
 impl JamState {
@@ -575,6 +577,11 @@ impl OpenMusic {
             return;
         };
         let departed = &self.playback.jam.departed;
+        let settling = self
+            .playback
+            .jam
+            .written
+            .is_some_and(|at| at.elapsed() < JAM_SETTLE);
         match (found.map(|session| *session), self.jam()) {
             (Some(found), Some(current))
                 if found.id == current.id && found.timestamp < current.timestamp => {}
@@ -583,6 +590,7 @@ impl OpenMusic {
                     .get(&found.id)
                     .is_some_and(|left| found.timestamp <= *left) => {}
             (Some(found), _) => self.set_jam(Some(found), "UNKNOWN_UPDATE_TYPE", window, cx),
+            (None, Some(_)) if settling => {}
             (None, Some(current)) => {
                 let guest = !current.is_owner;
                 self.set_jam(None, "YOU_LEFT", window, cx);
@@ -612,6 +620,7 @@ impl OpenMusic {
             }
             Ok(session) => session.map(|session| *session),
         };
+        self.playback.jam.written = (!action.ends()).then(Instant::now);
         self.refresh_jam();
         if action.ends() {
             self.set_jam(None, action.reason(), window, cx);
