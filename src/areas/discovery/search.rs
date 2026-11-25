@@ -852,12 +852,11 @@ impl OpenMusic {
         cx: &mut Context<Self>,
     ) -> bool {
         match verb {
-            "tab" => {
-                if let Some(tab) = SearchTab::from_alias(rest) {
-                    self.navigate(Page::Search(tab));
-                }
-            }
-            "more" => {
+            "tab" => match SearchTab::from_alias(rest) {
+                Some(tab) => self.navigate(Page::Search(tab)),
+                None => return false,
+            },
+            "more" if matches!(self.page, Page::Search(_)) => {
                 self.more_search_results();
             }
             "suggest" if rest.is_empty() => {
@@ -888,7 +887,7 @@ impl OpenMusic {
                 "enter" => self.submit_search_field(window, cx),
                 _ => {}
             },
-            "recents" => {
+            "recent-searches" => {
                 let (action, uri) = rest.split_once(' ').unwrap_or((rest, ""));
                 match (action, uri.trim()) {
                     ("reload", _) => self.load_recent_searches(true),
@@ -917,7 +916,7 @@ impl OpenMusic {
                             .chain(lines)
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let _ = std::fs::write(directory.join("recents.txt"), text);
+                        let _ = std::fs::write(directory.join("recent-searches.txt"), text);
                     }
                 }
             }
