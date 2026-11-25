@@ -52,7 +52,7 @@ FEATURES=debug-dir ./scripts/bundle-macos.sh
 brew install --cask shkumbinhasani/tap/openmusic
 ```
 
-Installing by the full name also trusts this one cask, which Homebrew requires for third-party taps. `brew upgrade` installs new versions; the release workflow updates the tap each time a version is published. `brew uninstall --zap --cask openmusic` also removes the cache and the Keychain sign-in.
+Installing by the full name also trusts this one cask, which Homebrew requires for third-party taps. `brew upgrade` installs new versions; the release workflow updates the tap each time a version is published. `brew uninstall --zap --cask openmusic` also removes the cache, the settings, the local music index, the device ID, the client token and the Keychain sign-in.
 
 ### Download
 

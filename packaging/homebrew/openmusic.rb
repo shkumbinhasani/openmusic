@@ -34,6 +34,7 @@ cask "openmusic" do
         must_succeed: false,
       },
       trash:  [
+        "~/Library/Application Support/OpenMusic",
         "~/Library/Caches/OpenMusic",
         "~/Library/HTTPStorages/io.openmusic.player",
         "~/Library/Preferences/io.openmusic.player.plist",
