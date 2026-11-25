@@ -19,12 +19,14 @@ use spotify_client::{
 
 use super::{
     cache,
+    liked::{Column, FIND_KEY, Liked, LikedSort, PLAY_KEY},
     saves::{self, FOLLOW_KEY, LIKE_CURRENT_KEY, SAVE_KEY, header_uri},
     view::LIBRARY_ROW,
     worker::{Command, Event},
 };
 use crate::{
     app::{OpenMusic, Page},
+    areas::discovery::state::SearchTab,
     menus::{self, Handle},
     ui::{
         components::Sentinel,
@@ -68,6 +70,7 @@ pub struct State {
     pub asked: HashMap<String, Instant>,
     pub toggle_when_known: Option<(String, Instant)>,
     pub resync: bool,
+    pub liked: Liked,
 }
 
 #[derive(Default)]
@@ -118,6 +121,7 @@ fn merge(items: &mut Vec<LibraryItem>, page: &mut LibraryPage, offset: u32) -> u
 
 impl State {
     pub fn covers(&self, urls: &mut HashSet<String>) {
+        self.liked.covers(urls);
         let folder = self.folder.iter().flat_map(|folder| &folder.items);
         urls.extend(
             self.items
@@ -450,6 +454,9 @@ impl OpenMusic {
 }
 
 pub fn load(app: &mut OpenMusic, page: &Page) {
+    if *page == Page::Liked && app.library.liked.wants_reload() && !app.library.liked.loading {
+        app.load_liked();
+    }
     if let Page::Folder(uri) = page {
         let loaded = app
             .library
@@ -566,6 +573,11 @@ pub fn on_event(
             pinned,
             result,
         } => app.pinned(uri, pinned, result),
+        Event::Liked {
+            request,
+            offset,
+            result,
+        } => app.on_liked(request, offset, result),
     }
 }
 
@@ -673,6 +685,35 @@ fn dump(app: &OpenMusic, directory: &Path) {
         }
     }
     let _ = std::fs::write(directory.join("library.txt"), lines.join("\n"));
+}
+
+fn dump_liked(app: &OpenMusic, directory: &Path) {
+    let liked = &app.library.liked;
+    let mut lines = vec![format!(
+        "total={} loaded={} shown={} next={} loading={} stale={} error={:?} sort={} {} unplayable={}",
+        liked.total,
+        liked.tracks.len(),
+        liked.shown.len(),
+        liked.next_offset,
+        liked.loading,
+        liked.stale,
+        liked.error,
+        liked.sort.column.slug(),
+        if liked.sort.descending { "desc" } else { "asc" },
+        liked.unplayable.len()
+    )];
+    lines.extend(liked.shown.iter().map(|track| {
+        format!(
+            "{} | {} | {} | {} | added={:?} saved={:?}",
+            track.uri,
+            track.title,
+            track.artist,
+            track.album,
+            track.added_at,
+            app.is_saved(&track.uri)
+        )
+    }));
+    let _ = std::fs::write(directory.join("liked.txt"), lines.join("\n"));
 }
 
 fn dump_rootlist(app: &OpenMusic, directory: &Path) {
@@ -785,6 +826,25 @@ pub fn debug(
             }
         }
         "likecurrent" => app.like_current(),
+        "liked" => {
+            let mut words = rest.split_whitespace();
+            match (words.next(), words.next(), words.next()) {
+                (Some("reload"), _, _) => app.load_liked(),
+                (Some("more"), _, _) => app.more_liked(),
+                (Some("sort"), None, _) => app.set_liked_sort(LikedSort::default()),
+                (Some("sort"), Some(slug), order) => {
+                    if let Some(column) = Column::from_slug(slug) {
+                        app.set_liked_sort(LikedSort {
+                            column,
+                            descending: order
+                                .map_or(column == Column::Added, |order| order == "desc"),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            dump_liked(app, directory);
+        }
         _ => return false,
     }
     true
@@ -793,7 +853,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let library = &app.library;
     format!(
-        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={}",
+        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={}",
         library.items.len(),
         library.page.as_ref().map_or(0, |page| page.total),
         library.query.filters.join("/"),
@@ -813,7 +873,10 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         library.pins.len(),
         app.recent_contexts().len(),
         library.asked.len(),
-        library.resync
+        library.resync,
+        library.liked.tracks.len(),
+        library.liked.total,
+        library.liked.sort.column.slug()
     )
 }
 
@@ -831,13 +894,17 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
         app.like_current();
         cx.notify();
     });
+    menus::route(cx, handle, |_: &menus::GoToLikedSongs, app, _, cx| {
+        app.navigate(Page::Liked);
+        cx.notify();
+    });
 }
 
 pub fn on_press(
     app: &mut OpenMusic,
     key: &'static str,
-    _window: &mut Window,
-    _cx: &mut Context<OpenMusic>,
+    window: &mut Window,
+    cx: &mut Context<OpenMusic>,
 ) -> bool {
     match key {
         "more-folder" => {
@@ -847,6 +914,11 @@ pub fn on_press(
             }
         }
         LIKE_CURRENT_KEY => app.like_current(),
+        PLAY_KEY => app.play_all_liked(cx),
+        FIND_KEY => {
+            app.navigate(Page::Search(SearchTab::All));
+            app.focus_search(window, cx);
+        }
         SAVE_KEY | FOLLOW_KEY => {
             if let Some(uri) = header_uri(&app.page).map(str::to_owned) {
                 app.toggle_saved(&uri);
@@ -894,7 +966,7 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
-    if saves::tick(app) {
+    if saves::tick(app) | app.tick_liked() {
         cx.notify();
     }
     if app.library.sentinel.take() {

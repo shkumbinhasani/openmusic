@@ -37,6 +37,8 @@ pub const LOCAL: &str = "icons/local.svg";
 pub const CHEVRON_RIGHT: &str = "icons/chevron-right.svg";
 pub const CHEVRON_DOWN: &str = "icons/chevron-down.svg";
 pub const CLOSE: &str = "icons/close.svg";
+pub const CHEVRON_UP: &str = "icons/chevron-up.svg";
+pub const CLOCK: &str = "icons/clock.svg";
 
 const ICONS: &[(&str, &str)] = &[
     (
@@ -174,6 +176,14 @@ const ICONS: &[(&str, &str)] = &[
     (
         CLOSE,
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>"#,
+    ),
+    (
+        CHEVRON_UP,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 15 7-7 7 7"/></svg>"#,
+    ),
+    (
+        CLOCK,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>"#,
     ),
 ];
 

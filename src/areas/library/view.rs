@@ -4,7 +4,7 @@ use spotify_client::{
     library::{ItemKind, LibraryItem},
 };
 
-use super::saves;
+use super::{liked::LIKED_ROW, saves};
 use crate::{
     app::{OpenMusic, Page, page_for},
     icons,
@@ -158,15 +158,6 @@ impl OpenMusic {
 }
 
 impl OpenMusic {
-    pub fn liked_page(
-        &self,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-
     pub fn recent_page(
         &self,
         _card_side: Pixels,
@@ -382,8 +373,8 @@ pub fn row_accessories(
         .collect()
 }
 
-pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOptions) -> bool {
-    false
+pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOptions) -> bool {
+    row.0 == LIKED_ROW && app.library.liked.unplayable.contains(&track.uri)
 }
 
 #[cfg(test)]

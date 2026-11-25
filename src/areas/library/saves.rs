@@ -113,6 +113,9 @@ impl OpenMusic {
             .count();
         if likes > 0 {
             self.bump_liked_count(if saved { likes as i64 } else { -(likes as i64) });
+            if saved {
+                self.library.liked.stale = true;
+            }
         }
         if likes < changes.len() {
             self.library.resync = true;

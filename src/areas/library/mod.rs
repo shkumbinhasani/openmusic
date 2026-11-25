@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod liked;
 pub mod saves;
 mod sidebar;
 pub mod state;

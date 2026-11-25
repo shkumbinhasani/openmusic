@@ -2,7 +2,7 @@ use spotify_client::{
     Api,
     catalog::Playlist,
     dealer::Message,
-    library::{self, LibraryError, LibraryPage, LibraryQuery, PinResult, Rootlist},
+    library::{self, LibraryError, LibraryPage, LibraryQuery, LikedPage, PinResult, Rootlist},
 };
 
 use super::{cache, state::LibraryPrefs};
@@ -24,6 +24,10 @@ pub enum Command {
     Pin {
         uri: String,
         pinned: bool,
+    },
+    Liked {
+        offset: u32,
+        request: u64,
     },
 }
 
@@ -47,6 +51,11 @@ pub enum Event {
         pinned: bool,
         result: Result<PinResult, String>,
     },
+    Liked {
+        request: u64,
+        offset: u32,
+        result: Result<LikedPage, String>,
+    },
 }
 
 impl Event {
@@ -61,6 +70,13 @@ impl Event {
                 .items
                 .iter()
                 .filter_map(|item| item.image.clone())
+                .collect(),
+            Self::Liked {
+                result: Ok(page), ..
+            } => page
+                .tracks
+                .iter()
+                .filter_map(|track| track.cover.clone())
                 .collect(),
             _ => Vec::new(),
         }
@@ -106,6 +122,17 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                     .into())
                 }))
         }
+        Command::Liked { offset, request } => ctx.tasks.spawn_keyed("library-liked", async move {
+            let result = library::liked(&api, offset, library::LIKED_PAGE_SIZE)
+                .await
+                .map_err(|error| error.to_string());
+            Event::Liked {
+                request,
+                offset,
+                result,
+            }
+            .into()
+        }),
     }
 }
 
