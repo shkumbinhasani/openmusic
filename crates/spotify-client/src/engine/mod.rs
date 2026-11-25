@@ -659,8 +659,7 @@ impl Engine {
                     && self.playing.is_some();
                 self.playback = Some(playback);
                 if moved_away {
-                    self.player.stop();
-                    self.playing = None;
+                    self.stop_local();
                 }
             }
             return;
@@ -689,8 +688,7 @@ impl Engine {
             }
             Some("ping") => self.report("ping").await,
             Some("log_out") => {
-                self.player.stop();
-                self.playing = None;
+                self.stop_local();
                 self.report("state_clear").await;
             }
             _ => {}

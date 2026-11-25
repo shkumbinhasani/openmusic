@@ -14,7 +14,7 @@ use crate::{
     catalog::{LocalTrack, Track, image_url},
     connect::{Repeat, Shuffle},
     playback_settings::LoudnessLevel,
-    player::{Media, PlayerEvent},
+    player::{FairPlay, Media, PlayerEvent, Snapshot, Source},
 };
 
 #[derive(Clone, Debug)]
@@ -68,6 +68,7 @@ pub struct ReportItem {
 pub struct AudioReport {
     pub settings: AudioSettings,
     pub playing: Option<ReportItem>,
+    pub player: Snapshot,
 }
 
 impl fmt::Display for AudioReport {
@@ -93,9 +94,37 @@ impl fmt::Display for AudioReport {
                 item.paused,
                 item.format,
                 item.bitrate
-            ),
-            None => writeln!(f, "playing none"),
+            )?,
+            None => writeln!(f, "playing none")?,
         }
+        let player = &self.player;
+        writeln!(
+            f,
+            "player active={} master={:.3} playing={} ramp={}",
+            player.active,
+            player.master,
+            player.playing,
+            player
+                .ramp
+                .map_or_else(|| "none".to_owned(), |progress| format!("{progress:.2}"))
+        )?;
+        for (index, deck) in player.decks.iter().enumerate() {
+            writeln!(
+                f,
+                "deck {index} items={} current={} fade={:.3} volume={:.3} rate={:.2}",
+                deck.items
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                deck.current
+                    .map_or_else(|| "-".to_owned(), |generation| generation.to_string()),
+                deck.fade,
+                deck.volume,
+                deck.rate
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -261,6 +290,7 @@ impl Engine {
                     .unwrap_or_else(|| playing.format.to_string()),
                 bitrate: playing.bitrate,
             }),
+            player: self.player.snapshot(),
         }
     }
 
@@ -388,8 +418,7 @@ impl Engine {
             })
             .map(|seek| seek as u32);
         let Some(state_ref) = command["state_ref"].as_object() else {
-            self.player.stop();
-            self.playing = None;
+            self.stop_local();
             self.report("state_clear").await;
             return;
         };
@@ -445,8 +474,7 @@ impl Engine {
             return;
         }
         if let Err(error) = self.start_state(machine, index, paused, seek).await {
-            self.playing = None;
-            self.player.stop();
+            self.stop_local();
             self.report("error").await;
             let _ = error;
         }
@@ -543,11 +571,10 @@ impl Engine {
         self.playing = Some(playing);
         self.report("before_track_load").await;
 
-        let media = self.media(&file_id, &format_number).await?;
         let media = Media {
             start_ms: seek.unwrap_or(initial),
             play: !paused,
-            ..media
+            ..self.media(&file_id, &format_number).await?
         };
         self.player.set_volume(f32::from(self.volume) / GAIA_VOLUME);
         self.player.load(self.generation, media);
@@ -630,7 +657,7 @@ impl Engine {
                 url
             }
         };
-        Ok(Media {
+        Ok(Media::new(Source::FairPlay(FairPlay {
             file_id: file_id.to_owned(),
             cdn_url,
             init_size,
@@ -638,9 +665,7 @@ impl Engine {
             certificate,
             license_url,
             token: self.api.token(),
-            start_ms: 0,
-            play: true,
-        })
+        })))
     }
 
     pub(super) async fn player_event(&mut self, event: PlayerEvent) {
@@ -700,7 +725,10 @@ impl Engine {
                     self.report(source).await;
                 }
             }
-            PlayerEvent::Ended { generation } => {
+            PlayerEvent::Ended { generation }
+            | PlayerEvent::Advanced {
+                from: generation, ..
+            } => {
                 if self
                     .playing
                     .as_ref()
@@ -742,6 +770,11 @@ impl Engine {
             let _ = error;
             self.report("error").await;
         }
+    }
+
+    pub(super) fn stop_local(&mut self) {
+        self.player.stop();
+        self.playing = None;
     }
 
     pub(super) async fn pause_local(&mut self) {
