@@ -21,6 +21,10 @@ pub enum Command {
         provider: BanProvider,
         hidden: bool,
     },
+    Ban {
+        uri: String,
+        banned: bool,
+    },
     Editable(String),
     TrackArtists(String),
     Radio(String),
@@ -30,6 +34,7 @@ pub enum Command {
 pub struct Snapshot {
     pub excluded: Vec<String>,
     pub hidden: Vec<Ban>,
+    pub banned: Vec<String>,
 }
 
 pub enum Event {
@@ -51,6 +56,11 @@ pub enum Event {
         ban: Ban,
         hidden: bool,
         result: Result<WriteFormat, String>,
+    },
+    Banned {
+        uri: String,
+        banned: bool,
+        result: Result<(), String>,
     },
     Editable {
         uri: String,
@@ -74,6 +84,7 @@ impl Event {
             | Self::Sets(_)
             | Self::Excluded { .. }
             | Self::Hidden { .. }
+            | Self::Banned { .. }
             | Self::Editable { .. }
             | Self::TrackArtists { .. }
             | Self::Radio { .. } => Vec::new(),
@@ -135,6 +146,24 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
                 .into())
             }));
         }
+        Command::Ban { uri, banned } => {
+            let user = ctx.user.clone();
+            let key = format!("artistban {uri}");
+            ctx.writes.push(Mutation::new(vec![key], async move {
+                let result = async {
+                    let name = user.name(&api).await?;
+                    details::set_artist_banned(&api, &name, &uri, banned).await
+                }
+                .await
+                .map_err(|_| ban_failure(banned).to_owned());
+                Ok(Event::Banned {
+                    uri,
+                    banned,
+                    result,
+                }
+                .into())
+            }));
+        }
         Command::Editable(uri) => ctx.tasks.spawn(async move {
             let editable = details::playlist_editable(&api, &uri).await.ok();
             Event::Editable { uri, editable }.into()
@@ -166,7 +195,12 @@ async fn load_sets(api: Api, user: User) -> crate::worker::Event {
         let name = user.name(&api).await?;
         let excluded = details::excluded(&api, &name).await?;
         let hidden = details::bans(&api, &name).await?;
-        anyhow::Ok(Snapshot { excluded, hidden })
+        let banned = details::banned_artists(&api, &name).await?;
+        anyhow::Ok(Snapshot {
+            excluded,
+            hidden,
+            banned,
+        })
     }
     .await
     .map_err(|error| error.to_string());
@@ -182,6 +216,14 @@ async fn radio(api: Api, seed: String) -> crate::worker::Event {
         }
     });
     Event::Radio { seed, result }.into()
+}
+
+fn ban_failure(banned: bool) -> &'static str {
+    if banned {
+        "Couldn’t stop this artist from playing. Try again."
+    } else {
+        "Couldn’t allow this artist to play. Try again."
+    }
 }
 
 fn failure(error: &anyhow::Error, fallback: &str) -> String {

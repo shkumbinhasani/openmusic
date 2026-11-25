@@ -110,6 +110,18 @@ pub fn on_event(
                 app.show_toast(message, None);
             }
         }
+        Event::Banned {
+            uri,
+            banned,
+            result,
+        } => {
+            app.details
+                .sets
+                .banned_written(&uri, banned, result.is_ok());
+            if let Err(message) = result {
+                app.show_toast(message, None);
+            }
+        }
         Event::Editable { uri, editable } => {
             app.details.sets.editable.insert(uri, editable);
         }
@@ -151,15 +163,19 @@ pub fn connected(app: &mut OpenMusic, _window: &mut Window, _cx: &mut Context<Op
 fn sets_report(app: &OpenMusic) -> String {
     let sets = &app.details.sets;
     let mut lines = vec![format!(
-        "load={} excluded={} hidden={} format={}",
+        "load={} excluded={} hidden={} banned={} format={}",
         sets.load.name(),
         sets.excluded.len(),
         sets.hidden_count(),
+        sets.banned.len(),
         sets.last_format.map_or("none", |format| format.name()),
     )];
     let mut excluded: Vec<&String> = sets.excluded.iter().collect();
     excluded.sort();
     lines.extend(excluded.into_iter().map(|uri| format!("excluded {uri}")));
+    let mut banned: Vec<&String> = sets.banned.iter().collect();
+    banned.sort();
+    lines.extend(banned.into_iter().map(|uri| format!("banned {uri}")));
     let mut hidden: Vec<String> = sets
         .hidden
         .iter()
@@ -297,6 +313,11 @@ pub fn debug(
                 app.set_excluded((*uri).to_owned(), excluded);
             }
         }
+        ("ban", [uri, value]) => {
+            if let Some(banned) = switch(value) {
+                app.set_artist_banned((*uri).to_owned(), banned);
+            }
+        }
         ("hide", [track, context, value]) => {
             if let (Some(context), Some(hidden)) = (hide_context(context), switch(value)) {
                 let ban = Ban {
@@ -340,10 +361,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         .as_ref()
         .map(|(uri, _)| format!("embed={uri}"));
     let sets = Some(format!(
-        "sets={} excluded={} hidden={}",
+        "sets={} excluded={} hidden={} banned={}",
         details.sets.load.name(),
         details.sets.excluded.len(),
         details.sets.hidden_count(),
+        details.sets.banned.len(),
     ));
     let highlight = details
         .highlight

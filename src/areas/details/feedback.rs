@@ -6,6 +6,7 @@ use std::{
 
 use gpui::Context;
 use spotify_client::{
+    Track,
     details::{Ban, BanProvider, WriteFormat, hide_context},
     entity,
 };
@@ -24,6 +25,9 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 pub const EXCLUDE: &str = "Exclude from your taste profile";
 pub const INCLUDE: &str = "Include in your taste profile";
+pub const BAN: &str = "Don't play this artist";
+pub const UNBAN: &str = "Allow this artist to play";
+pub const BANNED: &str = "Ok, we won’t play music from this artist again.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Load {
@@ -45,15 +49,22 @@ impl Load {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Entry {
+    Excluded(String),
+    Banned(String),
+    Hidden(Ban),
+}
+
 #[derive(Default)]
 pub struct Sets {
     pub load: Load,
     pub excluded: HashSet<String>,
+    pub banned: HashSet<String>,
     pub hidden: HashMap<String, HashSet<String>>,
     pub editable: HashMap<String, Option<bool>>,
     pub last_format: Option<WriteFormat>,
-    excluding: HashMap<String, usize>,
-    hiding: HashMap<Ban, usize>,
+    writing: HashMap<Entry, usize>,
 }
 
 impl Sets {
@@ -63,6 +74,10 @@ impl Sets {
 
     pub fn is_excluded(&self, uri: &str) -> bool {
         self.excluded.contains(uri)
+    }
+
+    pub fn is_banned(&self, artist: &str) -> bool {
+        self.banned.contains(artist)
     }
 
     pub fn is_hidden(&self, track: &str, context: &str) -> bool {
@@ -75,11 +90,19 @@ impl Sets {
         self.hidden.values().map(HashSet::len).sum()
     }
 
-    fn mark_excluded(&mut self, uri: &str, excluded: bool) {
-        if excluded {
-            self.excluded.insert(uri.to_owned());
-        } else {
-            self.excluded.remove(uri);
+    pub fn contains(&self, entry: &Entry) -> bool {
+        match entry {
+            Entry::Excluded(uri) => self.is_excluded(uri),
+            Entry::Banned(uri) => self.is_banned(uri),
+            Entry::Hidden(ban) => self.is_hidden(&ban.track, &ban.context),
+        }
+    }
+
+    fn mark(&mut self, entry: &Entry, on: bool) {
+        match entry {
+            Entry::Excluded(uri) => mark_in(&mut self.excluded, uri, on),
+            Entry::Banned(uri) => mark_in(&mut self.banned, uri, on),
+            Entry::Hidden(ban) => self.mark_hidden(ban, on),
         }
     }
 
@@ -113,26 +136,19 @@ impl Sets {
                 return;
             }
         };
-        let excluding: Vec<(String, bool)> = self
-            .excluding
+        let local: Vec<(Entry, bool)> = self
+            .writing
             .keys()
-            .map(|uri| (uri.clone(), self.is_excluded(uri)))
-            .collect();
-        let hiding: Vec<(Ban, bool)> = self
-            .hiding
-            .keys()
-            .map(|ban| (ban.clone(), self.is_hidden(&ban.track, &ban.context)))
+            .map(|entry| (entry.clone(), self.contains(entry)))
             .collect();
         self.excluded = snapshot.excluded.into_iter().collect();
+        self.banned = snapshot.banned.into_iter().collect();
         self.hidden.clear();
         for ban in snapshot.hidden {
             self.mark_hidden(&ban, true);
         }
-        for (uri, excluded) in excluding {
-            self.mark_excluded(&uri, excluded);
-        }
-        for (ban, hidden) in hiding {
-            self.mark_hidden(&ban, hidden);
+        for (entry, on) in local {
+            self.mark(&entry, on);
         }
         self.load = Load::Ready;
     }
@@ -141,21 +157,32 @@ impl Sets {
         matches!(self.load, Load::Failed(at) if at.elapsed() >= RETRY_AFTER)
     }
 
-    fn finish<K: std::hash::Hash + Eq>(writes: &mut HashMap<K, usize>, key: &K) -> usize {
-        let left = writes.get(key).map_or(0, |count| count.saturating_sub(1));
+    fn begin(&mut self, entry: Entry, on: bool) {
+        self.mark(&entry, on);
+        *self.writing.entry(entry).or_default() += 1;
+    }
+
+    fn written(&mut self, entry: &Entry, on: bool, ok: bool) {
+        let left = self
+            .writing
+            .get(entry)
+            .map_or(0, |count| count.saturating_sub(1));
         if left == 0 {
-            writes.remove(key);
-        } else if let Some(count) = writes.get_mut(key) {
+            self.writing.remove(entry);
+        } else if let Some(count) = self.writing.get_mut(entry) {
             *count = left;
         }
-        left
+        if !ok && left == 0 {
+            self.mark(entry, !on);
+        }
     }
 
     pub fn excluded_written(&mut self, uri: &str, excluded: bool, ok: bool) {
-        let left = Self::finish(&mut self.excluding, &uri.to_owned());
-        if !ok && left == 0 {
-            self.mark_excluded(uri, !excluded);
-        }
+        self.written(&Entry::Excluded(uri.to_owned()), excluded, ok);
+    }
+
+    pub fn banned_written(&mut self, uri: &str, banned: bool, ok: bool) {
+        self.written(&Entry::Banned(uri.to_owned()), banned, ok);
     }
 
     pub fn hidden_written(
@@ -164,13 +191,28 @@ impl Sets {
         hidden: bool,
         result: &Result<WriteFormat, String>,
     ) {
-        let left = Self::finish(&mut self.hiding, ban);
-        match result {
-            Ok(format) => self.last_format = Some(*format),
-            Err(_) if left == 0 => self.mark_hidden(ban, !hidden),
-            Err(_) => {}
+        if let Ok(format) = result {
+            self.last_format = Some(*format);
         }
+        self.written(&Entry::Hidden(ban.clone()), hidden, result.is_ok());
     }
+}
+
+fn mark_in(set: &mut HashSet<String>, uri: &str, on: bool) {
+    if on {
+        set.insert(uri.to_owned());
+    } else {
+        set.remove(uri);
+    }
+}
+
+pub fn first_artist(track: &Track) -> Option<&str> {
+    track
+        .artists
+        .first()
+        .map(|artist| artist.uri.as_str())
+        .or(track.artist_uri.as_deref())
+        .filter(|uri| uri.starts_with("spotify:artist:"))
 }
 
 pub fn exclude_message(uri: &str, excluded: bool) -> &'static str {
@@ -248,6 +290,17 @@ pub fn track_items(target: &TrackTarget, facts: &Facts) -> Vec<(Group, MenuItem)
         .collect()
 }
 
+pub fn artist_items(uri: &str, facts: &Facts) -> Vec<(Group, MenuItem)> {
+    let banned = facts.sets.is_banned(uri);
+    let artist = uri.to_owned();
+    let item = MenuItem::action(if banned { UNBAN } else { BAN }, move |app, _, _| {
+        app.set_artist_banned(artist.clone(), !banned)
+    })
+    .symbol(if banned { "play.circle" } else { "nosign" })
+    .enabled(facts.sets.ready());
+    vec![(Group::Feedback, item)]
+}
+
 pub fn playlist_items(uri: &str, facts: &Facts) -> Vec<(Group, MenuItem)> {
     if entity::is_liked_songs(uri) {
         return Vec::new();
@@ -289,8 +342,7 @@ impl OpenMusic {
         if !sets.ready() {
             return;
         }
-        sets.mark_excluded(&uri, excluded);
-        *sets.excluding.entry(uri.clone()).or_default() += 1;
+        sets.begin(Entry::Excluded(uri.clone()), excluded);
         self.show_toast(exclude_message(&uri, excluded), None);
         self.send(Command::Exclude { uri, excluded });
     }
@@ -300,8 +352,7 @@ impl OpenMusic {
         if !sets.ready() {
             return;
         }
-        sets.mark_hidden(&ban, hidden);
-        *sets.hiding.entry(ban.clone()).or_default() += 1;
+        sets.begin(Entry::Hidden(ban.clone()), hidden);
         if hidden {
             let name = self.context_name(&ban.context);
             let again = ban.clone();
@@ -325,6 +376,24 @@ impl OpenMusic {
         });
     }
 
+    pub fn set_artist_banned(&mut self, uri: String, banned: bool) {
+        let sets = &mut self.details.sets;
+        if !sets.ready() || !uri.starts_with("spotify:artist:") {
+            return;
+        }
+        sets.begin(Entry::Banned(uri.clone()), banned);
+        if banned {
+            self.show_toast(BANNED, None);
+            if self.is_saved(&uri) != Some(false) {
+                self.set_saved(vec![uri.clone()], false);
+            }
+            if self.track().and_then(first_artist) == Some(uri.as_str()) {
+                self.send(playback::worker::Command::Next);
+            }
+        }
+        self.send(Command::Ban { uri, banned });
+    }
+
     fn playing_in(&self, ban: &Ban) -> bool {
         let now = &self.playback.now;
         now.track
@@ -340,6 +409,8 @@ mod tests {
 
     const SONG: &str = "spotify:track:70LcF31zb1H0PyJoS1Sx1r";
     const RADIO: &str = "spotify:playlist:37i9dQZF1E8Redacted001";
+    const RADIOHEAD: &str = "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb";
+    const BOWIE: &str = "spotify:artist:0oSGxfWSnnOXhD2fKuz2Gy";
 
     fn ban() -> Ban {
         Ban {
@@ -353,17 +424,19 @@ mod tests {
         let mut sets = Sets::default();
         sets.apply(Ok(Snapshot::default()));
         assert!(sets.ready());
-        sets.mark_hidden(&ban(), true);
-        *sets.hiding.entry(ban()).or_default() += 1;
-        sets.mark_excluded(RADIO, true);
-        *sets.excluding.entry(RADIO.into()).or_default() += 1;
+        sets.begin(Entry::Hidden(ban()), true);
+        sets.begin(Entry::Excluded(RADIO.into()), true);
+        sets.begin(Entry::Banned(RADIOHEAD.into()), false);
         sets.apply(Ok(Snapshot {
             excluded: vec!["spotify:playlist:other".into()],
             hidden: Vec::new(),
+            banned: vec![RADIOHEAD.into(), BOWIE.into()],
         }));
         assert!(sets.is_hidden(SONG, RADIO));
         assert!(sets.is_excluded(RADIO));
         assert!(sets.is_excluded("spotify:playlist:other"));
+        assert!(!sets.is_banned(RADIOHEAD));
+        assert!(sets.is_banned(BOWIE));
         assert_eq!(sets.hidden_count(), 1);
     }
 
@@ -371,26 +444,42 @@ mod tests {
     fn rolls_back_only_the_last_failed_write() {
         let mut sets = Sets::default();
         sets.apply(Ok(Snapshot::default()));
-        sets.mark_hidden(&ban(), true);
-        *sets.hiding.entry(ban()).or_default() += 1;
-        sets.mark_hidden(&ban(), false);
-        *sets.hiding.entry(ban()).or_default() += 1;
+        sets.begin(Entry::Hidden(ban()), true);
+        sets.begin(Entry::Hidden(ban()), false);
         sets.hidden_written(&ban(), true, &Err("no".into()));
         assert!(!sets.is_hidden(SONG, RADIO));
         sets.hidden_written(&ban(), false, &Err("no".into()));
         assert!(sets.is_hidden(SONG, RADIO));
-        assert!(sets.hiding.is_empty());
+        assert!(!sets.writing.contains_key(&Entry::Hidden(ban())));
         sets.hidden_written(&ban(), true, &Ok(WriteFormat::Json));
         assert_eq!(sets.last_format, Some(WriteFormat::Json));
 
-        sets.mark_excluded(SONG, true);
-        *sets.excluding.entry(SONG.into()).or_default() += 1;
+        sets.begin(Entry::Excluded(SONG.into()), true);
         sets.excluded_written(SONG, true, false);
         assert!(!sets.is_excluded(SONG));
-        sets.mark_excluded(SONG, true);
-        *sets.excluding.entry(SONG.into()).or_default() += 1;
+        sets.begin(Entry::Excluded(SONG.into()), true);
         sets.excluded_written(SONG, true, true);
         assert!(sets.is_excluded(SONG));
+
+        sets.begin(Entry::Banned(RADIOHEAD.into()), true);
+        assert!(sets.is_banned(RADIOHEAD));
+        sets.banned_written(RADIOHEAD, true, false);
+        assert!(!sets.is_banned(RADIOHEAD));
+    }
+
+    #[test]
+    fn finds_the_first_artist_of_a_song() {
+        let mut track = Track::placeholder(SONG);
+        assert_eq!(first_artist(&track), None);
+        track.artist_uri = Some(BOWIE.into());
+        assert_eq!(first_artist(&track), Some(BOWIE));
+        track.artists = vec![spotify_client::catalog::Link {
+            uri: RADIOHEAD.into(),
+            name: "Radiohead".into(),
+        }];
+        assert_eq!(first_artist(&track), Some(RADIOHEAD));
+        track.artists[0].uri = "spotify:show:0123456789abcdefghijkl".into();
+        assert_eq!(first_artist(&track), None);
     }
 
     #[test]

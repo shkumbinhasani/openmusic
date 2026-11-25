@@ -52,7 +52,11 @@ pub fn items(target: &Target, facts: &Facts) -> Vec<(Group, MenuItem)> {
         Target::Track(track) => song(track, facts),
         Target::Episode { uri } => episode(uri, facts),
         Target::Album { uri } => with_share(go::album_items(uri, facts), uri),
-        Target::Artist { uri } => with_share(go::artist_items(uri), uri),
+        Target::Artist { uri } => {
+            let mut items = feedback::artist_items(uri, facts);
+            items.extend(go::artist_items(uri));
+            with_share(items, uri)
+        }
         Target::Playlist { uri } => with_share(feedback::playlist_items(uri, facts), uri),
         Target::Show { uri } | Target::User { uri } => shared(uri),
         Target::Folder { .. } => Vec::new(),
@@ -417,6 +421,7 @@ mod tests {
                 track: SONG.into(),
                 context: RADIO.into(),
             }],
+            banned: Vec::new(),
         }));
         let lines = world.menu(&in_context(creep(), RADIO, None));
         assert_eq!(
@@ -445,11 +450,11 @@ mod tests {
             "Exclude from your taste profile  x  <minus.circle>"
         );
         world.sets.apply(Ok(Snapshot {
-            excluded: Vec::new(),
             hidden: vec![Ban {
                 track: SONG.into(),
                 context: RADIO.into(),
             }],
+            ..Snapshot::default()
         }));
         let lines = world.menu(&in_context(creep(), RADIO, None));
         assert_eq!(lines[0], "Show in this playlist  <eye>");
@@ -516,7 +521,6 @@ mod tests {
         let exclude = "Exclude from your taste profile  x  <minus.circle>";
         let cases = [
             (ALBUM, Some(radio), "Copy link to Album"),
-            (RADIOHEAD, Some(radio), "Copy link to artist"),
             (RADIO, Some(exclude), "Copy link to playlist"),
             (
                 "spotify:user:someone:playlist:37i9dQZF1E8Redacted001",
@@ -550,11 +554,41 @@ mod tests {
     }
 
     #[test]
+    fn artists_can_be_kept_from_playing() {
+        let artist = Target::for_uri(RADIOHEAD).unwrap();
+        let mut world = World::new();
+        assert_eq!(
+            world.menu(&artist)[..5],
+            [
+                "Don't play this artist  <nosign>",
+                "──",
+                "Go to artist radio  r  <dot.radiowaves.left.and.right>",
+                "──",
+                "Share ▸  <square.and.arrow.up>",
+            ]
+        );
+        assert_eq!(world.menu(&artist)[5], "  Copy link to artist  c  <link>");
+        world.sets.apply(Ok(Snapshot {
+            banned: vec![RADIOHEAD.into()],
+            ..Snapshot::default()
+        }));
+        assert_eq!(
+            world.menu(&artist)[0],
+            "Allow this artist to play  <play.circle>"
+        );
+        world.sets = Sets::default();
+        assert_eq!(
+            world.menu(&artist)[0],
+            "Don't play this artist  <nosign> [x]"
+        );
+    }
+
+    #[test]
     fn excluded_playlists_offer_to_include_them_again() {
         let mut world = World::new();
         world.sets.apply(Ok(Snapshot {
             excluded: vec![RADIO.into()],
-            hidden: Vec::new(),
+            ..Snapshot::default()
         }));
         let lines = world.menu(&Target::for_uri(RADIO).unwrap());
         assert_eq!(lines[0], "Include in your taste profile  x  <plus.circle>");

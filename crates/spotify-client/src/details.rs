@@ -524,6 +524,33 @@ pub async fn set_banned(
     Ok(WriteFormat::Json)
 }
 
+pub const ARTIST_BAN: &str = "artistban";
+
+fn artist_ban(uri: &str, banned: bool) -> collection::Write {
+    collection::Write {
+        uri: uri.to_owned(),
+        context_uri: None,
+        removed: !banned,
+    }
+}
+
+pub fn artist_ban_body(user: &str, uri: &str, banned: bool) -> Value {
+    collection::write_body(user, ARTIST_BAN, &[artist_ban(uri, banned)])
+}
+
+pub async fn banned_artists(api: &Api, user: &str) -> Result<Vec<String>> {
+    Ok(collection::all(api, user, ARTIST_BAN)
+        .await?
+        .into_iter()
+        .map(|item| item.uri)
+        .filter(|uri| uri.starts_with("spotify:artist:"))
+        .collect())
+}
+
+pub async fn set_artist_banned(api: &Api, user: &str, uri: &str, banned: bool) -> Result<()> {
+    collection::write(api, user, ARTIST_BAN, &[artist_ban(uri, banned)]).await
+}
+
 pub async fn excluded(api: &Api, user: &str) -> Result<Vec<String>> {
     Ok(collection::all(api, user, IGNORE_IN_RECS)
         .await?
@@ -952,6 +979,22 @@ mod tests {
         assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(WriteFormat::Protobuf.name(), "protobuf");
         assert_eq!(WriteFormat::Json.name(), "json");
+    }
+
+    #[test]
+    fn bans_artists_like_the_web_client() {
+        assert_eq!(
+            artist_ban_body("someone", "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", true),
+            json!({"username": "someone", "set": "artistban", "items": [
+                {"uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb"}
+            ]})
+        );
+        assert_eq!(
+            artist_ban_body("someone", "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", false),
+            json!({"username": "someone", "set": "artistban", "items": [
+                {"uri": "spotify:artist:4Z8W4fKeB5YxbusRsdQVPb", "is_removed": true}
+            ]})
+        );
     }
 
     #[test]
