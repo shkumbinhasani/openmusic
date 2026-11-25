@@ -108,6 +108,15 @@ impl OpenMusic {
                                     this.navigate(page.clone());
                                     cx.notify();
                                 }))
+                                .map(|line| {
+                                    self.library_drag(
+                                        line,
+                                        &playlist.uri,
+                                        &playlist.name,
+                                        palette,
+                                        cx,
+                                    )
+                                })
                         },
                     )),
             )

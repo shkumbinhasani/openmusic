@@ -1,7 +1,17 @@
-use gpui::{AnyElement, Context, FontWeight, MouseButton, Pixels, div, hsla, prelude::*, px, rgb};
-use spotify_client::{Track, catalog::Collection, entity, playlist, playlist::Level};
+use std::collections::HashMap;
 
-use super::state::{PlaylistInfo, owner_label};
+use gpui::{
+    AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, Stateful, Window, div,
+    hsla, prelude::*, px, rgb, rgba,
+};
+use spotify_client::{
+    Track,
+    catalog::Collection,
+    entity,
+    playlist::{self, ItemPosition, Level, RootNode, RootPlace, Rootlist},
+};
+
+use super::state::{PlaylistInfo, owner_label, source_name};
 use crate::{
     app::{OpenMusic, Page},
     icons,
@@ -9,13 +19,65 @@ use crate::{
     ui::{
         Palette,
         cards::Face,
-        components::{artwork, link, scroll_sentinel, skeleton_header, skeleton_rows},
+        components::{artwork, icon, link, scroll_sentinel, skeleton_header, skeleton_rows},
         dock::DockItem,
-        menu::{Group, MenuItem, Row, Target},
+        menu::{Group, MenuItem, Row, Surface, Target, TrackTarget},
         sidebar::NavEntry,
         tracks::RowOptions,
     },
 };
+
+pub const TRACK_ROW: &str = "collection-track";
+pub const ADD_MENU: &str = "add-to-playlist";
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AddSource {
+    pub uris: Vec<String>,
+    pub name: Option<String>,
+    pub exclude: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibraryDrag {
+    pub uri: String,
+    pub name: String,
+}
+
+struct LibraryGhost {
+    name: SharedString,
+    folder: bool,
+    palette: Palette,
+}
+
+impl Render for LibraryGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(32.))
+            .max_w(px(240.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .rounded_full()
+            .bg(rgb(self.palette.raised))
+            .border_1()
+            .border_color(rgba(self.palette.line))
+            .shadow_lg()
+            .text_size(px(13.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(self.palette.text))
+            .child(icon(
+                if self.folder {
+                    icons::FOLDER
+                } else {
+                    icons::NOTE
+                },
+                14.,
+                self.palette.accent,
+            ))
+            .child(div().min_w_0().truncate().child(self.name.clone()))
+    }
+}
 
 pub fn songs_label(count: usize) -> String {
     if count == 1 {
@@ -313,31 +375,89 @@ impl OpenMusic {
                 palette,
             )
         } else {
+            let editable_rows = info
+                .as_ref()
+                .is_some_and(|info| info.capabilities.edit_items);
             let options = RowOptions {
                 numbered: album,
                 context: Some(loaded.clone()),
                 show_album: !album,
                 show_added: is_playlist,
+                editable: editable_rows,
+                draggable: true,
                 ..RowOptions::default()
             };
-            self.track_list(
-                &collection.tracks,
-                "collection-track",
-                0,
-                &options,
-                palette,
-                cx,
-            )
-            .when(collection.next.is_some(), |list| {
-                list.child(scroll_sentinel(&self.playlists.sentinel))
-                    .child(skeleton_rows("collection-more", 3, album, palette))
-            })
+            self.track_list(&collection.tracks, TRACK_ROW, 0, &options, palette, cx)
+                .when(collection.next.is_some(), |list| {
+                    list.child(scroll_sentinel(&self.playlists.sentinel))
+                        .child(skeleton_rows("collection-more", 3, album, palette))
+                })
         };
         page.child(header).child(rows)
     }
 }
 
 impl OpenMusic {
+    pub fn library_drag(
+        &self,
+        row: Stateful<Div>,
+        uri: &str,
+        name: &str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let folder = playlist::folder_hash(uri).is_some();
+        if !folder && playlist::canonical(uri).is_none() {
+            return row;
+        }
+        let drag = LibraryDrag {
+            uri: uri.to_owned(),
+            name: name.to_owned(),
+        };
+        row.relative()
+            .on_drag(drag, move |drag, _, _, cx| {
+                let name: SharedString = drag.name.clone().into();
+                cx.new(|_| LibraryGhost {
+                    name,
+                    folder,
+                    palette,
+                })
+            })
+            .child(self.library_zone(uri, false, folder, palette, cx))
+            .child(self.library_zone(uri, true, folder, palette, cx))
+    }
+
+    fn library_zone(
+        &self,
+        uri: &str,
+        after: bool,
+        folder: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let target = uri.to_owned();
+        let into = folder && after;
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .h_1_2()
+            .map(|zone| if after { zone.bottom_0() } else { zone.top_0() })
+            .drag_over::<LibraryDrag>(move |style, _, _, _| {
+                if into {
+                    style.bg(rgba(palette.press))
+                } else if after {
+                    style.border_b_2().border_color(rgb(palette.accent))
+                } else {
+                    style.border_t_2().border_color(rgb(palette.accent))
+                }
+            })
+            .on_drop(cx.listener(move |this, drag: &LibraryDrag, _, cx| {
+                this.drop_library(drag, &target, after);
+                cx.notify();
+            }))
+    }
+
     pub fn blend_invitation_page(
         &self,
         _id: &str,
@@ -362,10 +482,12 @@ pub fn playlist_menu(info: &PlaylistInfo) -> Vec<(Group, MenuItem)> {
                 MenuItem::action("Remove from Your Library", move |app, _, _| {
                     app.follow_playlist(&uri, false)
                 })
+                .symbol("checkmark.circle.fill")
             } else {
                 MenuItem::action("Add to Your Library", move |app, _, _| {
                     app.follow_playlist(&uri, true)
                 })
+                .symbol("plus.circle")
             },
         ));
     }
@@ -373,20 +495,30 @@ pub fn playlist_menu(info: &PlaylistInfo) -> Vec<(Group, MenuItem)> {
     if saved && info.capabilities.publish && info.base != Some(Level::Blocked) {
         let uri = uri.clone();
         let public = info.on_profile;
-        edit.push(MenuItem::action(
-            if public {
-                "Remove from profile"
+        edit.push(
+            MenuItem::action(
+                if public {
+                    "Remove from profile"
+                } else {
+                    "Add to profile"
+                },
+                move |app, _, _| app.set_playlist_on_profile(&uri, !public),
+            )
+            .symbol(if public {
+                "person.crop.circle.badge.minus"
             } else {
-                "Add to profile"
-            },
-            move |app, _, _| app.set_playlist_on_profile(&uri, !public),
-        ));
+                "person.crop.circle.badge.plus"
+            }),
+        );
     }
     if info.capabilities.edit_metadata {
         let uri = uri.clone();
-        edit.push(MenuItem::action("Edit details", move |app, window, cx| {
-            app.edit_details(&uri, window, cx)
-        }));
+        edit.push(
+            MenuItem::action("Edit details", move |app, window, cx| {
+                app.edit_details(&uri, window, cx)
+            })
+            .symbol("pencil"),
+        );
     }
     if saved && deletable {
         let uri = uri.clone();
@@ -394,6 +526,7 @@ pub fn playlist_menu(info: &PlaylistInfo) -> Vec<(Group, MenuItem)> {
             MenuItem::action("Delete", move |app, window, cx| {
                 app.delete_playlist(&uri, window, cx)
             })
+            .symbol("trash")
             .key("backspace"),
         );
     }
@@ -404,31 +537,42 @@ pub fn playlist_menu(info: &PlaylistInfo) -> Vec<(Group, MenuItem)> {
             match info.base {
                 Some(Level::Blocked) => MenuItem::action("Make public", move |app, window, cx| {
                     app.set_playlist_private(&uri, false, window, cx)
-                }),
+                })
+                .symbol("globe"),
                 Some(_) => MenuItem::action("Make private", move |app, window, cx| {
                     app.set_playlist_private(&uri, true, window, cx)
-                }),
-                None => MenuItem::action("Make private", |_, _, _| {}).enabled(false),
+                })
+                .symbol("lock"),
+                None => MenuItem::action("Make private", |_, _, _| {})
+                    .symbol("lock")
+                    .enabled(false),
             }
         };
         sharing.push(privacy);
         let uri = uri.clone();
-        sharing.push(MenuItem::action(
-            "Invite collaborators",
-            move |app, _, _| app.invite_collaborators(uri.clone()),
-        ));
+        sharing.push(
+            MenuItem::action("Invite collaborators", move |app, _, _| {
+                app.invite_collaborators(uri.clone())
+            })
+            .symbol("person.badge.plus"),
+        );
     }
     if info.capabilities.cancel_membership {
         let uri = uri.clone();
-        sharing.push(MenuItem::action(
-            "Leave playlist",
-            move |app, window, cx| app.leave_playlist(uri.clone(), window, cx),
-        ));
+        sharing.push(
+            MenuItem::action("Leave playlist", move |app, window, cx| {
+                app.leave_playlist(uri.clone(), window, cx)
+            })
+            .symbol("rectangle.portrait.and.arrow.right"),
+        );
     }
     if info.members > 1 {
-        sharing.push(MenuItem::action("Collaborators", move |app, window, cx| {
-            app.show_collaborators(&uri, window, cx)
-        }));
+        sharing.push(
+            MenuItem::action("Collaborators", move |app, window, cx| {
+                app.show_collaborators(&uri, window, cx)
+            })
+            .symbol("person.2"),
+        );
     }
     if !sharing.is_empty() {
         if !edit.is_empty() || !items.is_empty() {
@@ -440,13 +584,248 @@ pub fn playlist_menu(info: &PlaylistInfo) -> Vec<(Group, MenuItem)> {
     items
 }
 
-pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
-    let Target::Playlist { uri } = target else {
+fn add_targets(
+    nodes: Vec<RootNode>,
+    list: &Rootlist,
+    source: &AddSource,
+    checks: &HashMap<String, bool>,
+) -> Vec<MenuItem> {
+    nodes
+        .into_iter()
+        .filter_map(|node| match node {
+            RootNode::Playlist { uri, .. } => {
+                let found = list.playlist(&uri)?;
+                if !found.capabilities.edit_items || source.exclude.as_deref() == Some(uri.as_str())
+                {
+                    return None;
+                }
+                let title = if found.name.is_empty() {
+                    "Untitled".to_owned()
+                } else {
+                    found.name.clone()
+                };
+                let checked = checks.get(&uri).copied().unwrap_or(false);
+                let sources = source.uris.clone();
+                Some(
+                    MenuItem::action(title, move |app, _, _| {
+                        app.add_to_playlist(&uri, sources.clone(), ItemPosition::Bottom)
+                    })
+                    .checked(checked),
+                )
+            }
+            RootNode::Folder(folder) => {
+                let children = add_targets(folder.children, list, source, checks);
+                (!children.is_empty())
+                    .then(|| MenuItem::submenu(folder.name, children).symbol("folder"))
+            }
+        })
+        .collect()
+}
+
+pub fn add_menu(app: &OpenMusic, source: &AddSource) -> Vec<MenuItem> {
+    let checks = app.playlists.curates(&source.uris);
+    let (sources, name) = (source.uris.clone(), source.name.clone());
+    let mut items = vec![
+        MenuItem::action("New playlist", move |app, _, _| {
+            app.create_playlist_from(sources.clone(), name.clone(), None)
+        })
+        .symbol("plus"),
+        MenuItem::Separator,
+    ];
+    match (&app.playlists.rootlist, &app.playlists.user) {
+        (Some(list), Some(user)) => {
+            items.extend(add_targets(list.tree(user), list, source, &checks))
+        }
+        _ => items.push(MenuItem::note("Loading playlists…")),
+    }
+    items
+}
+
+fn add_submenu(title: &str, app: &OpenMusic, source: &AddSource) -> MenuItem {
+    MenuItem::submenu(title, add_menu(app, source))
+        .symbol("plus")
+        .search("Find a playlist")
+        .id(ADD_MENU)
+}
+
+fn track_items(target: &TrackTarget, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    let uri = target.track.uri.clone();
+    if !playlist::addable(&uri) {
+        return Vec::new();
+    }
+    let title = Some(target.track.title.clone()).filter(|title| !title.is_empty());
+    let source = AddSource {
+        uris: vec![uri.clone()],
+        name: title.clone(),
+        exclude: None,
+    };
+    if target.surface != Surface::NowPlaying {
+        app.playlists.wanted.replace(Some(source.clone()));
+    }
+    let mut items = vec![(Group::Edit, add_submenu("Add to playlist", app, &source))];
+    if let (Some(uid), Some(context)) = (&target.uid, &target.context)
+        && !matches!(target.provider.as_deref(), Some("autoplay" | "queue"))
+        && app
+            .playlist_info(context)
+            .is_some_and(|info| info.capabilities.edit_items)
+    {
+        let (context, uid) = (context.clone(), uid.clone());
+        items.push((
+            Group::Edit,
+            MenuItem::action("Remove from this playlist", move |app, _, _| {
+                app.remove_from_playlist(&context, vec![uid.clone()])
+            })
+            .symbol("trash")
+            .key("backspace"),
+        ));
+    }
+    if !uri.starts_with("spotify:local:") {
+        items.push((
+            Group::Edit,
+            MenuItem::action("Choose playlists…", move |app, window, cx| {
+                app.open_save_to(vec![uri.clone()], title.clone(), window, cx)
+            })
+            .symbol("checkmark.circle"),
+        ));
+    }
+    items
+}
+
+fn folder_moves(app: &OpenMusic, uri: &str) -> Vec<MenuItem> {
+    let parent = app.playlists.parent_folder(uri);
+    let parent_hash = parent.as_deref().and_then(playlist::folder_hash);
+    let moving = app.playlists.folder(uri);
+    let mut entries = Vec::new();
+    if moving.is_none() {
+        let playlists = vec![uri.to_owned()];
+        entries.push(
+            MenuItem::action("Create folder", move |app, _, _| {
+                app.create_folder(None, playlists.clone(), true)
+            })
+            .symbol("folder.badge.plus"),
+        );
+    }
+    let mut names: Vec<String> = Vec::new();
+    for (depth, folder) in app.playlists.folders() {
+        names.truncate(depth);
+        let parent_name = names.last().cloned();
+        names.push(folder.name.clone());
+        let inside = moving.as_ref().is_some_and(|moving| {
+            folder.start >= moving.start && folder.start < moving.start + moving.length
+        });
+        if inside {
+            continue;
+        }
+        let current = parent_hash == Some(folder.hash.as_str());
+        let (moved, into) = (uri.to_owned(), folder.uri.clone());
+        let mut item = MenuItem::action(folder.name.clone(), move |app, _, _| {
+            app.move_to(&moved, RootPlace::Into(into.clone()))
+        })
+        .symbol("folder")
+        .checked(current)
+        .enabled(!current);
+        if let Some(parent_name) = parent_name {
+            item = item.subtitle(format!("In {parent_name}"));
+        }
+        entries.push(item);
+    }
+    let mut items = Vec::new();
+    if !entries.is_empty() {
+        let title = if parent.is_some() {
+            "Move to folder"
+        } else {
+            "Add to folder"
+        };
+        items.push(
+            MenuItem::submenu(title, entries)
+                .symbol("folder")
+                .search("Find a folder"),
+        );
+    }
+    if parent.is_some() {
+        let moved = uri.to_owned();
+        items.push(
+            MenuItem::action("Remove from folders", move |app, _, _| {
+                app.move_to(&moved, RootPlace::Start)
+            })
+            .symbol("folder.badge.minus"),
+        );
+    }
+    items
+}
+
+fn folder_items(app: &OpenMusic, uri: &str) -> Vec<(Group, MenuItem)> {
+    if app.playlists.folder(uri).is_none() {
+        return Vec::new();
+    }
+    let (rename, delete, create, folder) = (
+        uri.to_owned(),
+        uri.to_owned(),
+        uri.to_owned(),
+        uri.to_owned(),
+    );
+    let mut items = vec![
+        MenuItem::action("Rename", move |app, window, cx| {
+            app.rename_folder(&rename, None, window, cx)
+        })
+        .symbol("pencil"),
+        MenuItem::action("Delete", move |app, window, cx| {
+            app.delete_folder(&delete, window, cx)
+        })
+        .symbol("trash"),
+        MenuItem::Separator,
+        MenuItem::action("Create playlist", move |app, _, _| {
+            app.create_playlist(None, Some(create.clone()), Vec::new(), true)
+        })
+        .symbol("music.note.list"),
+        MenuItem::action("Create folder", move |app, _, _| {
+            app.create_folder(Some(folder.clone()), Vec::new(), true)
+        })
+        .symbol("folder.badge.plus"),
+    ];
+    items.extend(folder_moves(app, uri));
+    items.into_iter().map(|item| (Group::Edit, item)).collect()
+}
+
+fn playlist_items(app: &OpenMusic, uri: &str) -> Vec<(Group, MenuItem)> {
+    let Some(info) = app.playlist_info(uri) else {
         return Vec::new();
     };
-    app.playlist_info(uri)
-        .map(|info| playlist_menu(&info))
-        .unwrap_or_default()
+    let mut items = playlist_menu(&info);
+    if info.saved == Some(true) {
+        items.extend(
+            folder_moves(app, &info.uri)
+                .into_iter()
+                .map(|item| (Group::Edit, item)),
+        );
+    }
+    let source = AddSource {
+        uris: vec![info.uri.clone()],
+        name: Some(info.name.clone()).filter(|name| !name.is_empty()),
+        exclude: Some(info.uri.clone()),
+    };
+    items.push((
+        Group::Edit,
+        add_submenu("Add to other playlist", app, &source),
+    ));
+    items
+}
+
+pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
+    match target {
+        Target::Track(track) => track_items(track, app),
+        Target::Album { uri } | Target::Episode { uri } => {
+            let source = AddSource {
+                uris: vec![uri.clone()],
+                name: source_name(app, std::slice::from_ref(uri)),
+                exclude: None,
+            };
+            vec![(Group::Edit, add_submenu("Add to playlist", app, &source))]
+        }
+        Target::Playlist { uri } => playlist_items(app, uri),
+        Target::Folder { uri } => folder_items(app, uri),
+        Target::Artist { .. } | Target::Show { .. } | Target::User { .. } => Vec::new(),
+    }
 }
 
 pub fn nav_entries(app: &OpenMusic) -> Vec<NavEntry> {
@@ -489,7 +868,10 @@ pub fn row_dimmed(_app: &OpenMusic, _track: &Track, _row: Row, _options: &RowOpt
 
 #[cfg(test)]
 mod tests {
-    use spotify_client::catalog::Capabilities;
+    use spotify_client::{
+        catalog::Capabilities,
+        playlist::{RootEntry, RootPlaylist},
+    };
 
     use super::*;
     use crate::ui::menu::grouped;
@@ -617,6 +999,87 @@ mod tests {
                 "Collaborators"
             ]
         );
+    }
+
+    fn root(uri: &str, name: &str, editable: bool) -> RootEntry {
+        RootEntry::Playlist(RootPlaylist {
+            uri: uri.into(),
+            key: uri.into(),
+            name: name.into(),
+            capabilities: Capabilities {
+                edit_items: editable,
+                ..Capabilities::default()
+            },
+            ..RootPlaylist::default()
+        })
+    }
+
+    fn outline(items: &[MenuItem], depth: usize, lines: &mut Vec<String>) {
+        for item in items {
+            let indent = "  ".repeat(depth);
+            match item {
+                MenuItem::Action { title, checked, .. } => lines.push(format!(
+                    "{indent}{title}{}",
+                    if *checked { " ✓" } else { "" }
+                )),
+                MenuItem::Submenu { title, items, .. } => {
+                    lines.push(format!("{indent}{title} ▸"));
+                    outline(items, depth + 1, lines);
+                }
+                MenuItem::Separator => lines.push(format!("{indent}──")),
+                MenuItem::Note(text) | MenuItem::Header(text) => {
+                    lines.push(format!("{indent}{text}"))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lists_editable_playlists_inside_their_folders() {
+        let list = Rootlist {
+            revision: String::new(),
+            entries: vec![
+                root("spotify:playlist:a", "Mine", true),
+                RootEntry::Start {
+                    hash: "f1".into(),
+                    name: "Trips".into(),
+                },
+                root("spotify:playlist:b", "Editorial", false),
+                root("spotify:playlist:c", "Road", true),
+                RootEntry::End { hash: "f1".into() },
+                RootEntry::Start {
+                    hash: "f2".into(),
+                    name: "Empty".into(),
+                },
+                root("spotify:playlist:d", "Followed", false),
+                RootEntry::End { hash: "f2".into() },
+                root("spotify:playlist:e", "", true),
+            ],
+        };
+        let source = AddSource {
+            uris: vec!["spotify:track:t".into()],
+            name: Some("Song".into()),
+            exclude: Some("spotify:playlist:e".into()),
+        };
+        let checks = HashMap::from([("spotify:playlist:c".to_owned(), true)]);
+        let mut lines = Vec::new();
+        outline(
+            &add_targets(list.tree("someone"), &list, &source, &checks),
+            0,
+            &mut lines,
+        );
+        assert_eq!(lines, ["Mine", "Trips ▸", "  Road ✓"]);
+        let source = AddSource {
+            exclude: None,
+            ..source
+        };
+        let mut lines = Vec::new();
+        outline(
+            &add_targets(list.tree("someone"), &list, &source, &HashMap::new()),
+            0,
+            &mut lines,
+        );
+        assert_eq!(lines, ["Mine", "Trips ▸", "  Road", "Untitled"]);
     }
 
     #[test]

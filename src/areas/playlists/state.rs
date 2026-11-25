@@ -1,24 +1,30 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use gpui::{
-    App, AppContext, ClipboardItem, Context, PromptButton, PromptLevel, SharedString, Window,
+    App, AppContext, ClipboardItem, Context, PromptButton, PromptLevel, SharedString, WeakEntity,
+    Window,
 };
+use gpui_component::WindowExt;
 use spotify_client::{
+    Track,
     catalog::{Capabilities, Collection},
     connect::{self, PlayOptions, Shuffle},
     playlist::{
-        self, Details, ItemPosition, Level, Permissions, RootEntry, RootPlaylist, Rootlist,
+        self, Details, EditTarget, Folder, ItemPosition, Level, Permissions, RootEntry, RootNode,
+        RootPlace, RootPlaylist, Rootlist, TargetKind,
     },
 };
 
 use super::{
-    dialogs::{self, Collaborators, Draft, EditDetails},
+    dialogs::{self, Collaborators, Draft, EditDetails, FolderName, SaveTo},
     image,
-    worker::{Command, Cover, Event, Write},
+    view::{ADD_MENU, AddSource, LibraryDrag, TRACK_ROW, add_menu},
+    worker::{Command, Cover, Event, Ready, Write},
 };
 use crate::{
     app::{OpenMusic, Page},
@@ -33,6 +39,30 @@ use crate::{
 
 const BASE_PREFETCH: usize = 50;
 const BASE_SPACING: u32 = 4;
+const EDITABLE_FRESH: Duration = Duration::from_secs(60);
+const EDITABLE_WAIT: Duration = Duration::from_secs(30);
+const EDITABLE_KEEP: usize = 16;
+
+pub struct Editable {
+    pub at: Instant,
+    pub result: Option<Result<Vec<EditTarget>, String>>,
+}
+
+impl Editable {
+    fn fresh(&self) -> bool {
+        let limit = match self.result {
+            None => EDITABLE_WAIT,
+            Some(_) => EDITABLE_FRESH,
+        };
+        self.at.elapsed() < limit
+    }
+}
+
+pub struct Snapshot {
+    pending: usize,
+    tracks: Vec<Track>,
+    total: usize,
+}
 
 #[derive(Default)]
 pub struct State {
@@ -46,6 +76,11 @@ pub struct State {
     pub base_queue: VecDeque<String>,
     pub base_wait: u32,
     pub edit_after_load: Option<String>,
+    pub editable: HashMap<Vec<String>, Editable>,
+    pub wanted: RefCell<Option<AddSource>>,
+    pub menu_source: Option<AddSource>,
+    pub snapshots: HashMap<String, Snapshot>,
+    pub save_to: Option<WeakEntity<SaveTo>>,
 }
 
 impl State {
@@ -67,7 +102,146 @@ impl State {
                 );
             }
         }
+        if let Some(sheet) = &self.save_to
+            && sheet.upgrade().is_some()
+        {
+            urls.extend(
+                self.editable
+                    .values()
+                    .filter_map(|editable| editable.result.as_ref()?.as_ref().ok())
+                    .flatten()
+                    .filter_map(|target| target.cover.clone()),
+            );
+        }
     }
+
+    pub fn editable_for(&self, uris: &[String]) -> Option<&Result<Vec<EditTarget>, String>> {
+        self.editable.get(uris)?.result.as_ref()
+    }
+
+    pub fn curates(&self, uris: &[String]) -> HashMap<String, bool> {
+        match self.editable_for(uris) {
+            Some(Ok(targets)) => targets
+                .iter()
+                .filter(|target| target.kind != TargetKind::Folder)
+                .map(|target| (target.uri.clone(), target.curates))
+                .collect(),
+            _ => HashMap::new(),
+        }
+    }
+
+    pub fn folder(&self, uri: &str) -> Option<Folder> {
+        fn find(nodes: Vec<RootNode>, hash: &str) -> Option<Folder> {
+            nodes.into_iter().find_map(|node| match node {
+                RootNode::Folder(folder) if folder.hash == hash => Some(folder),
+                RootNode::Folder(folder) => find(folder.children, hash),
+                RootNode::Playlist { .. } => None,
+            })
+        }
+        let hash = playlist::folder_hash(uri)?;
+        find(self.rootlist.as_ref()?.tree(self.user.as_deref()?), hash)
+    }
+
+    pub fn folders(&self) -> Vec<(usize, Folder)> {
+        fn walk(nodes: Vec<RootNode>, depth: usize, out: &mut Vec<(usize, Folder)>) {
+            for node in nodes {
+                if let RootNode::Folder(mut folder) = node {
+                    let children = std::mem::take(&mut folder.children);
+                    out.push((depth, folder));
+                    walk(children, depth + 1, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        if let (Some(list), Some(user)) = (&self.rootlist, &self.user) {
+            walk(list.tree(user), 0, &mut out);
+        }
+        out
+    }
+
+    pub fn parent_folder(&self, uri: &str) -> Option<String> {
+        let hash = self.rootlist.as_ref()?.parent_of(uri)?;
+        Some(playlist::folder_uri(self.user.as_deref()?, &hash))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DuplicateQuestion {
+    pub title: &'static str,
+    pub detail: String,
+    pub answers: Vec<&'static str>,
+    pub cancel: &'static str,
+    pub some: bool,
+}
+
+impl DuplicateQuestion {
+    pub fn new(name: &str, total: usize, duplicates: usize) -> Self {
+        let some = duplicates < total;
+        let (title, detail) = if total == 1 {
+            (
+                "Already added",
+                format!("This is already in your '{name}' playlist."),
+            )
+        } else if some {
+            (
+                "Some already added",
+                format!("Some of these are already in your '{name}' playlist."),
+            )
+        } else {
+            (
+                "Already added",
+                format!("These are already in your '{name}' playlist."),
+            )
+        };
+        let (answers, cancel) = if some {
+            (vec!["Add new ones", "Add all"], "Cancel")
+        } else {
+            (vec!["Add anyway"], "Don't add")
+        };
+        Self {
+            title,
+            detail,
+            answers,
+            cancel,
+            some,
+        }
+    }
+}
+
+fn row_uid(track: &Track) -> Option<&str> {
+    track.uid.as_deref()
+}
+
+pub fn source_name(app: &OpenMusic, uris: &[String]) -> Option<String> {
+    let [uri] = uris else {
+        return None;
+    };
+    if let Some(track) = app
+        .playlists
+        .collection
+        .as_ref()
+        .and_then(|(_, result)| result.as_ref().ok())
+        .and_then(|collection| {
+            if collection.uri == *uri {
+                return Some(collection.name.clone());
+            }
+            collection
+                .tracks
+                .iter()
+                .find(|track| track.uri == *uri)
+                .map(|track| track.title.clone())
+        })
+    {
+        return Some(track);
+    }
+    if let Some(track) = app.track().filter(|track| track.uri == *uri) {
+        return Some(track.title.clone());
+    }
+    app.playlists
+        .rootlist
+        .as_ref()
+        .and_then(|list| list.playlist(uri))
+        .map(|playlist| playlist.name.clone())
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -194,7 +368,27 @@ impl OpenMusic {
                 name,
                 folder,
                 tracks,
+                open: true,
                 edit,
+            },
+            None,
+        );
+    }
+
+    pub fn create_playlist_from(
+        &mut self,
+        sources: Vec<String>,
+        name: Option<String>,
+        folder: Option<String>,
+    ) {
+        let name = name.or_else(|| source_name(self, &sources));
+        self.write(
+            Write::Create {
+                name,
+                folder,
+                tracks: sources,
+                open: false,
+                edit: false,
             },
             None,
         );
@@ -533,22 +727,137 @@ impl OpenMusic {
         self.play_context_from(&uri, &tracks, index, connect::ORIGIN, options, cx);
     }
 
-    pub fn add_to_playlist(&mut self, uri: &str, uris: Vec<String>, position: ItemPosition) {
+    pub fn add_to_playlist(&mut self, uri: &str, sources: Vec<String>, position: ItemPosition) {
         let Some(info) = self.playlist_info(uri) else {
             return;
         };
+        if sources.is_empty() {
+            return;
+        }
+        let known = self
+            .open_playlist(&info.uri)
+            .filter(|collection| collection.next.is_none())
+            .map(|collection| {
+                collection
+                    .tracks
+                    .iter()
+                    .map(|track| track.uri.clone())
+                    .collect()
+            });
+        self.send(Command::PrepareAdd {
+            target: info.uri,
+            name: info.name,
+            sources,
+            position,
+            known,
+        });
+    }
+
+    fn write_add(
+        &mut self,
+        target: String,
+        name: String,
+        uris: Vec<String>,
+        position: ItemPosition,
+    ) {
         if uris.is_empty() {
             return;
         }
-        let done = format!("Added to {}", info.name);
+        self.playlists.editable.clear();
         self.write(
             Write::Add {
-                uri: info.uri,
+                uri: target,
                 uris,
                 position,
             },
-            Some(done),
+            Some(format!("Added to {name}")),
         );
+    }
+
+    fn confirm_duplicates(&mut self, ready: Ready, window: &mut Window, cx: &mut Context<Self>) {
+        let Ready {
+            target,
+            name,
+            uris,
+            duplicates,
+            position,
+        } = ready;
+        let question = DuplicateQuestion::new(&name, uris.len(), duplicates.len());
+        let some = question.some;
+        let mut buttons: Vec<PromptButton> = question
+            .answers
+            .iter()
+            .map(|answer| PromptButton::new(*answer))
+            .collect();
+        buttons.push(PromptButton::cancel(question.cancel));
+        let answer = window.prompt(
+            PromptLevel::Info,
+            question.title,
+            Some(&question.detail),
+            &buttons,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(answer) = answer.await else {
+                return;
+            };
+            let chosen = match (some, answer) {
+                (true, 0) => {
+                    let duplicates: HashSet<&String> = duplicates.iter().collect();
+                    uris.iter()
+                        .filter(|uri| !duplicates.contains(uri))
+                        .cloned()
+                        .collect()
+                }
+                (true, 1) | (false, 0) => uris,
+                _ => return,
+            };
+            let _ = this.update(cx, |app, cx| {
+                app.write_add(target, name, chosen, position);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn snapshot_rows(&mut self, uri: &str) {
+        let Some((_, Ok(collection))) = &self.playlists.collection else {
+            return;
+        };
+        if collection.uri != uri {
+            return;
+        }
+        let (tracks, total) = (collection.tracks.clone(), collection.total);
+        self.playlists
+            .snapshots
+            .entry(uri.to_owned())
+            .or_insert(Snapshot {
+                pending: 0,
+                tracks,
+                total,
+            })
+            .pending += 1;
+    }
+
+    fn settle_rows(&mut self, uri: &str, failed: bool) {
+        if failed {
+            let Some(snapshot) = self.playlists.snapshots.remove(uri) else {
+                return;
+            };
+            if let Some((_, Ok(collection))) = &mut self.playlists.collection
+                && collection.uri == uri
+            {
+                collection.tracks = snapshot.tracks;
+                collection.total = snapshot.total;
+            }
+            return;
+        }
+        if let Some(snapshot) = self.playlists.snapshots.get_mut(uri) {
+            snapshot.pending = snapshot.pending.saturating_sub(1);
+            if snapshot.pending == 0 {
+                self.playlists.snapshots.remove(uri);
+            }
+        }
     }
 
     pub fn remove_from_playlist(&mut self, uri: &str, uids: Vec<String>) {
@@ -558,6 +867,7 @@ impl OpenMusic {
         if uids.is_empty() {
             return;
         }
+        self.snapshot_rows(&info.uri);
         if let Some((_, Ok(collection))) = &mut self.playlists.collection
             && collection.uri == info.uri
         {
@@ -569,6 +879,7 @@ impl OpenMusic {
                 .total
                 .saturating_sub(before - collection.tracks.len());
         }
+        self.playlists.editable.clear();
         let done = format!("Removed from {}.", info.name);
         self.write(
             Write::Remove {
@@ -580,17 +891,309 @@ impl OpenMusic {
     }
 
     pub fn move_in_playlist(&mut self, uri: &str, uids: Vec<String>, position: ItemPosition) {
-        if let Some(uri) = playlist::canonical(uri)
-            && !uids.is_empty()
+        let Some(uri) = playlist::canonical(uri) else {
+            return;
+        };
+        if uids.is_empty() {
+            return;
+        }
+        self.snapshot_rows(&uri);
+        if let Some((_, Ok(collection))) = &mut self.playlists.collection
+            && collection.uri == uri
         {
+            if position == ItemPosition::Bottom && collection.next.is_some() {
+                collection
+                    .tracks
+                    .retain(|track| track.uid.as_ref().is_none_or(|uid| !uids.contains(uid)));
+            } else {
+                playlist::reorder(&mut collection.tracks, row_uid, &uids, &position);
+            }
+        }
+        self.write(
+            Write::Move {
+                uri,
+                uids,
+                position,
+            },
+            None,
+        );
+    }
+
+    pub fn request_editable(&mut self, uris: &[String]) {
+        if uris.is_empty()
+            || self
+                .playlists
+                .editable
+                .get(uris)
+                .is_some_and(Editable::fresh)
+        {
+            return;
+        }
+        if self.playlists.editable.len() >= EDITABLE_KEEP
+            && let Some(oldest) = self
+                .playlists
+                .editable
+                .iter()
+                .min_by_key(|(_, editable)| editable.at)
+                .map(|(key, _)| key.clone())
+        {
+            self.playlists.editable.remove(&oldest);
+        }
+        self.playlists.editable.insert(
+            uris.to_vec(),
+            Editable {
+                at: Instant::now(),
+                result: None,
+            },
+        );
+        self.send(Command::Editable(uris.to_vec()));
+    }
+
+    pub fn open_save_to(
+        &mut self,
+        uris: Vec<String>,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let uris: Vec<String> = uris
+            .into_iter()
+            .filter(|uri| playlist::addable(uri))
+            .collect();
+        if uris.is_empty() {
+            return;
+        }
+        if let Some(stale) = self.playlists.editable.get(&uris)
+            && stale.result.is_some()
+            && !stale.fresh()
+        {
+            self.playlists.editable.remove(&uris);
+        }
+        self.request_editable(&uris);
+        let app = cx.weak_entity();
+        let name = name.or_else(|| source_name(self, &uris));
+        let sheet = cx.new(|cx| SaveTo::new(app, uris, name, window, cx));
+        self.playlists.save_to = Some(sheet.downgrade());
+        dialogs::open_save_to(window, cx, sheet.clone());
+        sheet.update(cx, |sheet, cx| sheet.focus(window, cx));
+    }
+
+    pub fn apply_curations(&mut self, items: Vec<String>, changes: Vec<(String, bool)>) {
+        if items.is_empty() || changes.is_empty() {
+            return;
+        }
+        let name = |uri: &str| -> Option<String> {
+            if uri == playlist::LIKED_SONGS {
+                return Some("Liked Songs".to_owned());
+            }
+            self.playlist_info(uri).map(|info| info.name)
+        };
+        let done = match changes.as_slice() {
+            [(uri, true)] => name(uri).map(|name| format!("Added to {name}.")),
+            [(uri, false)] => name(uri).map(|name| format!("Removed from {name}.")),
+            _ => None,
+        }
+        .unwrap_or_else(|| "Changes saved.".to_owned());
+        self.playlists.editable.clear();
+        self.write(Write::Curate { items, changes }, Some(done));
+    }
+
+    pub fn create_folder(&mut self, parent: Option<String>, playlists: Vec<String>, rename: bool) {
+        self.write(
+            Write::CreateFolder {
+                name: None,
+                parent,
+                playlists,
+                rename,
+            },
+            None,
+        );
+    }
+
+    pub fn rename_folder(
+        &mut self,
+        uri: &str,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = name.or_else(|| self.playlists.folder(uri).map(|folder| folder.name))
+        else {
+            return;
+        };
+        let app = cx.weak_entity();
+        let uri = uri.to_owned();
+        let view = cx.new(|cx| FolderName::new(app, uri, name, window, cx));
+        dialogs::open_folder_name(window, cx, view.clone());
+        view.update(cx, |view, cx| view.focus(window, cx));
+    }
+
+    pub fn save_folder_name(&mut self, uri: String, name: String) {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if name.is_empty() {
+            return;
+        }
+        if let (Some(list), Some(hash)) = (
+            self.playlists.rootlist.as_mut(),
+            playlist::folder_hash(&uri),
+        ) {
+            for entry in &mut list.entries {
+                if let RootEntry::Start {
+                    hash: found,
+                    name: old,
+                } = entry
+                    && found == hash
+                {
+                    *old = name.clone();
+                }
+            }
+        }
+        self.write(Write::RenameFolder { uri, name }, None);
+    }
+
+    pub fn delete_folder(&mut self, uri: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.playlists.folder(uri).is_none() {
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Do you really want to delete this folder and all playlists inside?",
+            None,
+            &[PromptButton::new("Delete"), PromptButton::cancel("Cancel")],
+            cx,
+        );
+        let uri = uri.to_owned();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update(cx, |app, cx| {
+                    app.remove_folder(uri);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn remove_folder(&mut self, uri: String) {
+        if let Page::Folder(open) = &self.page
+            && playlist::folder_hash(open) == playlist::folder_hash(&uri)
+        {
+            self.navigate(Page::Home);
+        }
+        self.write(Write::DeleteFolder { uri }, None);
+    }
+
+    pub fn move_to(&mut self, uri: &str, to: RootPlace) {
+        if playlist::folder_hash(uri).is_some() {
             self.write(
-                Write::Move {
-                    uri,
-                    uids,
-                    position,
+                Write::MoveFolder {
+                    uri: uri.to_owned(),
+                    to,
                 },
                 None,
             );
+        } else if let Some(uri) = playlist::canonical(uri) {
+            self.write(
+                Write::MovePlaylists {
+                    uris: vec![uri],
+                    to,
+                },
+                None,
+            );
+        }
+    }
+
+    pub fn drop_library(&mut self, drag: &LibraryDrag, target: &str, after: bool) {
+        if drag.uri == target {
+            return;
+        }
+        let place = match (playlist::folder_hash(target).is_some(), after) {
+            (true, true) => RootPlace::Into(target.to_owned()),
+            (false, true) => RootPlace::After(target.to_owned()),
+            (_, false) => RootPlace::Before(target.to_owned()),
+        };
+        self.move_to(&drag.uri, place);
+    }
+
+    fn drop_on_rows(&mut self, drag: &RowDrag, at: RowDrop) {
+        let Some((_, Ok(collection))) = &self.playlists.collection else {
+            return;
+        };
+        let uri = collection.uri.clone();
+        if !self
+            .playlist_info(&uri)
+            .is_some_and(|info| info.capabilities.edit_items)
+        {
+            return;
+        }
+        let Some(anchor) = collection
+            .tracks
+            .get(at.row.1)
+            .and_then(|track| track.uid.clone())
+        else {
+            return;
+        };
+        let position = if at.after {
+            ItemPosition::AfterUid(anchor.clone())
+        } else {
+            ItemPosition::BeforeUid(anchor.clone())
+        };
+        let same = drag.source.0 == TRACK_ROW
+            && drag
+                .context
+                .as_deref()
+                .and_then(playlist::canonical)
+                .as_deref()
+                == Some(uri.as_str());
+        if !same {
+            let uris = drag
+                .uris
+                .iter()
+                .filter(|uri| playlist::addable(uri))
+                .cloned()
+                .collect();
+            self.add_to_playlist(&uri, uris, position);
+            return;
+        }
+        let uids: Vec<String> = drag.uids.iter().flatten().cloned().collect();
+        let mut order: Vec<&str> = collection
+            .tracks
+            .iter()
+            .filter_map(|track| track.uid.as_deref())
+            .collect();
+        let before = order.clone();
+        fn same_uid<'a>(uid: &'a &str) -> Option<&'a str> {
+            Some(uid)
+        }
+        if uids.is_empty()
+            || !playlist::reorder(&mut order, same_uid, &uids, &position)
+            || order == before
+        {
+            return;
+        }
+        self.move_in_playlist(&uri, uids, position);
+    }
+
+    fn drop_on_sidebar(&mut self, drag: &RowDrag, index: usize) {
+        let Some(target) = self
+            .library
+            .playlists
+            .get(index)
+            .map(|playlist| playlist.uri.clone())
+        else {
+            return;
+        };
+        let uris: Vec<String> = drag
+            .uris
+            .iter()
+            .filter(|uri| playlist::addable(uri))
+            .cloned()
+            .collect();
+        let editable = self
+            .playlist_info(&target)
+            .is_some_and(|info| info.capabilities.edit_items);
+        if editable && !uris.is_empty() {
+            self.add_to_playlist(&target, uris, ItemPosition::Bottom);
         }
     }
 }
@@ -693,12 +1296,84 @@ pub fn on_event(
                 app.playlists.bases.insert(canonical, level);
             }
         }
-        Event::Created { uri, edit } => {
+        Event::Created {
+            uri,
+            name,
+            open,
+            edit,
+        } => {
             app.refresh_rootlist();
+            if !open {
+                app.show_toast(format!("Added to {name}"), None);
+                return;
+            }
             if edit {
                 app.playlists.edit_after_load = Some(uri.clone());
             }
             app.navigate(Page::Collection(uri));
+        }
+        Event::Editable { uris, result } => {
+            app.playlists.editable.insert(
+                uris.clone(),
+                Editable {
+                    at: Instant::now(),
+                    result: Some(result),
+                },
+            );
+            let newer = app
+                .playlists
+                .wanted
+                .borrow()
+                .as_ref()
+                .is_some_and(|wanted| wanted.uris != uris);
+            if let Some(source) = app.playlists.menu_source.clone()
+                && source.uris == uris
+                && !newer
+            {
+                let items = add_menu(app, &source);
+                app.update_submenu(ADD_MENU, items);
+            }
+        }
+        Event::AddReady(ready) => {
+            if ready.duplicates.is_empty() {
+                app.write_add(ready.target, ready.name, ready.uris, ready.position);
+            } else {
+                app.confirm_duplicates(ready, window, cx);
+            }
+        }
+        Event::Curated {
+            items,
+            changes,
+            done,
+        } => {
+            let open = app
+                .playlists
+                .collection
+                .as_ref()
+                .and_then(|(_, result)| result.as_ref().ok())
+                .map(|collection| collection.uri.clone());
+            if let Some(open) = open
+                && changes.iter().any(|(uri, _)| *uri == open)
+            {
+                app.reload_playlist(&open);
+            }
+            for (uri, curate) in &changes {
+                if uri == playlist::LIKED_SONGS {
+                    for item in &items {
+                        app.saved.known.insert(item.clone(), *curate);
+                    }
+                }
+            }
+            app.playlists.editable.retain(|uris, _| *uris != items);
+            if let Some(done) = done {
+                app.show_toast(done, None);
+            }
+        }
+        Event::FolderCreated { uri, name, rename } => {
+            app.refresh_rootlist();
+            if rename {
+                app.rename_folder(&uri, Some(name), window, cx);
+            }
         }
         Event::Invited { link } => {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
@@ -707,8 +1382,12 @@ pub fn on_event(
         Event::Changed {
             uri,
             rootlist,
+            rows,
             done,
         } => {
+            if rows && let Some(uri) = &uri {
+                app.settle_rows(uri, false);
+            }
             after_write(app, uri, rootlist);
             if let Some(done) = done {
                 app.show_toast(done, None);
@@ -717,12 +1396,16 @@ pub fn on_event(
         Event::Failed {
             uri,
             rootlist,
+            rows,
             message,
         } => {
             if let Some(uri) = &uri
                 && let Some(canonical) = playlist::canonical(uri)
             {
                 app.playlists.bases.remove(&canonical);
+                if rows {
+                    app.settle_rows(&canonical, true);
+                }
             }
             after_write(app, uri, rootlist);
             app.show_toast(message, None);
@@ -754,6 +1437,39 @@ fn item_position(text: &str) -> Option<ItemPosition> {
         Some(("after", uid)) if !uid.is_empty() => Some(ItemPosition::AfterUid(uid.to_owned())),
         _ => None,
     }
+}
+
+fn root_place(text: &str) -> Option<RootPlace> {
+    match text.split_once(':') {
+        None if text == "start" => Some(RootPlace::Start),
+        None if text == "end" => Some(RootPlace::End),
+        Some(("before", uri)) if !uri.is_empty() => Some(RootPlace::Before(uri.to_owned())),
+        Some(("after", uri)) if !uri.is_empty() => Some(RootPlace::After(uri.to_owned())),
+        Some(("into", uri)) if !uri.is_empty() => Some(RootPlace::Into(uri.to_owned())),
+        _ => None,
+    }
+}
+
+pub fn describe_editable(app: &OpenMusic, uris: &[String]) -> String {
+    let mut lines = vec![format!("items={}", uris.join(","))];
+    match app.playlists.editable_for(uris) {
+        None => lines.push("loading".to_owned()),
+        Some(Err(error)) => lines.push(format!("error {error}")),
+        Some(Ok(targets)) => lines.extend(playlist::editable_tree(targets).into_iter().map(
+            |(depth, target)| {
+                format!(
+                    "{}{:?} curates={} pinned={} {} {:?}",
+                    "  ".repeat(depth),
+                    target.kind,
+                    flag(target.curates),
+                    flag(target.pinned),
+                    target.uri,
+                    target.name
+                )
+            },
+        )),
+    }
+    lines.join("\n")
 }
 
 fn flag(value: bool) -> u8 {
@@ -963,6 +1679,93 @@ pub fn debug(
             }
         }
         ("playlist-edit", [uri]) => app.edit_details(uri, window, cx),
+        ("curates", [uri]) => {
+            let uris = vec![(*uri).to_owned()];
+            app.request_editable(&uris);
+            write("curates.txt", describe_editable(app, &uris));
+        }
+        ("save-to", ["dump"]) => {
+            let text = app
+                .playlists
+                .save_to
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .map_or("closed".to_owned(), |sheet| sheet.read(cx).describe(cx));
+            write("save-to.txt", text);
+        }
+        ("save-to", ["toggle", uri]) => {
+            if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade) {
+                sheet.update(cx, |sheet, cx| sheet.toggle(uri, cx));
+            }
+        }
+        ("save-to", ["done"]) => {
+            if let Some(sheet) = app.playlists.save_to.as_ref().and_then(WeakEntity::upgrade) {
+                sheet.update(cx, |sheet, cx| sheet.done(cx));
+                window.close_dialog(cx);
+            }
+        }
+        ("save-to", [uri]) => app.open_save_to(vec![(*uri).to_owned()], None, window, cx),
+        ("folder-create", _) => app.write(
+            Write::CreateFolder {
+                name: Some(rest.to_owned()).filter(|name| !name.is_empty()),
+                parent: None,
+                playlists: Vec::new(),
+                rename: false,
+            },
+            None,
+        ),
+        ("folder-rename", [uri, _, ..]) => app.save_folder_name((*uri).to_owned(), tail(1)),
+        ("folder-edit", [uri]) => app.rename_folder(uri, None, window, cx),
+        ("folder-delete", [uri]) => app.remove_folder((*uri).to_owned()),
+        ("library-move", [uri, place]) => {
+            if let Some(place) = root_place(place) {
+                app.move_to(uri, place);
+            }
+        }
+        ("sidebar-drop", [uri, target, side]) => {
+            let drag = LibraryDrag {
+                uri: (*uri).to_owned(),
+                name: String::new(),
+            };
+            app.drop_library(&drag, target, *side == "after");
+        }
+        ("sidebar-add", [index, uris @ ..]) if !uris.is_empty() => {
+            if let Ok(index) = index.parse() {
+                let drag = RowDrag {
+                    uris: uris.iter().map(|uri| (*uri).to_owned()).collect(),
+                    uids: vec![None; uris.len()],
+                    source: ("debug", 0),
+                    context: None,
+                };
+                let at = RowDrop {
+                    row: (library::view::PLAYLIST_ROW, index),
+                    after: false,
+                };
+                row_dropped(app, &drag, at, window, cx);
+            }
+        }
+        ("playlist-drop", [from, to, side]) => {
+            let (Ok(from), Ok(to)) = (from.parse::<usize>(), to.parse::<usize>()) else {
+                return true;
+            };
+            let Some((loaded, Ok(collection))) = &app.playlists.collection else {
+                return true;
+            };
+            let Some(track) = collection.tracks.get(from) else {
+                return true;
+            };
+            let drag = RowDrag {
+                uris: vec![track.uri.clone()],
+                uids: vec![track.uid.clone()],
+                source: (TRACK_ROW, from),
+                context: Some(loaded.clone()),
+            };
+            let at = RowDrop {
+                row: (TRACK_ROW, to),
+                after: *side == "after",
+            };
+            row_dropped(app, &drag, at, window, cx);
+        }
         ("playlist-members", [uri]) => app.show_collaborators(uri, window, cx),
         ("playlist-shuffle", []) => app.shuffle_collection(cx),
         _ => return false,
@@ -989,6 +1792,10 @@ pub fn state_fragment(app: &OpenMusic) -> String {
 pub fn register_actions(cx: &mut App, handle: &Handle) {
     menus::route(cx, handle, |_: &menus::NewPlaylist, app, _, cx| {
         app.create_playlist(None, None, Vec::new(), true);
+        cx.notify();
+    });
+    menus::route(cx, handle, |_: &menus::NewFolder, app, _, cx| {
+        app.create_folder(None, Vec::new(), true);
         cx.notify();
     });
 }
@@ -1028,16 +1835,25 @@ pub fn on_press(
 }
 
 pub fn row_dropped(
-    _app: &mut OpenMusic,
-    _drag: &RowDrag,
-    _at: RowDrop,
+    app: &mut OpenMusic,
+    drag: &RowDrag,
+    at: RowDrop,
     _window: &mut Window,
     _cx: &mut Context<OpenMusic>,
 ) -> bool {
-    false
+    match at.row.0 {
+        TRACK_ROW => app.drop_on_rows(drag, at),
+        library::view::PLAYLIST_ROW => app.drop_on_sidebar(drag, at.row.1),
+        _ => return false,
+    }
+    true
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if let Some(source) = app.playlists.wanted.take() {
+        app.request_editable(&source.uris);
+        app.playlists.menu_source = Some(source);
+    }
     if app.playlists.sentinel.take()
         && !app.playlists.loading_more
         && let Some((uri, Ok(collection))) = &app.playlists.collection
@@ -1088,6 +1904,48 @@ mod tests {
         assert_eq!(switch("on"), Some(true));
         assert_eq!(switch("off"), Some(false));
         assert_eq!(switch("maybe"), None);
+    }
+
+    #[test]
+    fn asks_about_duplicates_with_the_desktop_wording() {
+        let one = DuplicateQuestion::new("Road", 1, 1);
+        assert_eq!(one.title, "Already added");
+        assert_eq!(one.detail, "This is already in your 'Road' playlist.");
+        assert_eq!(
+            (one.answers, one.cancel, one.some),
+            (vec!["Add anyway"], "Don't add", false)
+        );
+        let all = DuplicateQuestion::new("Road", 3, 3);
+        assert_eq!(all.detail, "These are already in your 'Road' playlist.");
+        assert!(!all.some);
+        let some = DuplicateQuestion::new("Road", 3, 1);
+        assert_eq!(some.title, "Some already added");
+        assert_eq!(
+            some.detail,
+            "Some of these are already in your 'Road' playlist."
+        );
+        assert_eq!(
+            (some.answers, some.cancel, some.some),
+            (vec!["Add new ones", "Add all"], "Cancel", true)
+        );
+    }
+
+    #[test]
+    fn parses_library_places() {
+        assert_eq!(root_place("start"), Some(RootPlace::Start));
+        assert_eq!(root_place("end"), Some(RootPlace::End));
+        assert_eq!(
+            root_place("before:spotify:playlist:x"),
+            Some(RootPlace::Before("spotify:playlist:x".into()))
+        );
+        assert_eq!(
+            root_place("into:spotify:user:someone:folder:00000000000000f1"),
+            Some(RootPlace::Into(
+                "spotify:user:someone:folder:00000000000000f1".into()
+            ))
+        );
+        assert_eq!(root_place("after:"), None);
+        assert_eq!(root_place("middle"), None);
     }
 
     #[test]

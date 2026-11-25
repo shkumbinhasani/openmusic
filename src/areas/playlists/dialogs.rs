@@ -1,16 +1,20 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use gpui::{
-    App, Context, Entity, FontWeight, Hsla, Image, ImageFormat, ObjectFit, PathPromptOptions,
-    SharedString, WeakEntity, Window, div, hsla, img, prelude::*, px, svg,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, Image, ImageFormat, ObjectFit,
+    PathPromptOptions, SharedString, Subscription, WeakEntity, Window, div, hsla, img, prelude::*,
+    px, svg,
 };
 use gpui_component::{
     ActiveTheme, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     dialog::DialogButtonProps,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState, SelectAll},
 };
-use spotify_client::playlist::{Details, Level, Member};
+use spotify_client::playlist::{Details, EditTarget, Level, Member, TargetKind, editable_tree};
 
 use super::{image, worker::Cover};
 use crate::{app::OpenMusic, icons, worker::trusted_image};
@@ -559,4 +563,546 @@ pub fn open_collaborators(
             .bg(cx.theme().popover)
             .child(view.clone())
     });
+}
+
+pub struct FolderName {
+    app: WeakEntity<OpenMusic>,
+    uri: String,
+    name: Entity<InputState>,
+    original: String,
+    error: Option<String>,
+}
+
+impl FolderName {
+    pub fn new(
+        app: WeakEntity<OpenMusic>,
+        uri: String,
+        original: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Folder name")
+                .default_value(original.clone())
+        });
+        Self {
+            app,
+            uri,
+            name,
+            original,
+            error: None,
+        }
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.name.update(cx, |input, cx| input.focus(window, cx));
+        window.dispatch_action(Box::new(SelectAll), cx);
+    }
+
+    pub fn save(&mut self, cx: &mut Context<Self>) -> bool {
+        let name = self.name.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.error = Some("Folder name is required".into());
+            cx.notify();
+            return false;
+        }
+        if name == self.original {
+            return true;
+        }
+        let uri = self.uri.clone();
+        self.app
+            .update(cx, |app, _| app.save_folder_name(uri, name))
+            .is_ok()
+    }
+}
+
+impl Render for FolderName {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (text, muted, danger) = (theme.foreground, theme.muted_foreground, theme.danger);
+        div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .text_color(text)
+            .child(label("Name", muted))
+            .child(Input::new(&self.name))
+            .when_some(self.error.clone(), |body, error| {
+                body.child(div().text_size(px(12.5)).text_color(danger).child(error))
+            })
+    }
+}
+
+pub fn open_folder_name(window: &mut Window, cx: &mut App, view: Entity<FolderName>) {
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let save = view.clone();
+        dialog
+            .title("Rename")
+            .w(px(420.))
+            .bg(cx.theme().popover)
+            .child(view.clone())
+            .button_props(DialogButtonProps::default().ok_text("Save"))
+            .footer(|ok, _, window, cx| vec![ok(window, cx)])
+            .on_ok(move |_, _, cx| save.update(cx, |view, cx| view.save(cx)))
+    });
+}
+
+pub struct SaveTo {
+    app: WeakEntity<OpenMusic>,
+    uris: Vec<String>,
+    name: Option<String>,
+    search: Entity<InputState>,
+    chosen: HashMap<String, bool>,
+    _watch: Vec<Subscription>,
+}
+
+impl SaveTo {
+    pub fn new(
+        app: WeakEntity<OpenMusic>,
+        uris: Vec<String>,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a playlist"));
+        let mut watch = vec![cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })];
+        if let Some(app) = app.upgrade() {
+            watch.push(cx.observe(&app, |_, _, cx| cx.notify()));
+        }
+        Self {
+            app,
+            uris,
+            name,
+            search,
+            chosen: HashMap::new(),
+            _watch: watch,
+        }
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn targets(&self, cx: &App) -> Option<Result<Vec<EditTarget>, String>> {
+        let app = self.app.upgrade()?;
+        app.read(cx).playlists.editable_for(&self.uris).cloned()
+    }
+
+    fn selected(&self, target: &EditTarget) -> bool {
+        self.chosen
+            .get(&target.uri)
+            .copied()
+            .unwrap_or(target.curates)
+    }
+
+    pub fn toggle(&mut self, uri: &str, cx: &mut Context<Self>) {
+        let Some(Ok(targets)) = self.targets(cx) else {
+            return;
+        };
+        let Some(target) = targets
+            .iter()
+            .find(|target| target.uri == uri && target.kind != TargetKind::Folder)
+        else {
+            return;
+        };
+        let next = !self.selected(target);
+        if next == target.curates {
+            self.chosen.remove(uri);
+        } else {
+            self.chosen.insert(uri.to_owned(), next);
+        }
+        cx.notify();
+    }
+
+    pub fn changes(&self, cx: &App) -> Vec<(String, bool)> {
+        match self.targets(cx) {
+            Some(Ok(targets)) => curation_changes(&targets, &self.chosen),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn done(&mut self, cx: &mut Context<Self>) -> bool {
+        let changes = self.changes(cx);
+        if changes.is_empty() {
+            return true;
+        }
+        let items = self.uris.clone();
+        self.app
+            .update(cx, |app, cx| {
+                app.apply_curations(items, changes);
+                cx.notify();
+            })
+            .is_ok()
+    }
+
+    fn new_playlist(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.done(cx);
+        let (sources, name) = (self.uris.clone(), self.name.clone());
+        let _ = self.app.update(cx, |app, cx| {
+            app.create_playlist_from(sources, name, None);
+            cx.notify();
+        });
+        window.close_dialog(cx);
+    }
+
+    pub fn describe(&self, cx: &App) -> String {
+        let mut lines = vec![format!(
+            "items={} name={:?} search={:?}",
+            self.uris.join(","),
+            self.name,
+            self.search.read(cx).value().to_string()
+        )];
+        match self.targets(cx) {
+            None => lines.push("loading".into()),
+            Some(Err(error)) => lines.push(format!("error {error}")),
+            Some(Ok(targets)) => {
+                for (depth, target) in editable_tree(&targets) {
+                    let mark = match target.kind {
+                        TargetKind::Folder => "folder".to_owned(),
+                        _ => format!(
+                            "{} was={}",
+                            if self.selected(target) { "[x]" } else { "[ ]" },
+                            u8::from(target.curates)
+                        ),
+                    };
+                    lines.push(format!(
+                        "{}{} {} {:?}",
+                        "  ".repeat(depth),
+                        mark,
+                        target.uri,
+                        target.name
+                    ));
+                }
+            }
+        }
+        lines.push(format!("changes={:?}", self.changes(cx)));
+        lines.join("\n")
+    }
+
+    fn row(
+        &self,
+        index: usize,
+        depth: usize,
+        target: &EditTarget,
+        picture: Option<Arc<Image>>,
+        colors: Colors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let folder = target.kind == TargetKind::Folder;
+        let checked = !folder && self.selected(target);
+        let uri = target.uri.clone();
+        let fallback = match target.kind {
+            TargetKind::Folder => icons::FOLDER,
+            TargetKind::LikedSongs => icons::HEART_FILL,
+            _ => icons::NOTE,
+        };
+        let tile = div()
+            .size(px(32.))
+            .flex_shrink_0()
+            .rounded(px(4.))
+            .overflow_hidden()
+            .bg(colors.tile)
+            .flex()
+            .items_center()
+            .justify_center()
+            .map(|tile| match picture {
+                Some(image) => tile.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                None => tile.child(svg().path(fallback).size(px(15.)).text_color(colors.muted)),
+            });
+        let mark = div()
+            .size(px(20.))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .map(|mark| {
+                if checked {
+                    mark.bg(colors.primary).child(
+                        svg()
+                            .path(icons::CHECK)
+                            .size(px(12.))
+                            .text_color(hsla(0., 0., 1., 1.)),
+                    )
+                } else {
+                    mark.border_1().border_color(colors.muted)
+                }
+            });
+        div()
+            .id(("save-to", index))
+            .h(px(44.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_3()
+            .pl(px(8. + 18. * depth as f32))
+            .pr_2()
+            .rounded(px(6.))
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.5))
+                    .font_weight(if folder {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .child(target.name.clone()),
+            )
+            .when(!folder, |row| {
+                row.cursor_pointer()
+                    .hover(move |row| row.bg(colors.hover))
+                    .child(mark)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(&uri, cx)))
+            })
+    }
+}
+
+pub fn curation_changes(
+    targets: &[EditTarget],
+    chosen: &HashMap<String, bool>,
+) -> Vec<(String, bool)> {
+    let mut seen = HashSet::new();
+    targets
+        .iter()
+        .filter(|target| target.kind != TargetKind::Folder && seen.insert(&target.uri))
+        .filter_map(|target| {
+            let wanted = chosen.get(&target.uri).copied().unwrap_or(target.curates);
+            (wanted != target.curates).then(|| (target.uri.clone(), wanted))
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+struct Colors {
+    muted: Hsla,
+    tile: Hsla,
+    primary: Hsla,
+    hover: Hsla,
+}
+
+fn header(text: &'static str, color: Hsla) -> impl IntoElement {
+    div()
+        .pt_2()
+        .pb_1()
+        .px_2()
+        .text_size(px(12.))
+        .font_weight(FontWeight::BOLD)
+        .text_color(color)
+        .child(text)
+}
+
+impl Render for SaveTo {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (text, border, danger) = (theme.foreground, theme.border, theme.danger);
+        let colors = Colors {
+            muted: theme.muted_foreground,
+            tile: theme.muted,
+            primary: theme.primary,
+            hover: theme.list_hover,
+        };
+        let filter = self.search.read(cx).value().trim().to_lowercase();
+        let pictures: HashMap<String, Arc<Image>> = self
+            .app
+            .upgrade()
+            .map(|app| {
+                let app = app.read(cx);
+                app.playlists
+                    .editable_for(&self.uris)
+                    .and_then(|result| result.as_ref().ok())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|target| {
+                        let url = target.cover.as_deref().filter(|url| trusted_image(url))?;
+                        Some((target.uri.clone(), app.covers.get(url)?.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let list = div()
+            .id("save-to-list")
+            .max_h(px(340.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col();
+        let list = match self.targets(cx) {
+            None => list.child(
+                div()
+                    .p_2()
+                    .text_size(px(13.))
+                    .text_color(colors.muted)
+                    .child("Loading playlists…"),
+            ),
+            Some(Err(error)) => list.child(
+                div()
+                    .p_2()
+                    .text_size(px(13.))
+                    .text_color(danger)
+                    .child(error),
+            ),
+            Some(Ok(targets)) => {
+                let tree = editable_tree(&targets);
+                let mut rows: Vec<AnyElement> = Vec::new();
+                let mut index = 0;
+                let mut push = |rows: &mut Vec<AnyElement>,
+                                depth: usize,
+                                target: &EditTarget,
+                                this: &Self,
+                                cx: &mut Context<Self>| {
+                    let picture = pictures.get(&target.uri).cloned();
+                    rows.push(
+                        this.row(index, depth, target, picture, colors, cx)
+                            .into_any_element(),
+                    );
+                    index += 1;
+                };
+                if filter.is_empty() {
+                    let saved: Vec<&EditTarget> = tree
+                        .iter()
+                        .map(|(_, target)| *target)
+                        .filter(|target| target.kind != TargetKind::Folder && target.curates)
+                        .collect();
+                    if !saved.is_empty() {
+                        rows.push(header("Saved in", colors.muted).into_any_element());
+                        for target in &saved {
+                            push(&mut rows, 0, target, self, cx);
+                        }
+                        rows.push(div().my_1().h(px(1.)).bg(border).into_any_element());
+                    }
+                    for (depth, target) in &tree {
+                        if target.kind != TargetKind::Folder && target.curates {
+                            continue;
+                        }
+                        push(&mut rows, *depth, target, self, cx);
+                    }
+                } else {
+                    for (_, target) in &tree {
+                        if target.kind != TargetKind::Folder
+                            && target.name.to_lowercase().contains(&filter)
+                        {
+                            push(&mut rows, 0, target, self, cx);
+                        }
+                    }
+                    if index == 0 {
+                        rows.push(
+                            div()
+                                .p_2()
+                                .text_size(px(13.))
+                                .text_color(colors.muted)
+                                .child(format!("Couldn’t find “{filter}”"))
+                                .into_any_element(),
+                        );
+                    }
+                }
+                list.children(rows)
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .text_color(text)
+            .child(Input::new(&self.search))
+            .child(
+                div()
+                    .id("save-to-new")
+                    .h(px(44.))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_2()
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(colors.hover))
+                    .child(
+                        div()
+                            .size(px(32.))
+                            .rounded(px(4.))
+                            .bg(colors.tile)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(svg().path(icons::PLUS).size(px(15.)).text_color(text)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("New playlist"),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.new_playlist(window, cx))),
+            )
+            .child(list)
+    }
+}
+
+pub fn open_save_to(window: &mut Window, cx: &mut App, sheet: Entity<SaveTo>) {
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let done = sheet.clone();
+        dialog
+            .title("Add to playlist")
+            .w(px(420.))
+            .bg(cx.theme().popover)
+            .child(sheet.clone())
+            .button_props(
+                DialogButtonProps::default()
+                    .ok_text("Done")
+                    .cancel_text("Cancel"),
+            )
+            .footer(|ok, cancel, window, cx| vec![cancel(window, cx), ok(window, cx)])
+            .on_ok(move |_, _, cx| done.update(cx, |sheet, cx| sheet.done(cx)))
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use spotify_client::playlist::LIKED_SONGS;
+
+    use super::*;
+
+    fn target(uri: &str, kind: TargetKind, curates: bool) -> EditTarget {
+        EditTarget {
+            uri: uri.into(),
+            name: uri.into(),
+            kind,
+            curates,
+            pinned: false,
+            cover: None,
+            folder: None,
+        }
+    }
+
+    #[test]
+    fn sends_only_what_the_sheet_changed() {
+        let targets = vec![
+            target(LIKED_SONGS, TargetKind::LikedSongs, true),
+            target("spotify:user:someone:folder:f", TargetKind::Folder, false),
+            target("spotify:playlist:a", TargetKind::Playlist, false),
+            target("spotify:playlist:b", TargetKind::Playlist, true),
+            target("spotify:playlist:a", TargetKind::Playlist, false),
+        ];
+        assert!(curation_changes(&targets, &HashMap::new()).is_empty());
+        let chosen = HashMap::from([
+            (LIKED_SONGS.to_owned(), false),
+            ("spotify:playlist:a".to_owned(), true),
+            ("spotify:playlist:b".to_owned(), true),
+            ("spotify:user:someone:folder:f".to_owned(), true),
+        ]);
+        assert_eq!(
+            curation_changes(&targets, &chosen),
+            [
+                (LIKED_SONGS.to_owned(), false),
+                ("spotify:playlist:a".to_owned(), true)
+            ]
+        );
+    }
 }
