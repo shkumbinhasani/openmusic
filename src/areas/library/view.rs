@@ -158,15 +158,6 @@ impl OpenMusic {
 }
 
 impl OpenMusic {
-    pub fn recent_page(
-        &self,
-        _card_side: Pixels,
-        palette: Palette,
-        _cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.page_status("Coming soon", palette).into_any_element()
-    }
-
     pub fn folder_page(
         &self,
         uri: &str,

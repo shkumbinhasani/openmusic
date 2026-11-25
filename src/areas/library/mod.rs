@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod liked;
+pub mod recent;
 pub mod saves;
 mod shelf;
 mod sidebar;

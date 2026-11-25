@@ -1,5 +1,6 @@
 mod liked;
 mod page;
+mod recents;
 mod rootlist;
 
 use anyhow::{Result, bail};
@@ -20,6 +21,14 @@ pub use page::{
     LibraryError, LibraryItem, LibraryPage, LibraryQuery, PAGE_SIZE, PLAYLISTS, RECENTLY_ADDED,
     RECENTS, YOUR_EPISODES, count_label, fallback_page, folder_detail, iso_ms, now_ms, page,
     parse_page, variables, wants_fallback,
+};
+pub use recents::{
+    Activity, Content, DAY_MS, FETCH_ENTITIES_FOR_RECENTLY_PLAYED, PlayedContext,
+    RECENTLY_PLAYED_LIMIT, RECENTS_LIST, RECENTS_PAGE, RECENTS_PAGE_SIZE, RecentDay, RecentEntry,
+    RecentGroup, RecentKind, RecentsPage, context_uri, day_label, day_of, decorate, decorated,
+    fallback_recents, group_count, is_your_episodes, lookup_entry, merge_played, parse_played,
+    parse_recents, recent_contexts, recent_days, recently_played, recently_played_path, recents,
+    recents_variables,
 };
 pub use rootlist::{
     ROOT_HASH, RootEntry, RootFolder, RootItem, RootNode, RootPage, Rootlist, decode_name,

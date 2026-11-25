@@ -21,6 +21,7 @@ pub use super::shelf::Shelf;
 use super::{
     cache,
     liked::{Column, FIND_KEY, Liked, LikedSort, PLAY_KEY},
+    recent::{Played, Recents},
     saves::{self, FOLLOW_KEY, LIKE_CURRENT_KEY, SAVE_KEY, header_uri},
     shelf::Grid,
     view::LIBRARY_ROW,
@@ -87,6 +88,8 @@ pub struct State {
     pub resync: bool,
     pub liked: Liked,
     pub grid: Grid,
+    pub recent: Recents,
+    pub played: Played,
 }
 
 #[derive(Default)]
@@ -168,6 +171,7 @@ pub(super) fn apply_pins(library: &mut State) {
 impl State {
     pub fn covers(&self, urls: &mut HashSet<String>) {
         self.liked.covers(urls);
+        self.recent.covers(urls);
         let folder = self.folder.iter().flat_map(|folder| &folder.items);
         urls.extend(
             self.items
@@ -516,6 +520,9 @@ pub fn load(app: &mut OpenMusic, page: &Page) {
     if let Page::Library(shelf) = page {
         app.show_shelf(*shelf);
     }
+    if *page == Page::Recent && app.library.recent.wants_reload() && !app.library.recent.loading {
+        app.load_recents();
+    }
     if let Page::Folder(uri) = page {
         let loaded = app
             .library
@@ -633,6 +640,13 @@ pub fn on_event(
             offset,
             result,
         } => app.on_grid(request, query, offset, result),
+        Event::Recents {
+            request,
+            offset,
+            result,
+        } => app.on_recents(request, offset, result),
+        Event::Played { request, result } => app.on_played(request, result),
+        Event::PlayedContext { uri, entry } => app.on_played_context(uri, entry),
     }
 }
 
@@ -657,6 +671,7 @@ pub fn connected(app: &mut OpenMusic, window: &mut Window, cx: &mut Context<Open
     }
     app.send(Command::Playlists);
     app.reload_library();
+    app.load_played();
 }
 
 pub fn signed_out(app: &mut OpenMusic) {
@@ -812,6 +827,79 @@ fn dump_liked(app: &OpenMusic, directory: &Path) {
     let _ = std::fs::write(directory.join("liked.txt"), lines.join("\n"));
 }
 
+fn dump_recent(app: &OpenMusic, directory: &Path) {
+    let recent = &app.library.recent;
+    let mut lines = vec![format!(
+        "loaded={} loading={} fallback={} stale={} total={} entries={} next={:?} days={} expanded={} error={:?}",
+        recent.loaded,
+        recent.loading,
+        recent.fallback,
+        recent.stale,
+        recent.total,
+        recent.entries.len(),
+        recent.next_offset,
+        recent.days.len(),
+        recent.expanded.len(),
+        recent.error
+    )];
+    let now = crate::ui::tracks::now_ms();
+    for day in &recent.days {
+        lines.push(format!(
+            "# {}",
+            spotify_client::library::day_label(day.day, now)
+        ));
+        for group in &day.groups {
+            let (added, subtitle) = group.subtitle();
+            lines.push(format!(
+                "  {} {:?} {} | {} | {}{} children={}",
+                group.key(day.day),
+                group.item.kind,
+                group.item.uri,
+                group.title(),
+                if added { "+ " } else { "" },
+                subtitle,
+                group.children.len()
+            ));
+            for child in &group.children {
+                lines.push(format!(
+                    "    {:?} {} | {} | {}",
+                    child.kind,
+                    child.uri,
+                    child.name,
+                    child.subtitle().1
+                ));
+            }
+        }
+    }
+    let _ = std::fs::write(directory.join("recent.txt"), lines.join("\n"));
+}
+
+fn dump_recents(app: &OpenMusic, directory: &Path) {
+    let played = &app.library.played;
+    let mut lines = vec![format!(
+        "played remote={} local={} merged={} loading={} context={:?} error={:?}",
+        played.remote.len(),
+        played.local.len(),
+        played.entries.len(),
+        played.loading,
+        played.context,
+        played.error
+    )];
+    lines.extend(
+        app.recent_contexts()
+            .iter()
+            .map(|recent| format!("{} | {}", recent.uri, recent.name)),
+    );
+    lines.push("--".into());
+    lines.extend(played.entries.iter().map(|entry| {
+        format!(
+            "{:?} {} | {} | played_at={:?}",
+            entry.kind, entry.uri, entry.name, entry.played_at
+        )
+    }));
+    let _ = std::fs::write(directory.join("recents.txt"), lines.join("\n"));
+}
+
 fn dump_rootlist(app: &OpenMusic, directory: &Path) {
     use spotify_client::library::RootNode;
     fn outline(nodes: &[RootNode], depth: usize, lines: &mut Vec<String>) {
@@ -948,6 +1036,29 @@ pub fn debug(
             }
             dump_shelf(app, directory);
         }
+        "recent" => {
+            let (action, argument) = rest.split_once(' ').unwrap_or((rest, ""));
+            let argument = argument.trim();
+            match action {
+                "" | "dump" => {}
+                "reload" => app.load_recents(),
+                "more" => app.more_recents(),
+                "expand" | "collapse" => {
+                    let open = app.library.recent.expanded.contains(argument);
+                    if open == (action == "collapse") && !argument.is_empty() {
+                        app.toggle_recent_group(argument);
+                    }
+                }
+                _ => return false,
+            }
+            dump_recent(app, directory);
+        }
+        "recents" => {
+            if rest.trim() == "reload" {
+                app.load_played();
+            }
+            dump_recents(app, directory);
+        }
         "liked" => {
             let mut words = rest.split_whitespace();
             match (words.next(), words.next(), words.next()) {
@@ -975,7 +1086,7 @@ pub fn debug(
 pub fn state_fragment(app: &OpenMusic) -> String {
     let library = &app.library;
     format!(
-        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={} shelf={}/{}",
+        "library={}/{} filters={:?} sort={:?} text={:?} fallback={} library_loading={} rootlist={} folders_open={} pins_pending={} recents={} saved_asked={} resync={} liked={}/{} liked_sort={} shelf={}/{} recent={}/{} recent_fallback={} played={}",
         library.items.len(),
         library.page.as_ref().map_or(0, |page| page.total),
         library.query.filters.join("/"),
@@ -1000,7 +1111,11 @@ pub fn state_fragment(app: &OpenMusic) -> String {
         library.liked.total,
         library.liked.sort.column.slug(),
         library.grid.items.len(),
-        library.grid.page.as_ref().map_or(0, |page| page.total)
+        library.grid.page.as_ref().map_or(0, |page| page.total),
+        library.recent.entries.len(),
+        library.recent.total,
+        library.recent.fallback,
+        library.played.entries.len()
     )
 }
 
@@ -1041,6 +1156,10 @@ pub fn register_actions(cx: &mut App, handle: &Handle) {
     });
     menus::route(cx, handle, |_: &menus::GoToLikedSongs, app, _, cx| {
         app.navigate(Page::Liked);
+        cx.notify();
+    });
+    menus::route(cx, handle, |_: &menus::GoToRecents, app, _, cx| {
+        app.navigate(Page::Recent);
         cx.notify();
     });
 }
@@ -1111,7 +1230,7 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
-    if saves::tick(app) | app.tick_liked() {
+    if saves::tick(app) | app.tick_liked() | app.tick_recent() {
         cx.notify();
     }
     if app.library.sentinel.take() {

@@ -2,7 +2,10 @@ use spotify_client::{
     Api,
     catalog::Playlist,
     dealer::Message,
-    library::{self, LibraryError, LibraryPage, LibraryQuery, LikedPage, PinResult, Rootlist},
+    library::{
+        self, LibraryError, LibraryPage, LibraryQuery, LikedPage, PinResult, PlayedContext,
+        RecentEntry, RecentsPage, Rootlist,
+    },
 };
 
 use super::{cache, state::LibraryPrefs};
@@ -33,6 +36,17 @@ pub enum Command {
         query: LibraryQuery,
         offset: u32,
         request: u64,
+    },
+    Recents {
+        offset: u32,
+        request: u64,
+    },
+    Played {
+        request: u64,
+    },
+    PlayedContext {
+        uri: String,
+        at: i64,
     },
 }
 
@@ -67,6 +81,19 @@ pub enum Event {
         offset: u32,
         result: Result<LibraryPage, String>,
     },
+    Recents {
+        request: u64,
+        offset: u32,
+        result: Result<RecentsPage, String>,
+    },
+    Played {
+        request: u64,
+        result: Result<Vec<RecentEntry>, String>,
+    },
+    PlayedContext {
+        uri: String,
+        entry: Option<RecentEntry>,
+    },
 }
 
 impl Event {
@@ -91,6 +118,13 @@ impl Event {
                 .tracks
                 .iter()
                 .filter_map(|track| track.cover.clone())
+                .collect(),
+            Self::Recents {
+                result: Ok(page), ..
+            } => page
+                .entries
+                .iter()
+                .filter_map(|entry| entry.image.clone())
                 .collect(),
             _ => Vec::new(),
         }
@@ -154,7 +188,53 @@ pub fn handle(command: Command, ctx: &mut Ctx) {
         } => ctx
             .tasks
             .spawn_keyed("library-grid", grid(api, user, query, offset, request)),
+        Command::Recents { offset, request } => ctx
+            .tasks
+            .spawn_keyed("library-recents", recents(api, user, offset, request)),
+        Command::Played { request } => ctx.tasks.spawn_keyed("library-played", async move {
+            let result = match user.name(&api).await {
+                Ok(name) => library::recently_played(&api, &name)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            Event::Played { request, result }.into()
+        }),
+        Command::PlayedContext { uri, at } => {
+            ctx.tasks.spawn_keyed("library-played-context", async move {
+                let context = PlayedContext {
+                    uri: library::context_uri(&uri),
+                    played_at: at,
+                };
+                let entry = library::decorate(&api, &[context])
+                    .await
+                    .ok()
+                    .and_then(|entries| entries.into_iter().next());
+                Event::PlayedContext { uri, entry }.into()
+            })
+        }
     }
+}
+
+async fn recents(api: Api, user: User, offset: u32, request: u64) -> worker::Event {
+    let result = match library::recents(&api, offset, library::RECENTS_PAGE_SIZE).await {
+        Err(error) if offset == 0 && library::wants_fallback(&error) => {
+            match user.name(&api).await {
+                Ok(name) => library::recently_played(&api, &name)
+                    .await
+                    .map(library::fallback_recents)
+                    .map_err(|_| error),
+                Err(_) => Err(error),
+            }
+        }
+        result => result,
+    };
+    Event::Recents {
+        request,
+        offset,
+        result: result.map_err(|error| error.to_string()),
+    }
+    .into()
 }
 
 pub fn on_push(_message: &Message, _ctx: &mut Ctx) {}
