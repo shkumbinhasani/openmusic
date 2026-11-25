@@ -867,6 +867,11 @@ mod native {
         with_mini(|mini| {
             apply(mini, state, cover);
             keep_on_screen(&mini.panel);
+            let pointer = NSEvent::mouseLocation();
+            mini.hover = intersects(
+                mini.panel.frame(),
+                NSRect::new(pointer, NSSize::new(1., 1.)),
+            );
             layout(mini);
             set_progress(mini, position_ms);
             mini.panel.orderFrontRegardless();
