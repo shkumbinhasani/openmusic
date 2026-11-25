@@ -166,7 +166,9 @@ impl OpenMusic {
                         });
                     });
                     window.refresh();
+                    debug::redraw(window);
                 });
+                debug::redraw(window);
             }
             "home" => self.navigate(Page::Home),
             "lyrics" => self.show_lyrics(true),

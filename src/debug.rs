@@ -203,6 +203,26 @@ pub fn capture(_: PathBuf, done: impl FnOnce(Result<(), String>) + Send + 'stati
     done(Err("Capture is only available on macOS.".into()));
 }
 
+#[cfg(target_os = "macos")]
+pub fn redraw(window: &gpui::Window) {
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    if let Some(layer) = view.layer() {
+        layer.setNeedsDisplay();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn redraw(_: &gpui::Window) {}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
