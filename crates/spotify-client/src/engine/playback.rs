@@ -768,6 +768,7 @@ impl Engine {
                     self.report(source).await;
                 }
                 self.prepare_next().await;
+                self.crossfade_due().await;
             }
             PlayerEvent::Advanced { from, to } => self.joined(from, to).await,
             PlayerEvent::Ended { generation } => {
@@ -801,7 +802,10 @@ impl Engine {
         } else {
             "skip"
         };
-        match self.take_prepared(transition, how).await {
+        match self
+            .take_prepared(transition, how, transition == "advance")
+            .await
+        {
             Taken::Joined(generation) => self.player.promote(generation),
             Taken::Superseded => {}
             Taken::Missing => self.advance_cold(transition).await,

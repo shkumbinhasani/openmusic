@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -55,10 +55,28 @@ pub(super) fn preparable(machine: &Value, target: &Target) -> bool {
 
 pub(super) fn join_for(
     settings: &AudioSettings,
-    _from: (&str, u32),
-    _to: (&str, u32),
+    from: (&str, u32),
+    to: (&str, u32),
 ) -> Option<Join> {
+    let music = |uri: &str| uri.starts_with("spotify:track:");
+    let overlap = settings.crossfade_ms;
+    if settings.crossfade && overlap == 0 {
+        return Some(Join::Gapless);
+    }
+    let shortest = overlap.saturating_mul(2).saturating_add(1000);
+    if settings.crossfade && music(from.0) && music(to.0) && from.1 >= shortest && to.1 >= shortest
+    {
+        return Some(Join::Crossfade);
+    }
     settings.gapless.then_some(Join::Gapless)
+}
+
+pub(super) fn crossfade_length(overlap_ms: u32, remaining_ms: u32) -> Option<u32> {
+    (overlap_ms > 0
+        && remaining_ms > 0
+        && remaining_ms <= overlap_ms
+        && remaining_ms >= overlap_ms / 2)
+        .then_some(remaining_ms)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,10 +163,6 @@ pub(super) enum Taken {
     Superseded,
 }
 
-fn is_finished(transition: &str) -> bool {
-    transition == "advance"
-}
-
 impl Engine {
     pub(super) fn discard_prepared(&mut self) {
         if let Some(prepared) = self.audio.joins.prepared.take() {
@@ -195,11 +209,18 @@ impl Engine {
             || playing.paused
             || joins.tried == Some(playing.generation)
             || joins.fading()
+            || self.player.snapshot().ramp.is_some()
             || playing.duration_ms == 0
         {
             return;
         }
-        let lead = PREPARE_LEAD_MS + self.audio.settings.crossfade_ms;
+        let settings = &self.audio.settings;
+        let lead = PREPARE_LEAD_MS
+            + if settings.crossfade {
+                settings.crossfade_ms
+            } else {
+                0
+            };
         if playing.duration_ms.saturating_sub(playing.position_ms) > lead {
             return;
         }
@@ -276,7 +297,12 @@ impl Engine {
             .filter(|target| prepared.matches(target))
     }
 
-    pub(super) async fn take_prepared(&mut self, transition: &str, how: &str) -> Taken {
+    pub(super) async fn take_prepared(
+        &mut self,
+        transition: &str,
+        how: &str,
+        finished: bool,
+    ) -> Taken {
         let Some(old) = self.playing.as_ref().map(|playing| playing.generation) else {
             return Taken::Missing;
         };
@@ -287,9 +313,7 @@ impl Engine {
             self.discard_prepared();
             return Taken::Missing;
         }
-        if is_finished(transition)
-            && let Some(playing) = self.playing.as_mut()
-        {
+        if finished && let Some(playing) = self.playing.as_mut() {
             playing.position_ms = playing.duration_ms.max(playing.position_ms);
         }
         self.report("track_data_finalized").await;
@@ -340,12 +364,38 @@ impl Engine {
             .as_ref()
             .is_some_and(|prepared| prepared.generation == to);
         if expected {
-            match self.take_prepared("advance", Join::Gapless.name()).await {
+            match self
+                .take_prepared("advance", Join::Gapless.name(), true)
+                .await
+            {
                 Taken::Joined(_) | Taken::Superseded => return,
                 Taken::Missing => {}
             }
         }
         self.advance_cold("advance").await;
+    }
+
+    pub(super) async fn crossfade_due(&mut self) {
+        let (Some(playing), Some(prepared)) =
+            (self.playing.as_ref(), self.audio.joins.prepared.as_ref())
+        else {
+            return;
+        };
+        if prepared.join != Join::Crossfade || !prepared.ready || playing.paused {
+            return;
+        }
+        let remaining = playing.duration_ms.saturating_sub(playing.position_ms);
+        let Some(length) = crossfade_length(self.audio.settings.crossfade_ms, remaining)
+            .filter(|_| playing.duration_ms > 0)
+        else {
+            return;
+        };
+        let how = format!("crossfade {length}ms");
+        if let Taken::Joined(generation) = self.take_prepared("advance", &how, false).await {
+            self.player.crossfade(generation, length);
+            self.audio.joins.fading_until =
+                Some(Instant::now() + Duration::from_millis(u64::from(length)));
+        }
     }
 }
 
@@ -480,19 +530,61 @@ mod tests {
     }
 
     #[test]
-    fn joins_gaplessly_when_the_setting_is_on() {
-        let on = AudioSettings::default();
-        let off = AudioSettings {
+    fn picks_the_join_from_the_settings_and_the_items() {
+        let gapless = AudioSettings::default();
+        let neither = AudioSettings {
             gapless: false,
             ..AudioSettings::default()
         };
-        let from = ("spotify:track:a", 200_000);
-        let to = ("spotify:track:b", 180_000);
-        assert_eq!(join_for(&on, from, to), Some(Join::Gapless));
-        assert_eq!(join_for(&off, from, to), None);
+        let fade = AudioSettings {
+            gapless: true,
+            crossfade: true,
+            crossfade_ms: 6000,
+            ..AudioSettings::default()
+        };
+        let fade_only = AudioSettings {
+            gapless: false,
+            ..fade
+        };
+        let song = ("spotify:track:a", 200_000);
+        let next = ("spotify:track:b", 180_000);
+        let short = ("spotify:track:c", 12_999);
+        let episode = ("spotify:episode:d", 3_600_000);
+
+        assert_eq!(join_for(&gapless, song, next), Some(Join::Gapless));
+        assert_eq!(join_for(&neither, song, next), None);
+        assert_eq!(join_for(&gapless, episode, next), Some(Join::Gapless));
+
+        assert_eq!(join_for(&fade, song, next), Some(Join::Crossfade));
         assert_eq!(
-            join_for(&on, ("spotify:episode:c", 3_600_000), to),
-            Some(Join::Gapless)
+            join_for(&fade, song, ("spotify:track:c", 13_000)),
+            Some(Join::Crossfade)
         );
+        assert_eq!(join_for(&fade, song, short), Some(Join::Gapless));
+        assert_eq!(join_for(&fade, short, next), Some(Join::Gapless));
+        assert_eq!(join_for(&fade, episode, next), Some(Join::Gapless));
+        assert_eq!(join_for(&fade, song, episode), Some(Join::Gapless));
+        assert_eq!(join_for(&fade_only, song, next), Some(Join::Crossfade));
+        assert_eq!(join_for(&fade_only, song, episode), None);
+        assert_eq!(join_for(&fade_only, short, next), None);
+
+        let no_overlap = AudioSettings {
+            crossfade_ms: 0,
+            ..fade_only
+        };
+        assert_eq!(join_for(&no_overlap, song, next), Some(Join::Gapless));
+        assert_eq!(join_for(&no_overlap, episode, next), Some(Join::Gapless));
+    }
+
+    #[test]
+    fn starts_the_fade_inside_the_window_only() {
+        assert_eq!(crossfade_length(6000, 7000), None);
+        assert_eq!(crossfade_length(6000, 6000), Some(6000));
+        assert_eq!(crossfade_length(6000, 5800), Some(5800));
+        assert_eq!(crossfade_length(6000, 3000), Some(3000));
+        assert_eq!(crossfade_length(6000, 2999), None);
+        assert_eq!(crossfade_length(6000, 0), None);
+        assert_eq!(crossfade_length(0, 0), None);
+        assert_eq!(crossfade_length(0, 100), None);
     }
 }
