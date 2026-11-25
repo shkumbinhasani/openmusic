@@ -365,6 +365,7 @@ async fn connected(
     let _ = events.send(Event::Connected);
 
     let mut dealer_seen = false;
+    let mut shown: Option<NowPlaying> = None;
     let mut debug_tasks = JoinSet::new();
     if crate::debug::secrets().is_some() {
         let api = ctx.api.clone();
@@ -419,6 +420,7 @@ async fn connected(
                     Update::Ready => {}
                     Update::Now(mut now) => {
                         now_playing(&mut now, &mut ctx);
+                        shown = Some((*now).clone());
                         let _ = events.send(Event::NowPlaying(*now));
                     }
                     Update::Playback(model) => playback::worker::on_playback(model, &mut ctx),
@@ -434,7 +436,15 @@ async fn connected(
             Some(Ok(found)) = ctx.known.lookups.join_next(), if !ctx.known.lookups.is_empty() => {
                 if let Some(track) = found {
                     ctx.covers.request(track.cover.clone(), &ctx.http);
-                    ctx.known.tracks.insert(track.uri.clone(), track);
+                    let uri = track.uri.clone();
+                    ctx.known.tracks.insert(uri.clone(), track);
+                    if let Some(mut now) = shown
+                        .clone()
+                        .filter(|now| now.track.as_ref().is_some_and(|track| track.uri == uri))
+                    {
+                        now_playing(&mut now, &mut ctx);
+                        let _ = events.send(Event::NowPlaying(now));
+                    }
                 }
             }
             Some(event) = ctx.tasks.next(), if !ctx.tasks.is_empty() => ctx.publish(event),
