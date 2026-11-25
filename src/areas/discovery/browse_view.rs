@@ -128,7 +128,8 @@ impl OpenMusic {
         let heading = |title: String| {
             div()
                 .min_w_0()
-                .truncate()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_size(px(19.))
                 .font_weight(FontWeight::BOLD)
                 .child(title)

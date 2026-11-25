@@ -487,7 +487,8 @@ impl OpenMusic {
                     .child(
                         div()
                             .min_w_0()
-                            .truncate()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
                             .text_size(px(14.))
                             .font_weight(FontWeight::MEDIUM)
                             .when(playing, |line| line.text_color(rgb(palette.accent)))

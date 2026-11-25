@@ -218,7 +218,8 @@ fn footer_lines(page: &TrackPage) -> Vec<String> {
 fn heading(text: impl Into<SharedString>) -> Div {
     div()
         .min_w_0()
-        .truncate()
+        .overflow_hidden()
+        .whitespace_nowrap()
         .text_size(px(19.))
         .font_weight(FontWeight::BOLD)
         .child(text.into())
