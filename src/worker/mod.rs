@@ -467,13 +467,7 @@ fn now_playing(now: &mut NowPlaying, ctx: &mut Ctx) {
         return;
     };
     if let Some(full) = ctx.known.tracks.get(&track.uri) {
-        let duration = track.duration_ms;
-        let uid = track.uid.take();
-        *track = full.clone();
-        track.uid = uid;
-        if duration > 0 {
-            track.duration_ms = duration;
-        }
+        fill_from_catalog(track, full);
     } else if (track.cover.is_none() || track.title.is_empty())
         && (track.uri.starts_with("spotify:track:") || track.uri.starts_with("spotify:episode:"))
     {
@@ -488,6 +482,20 @@ fn now_playing(now: &mut NowPlaying, ctx: &mut Ctx) {
         });
     }
     ctx.covers.request(track.cover.clone(), &ctx.http);
+}
+
+fn fill_from_catalog(track: &mut Track, full: &Track) {
+    let duration = track.duration_ms;
+    let uid = track.uid.take();
+    let album_uri = track.album_uri.take();
+    let artist_uri = track.artist_uri.take();
+    *track = full.clone();
+    track.uid = uid;
+    track.album_uri = track.album_uri.take().or(album_uri);
+    track.artist_uri = track.artist_uri.take().or(artist_uri);
+    if duration > 0 {
+        track.duration_ms = duration;
+    }
 }
 
 fn on_push(message: &Message, ctx: &mut Ctx) {
@@ -524,6 +532,45 @@ pub fn trusted_image(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_the_show_link_of_an_episode_the_catalog_left_out() {
+        let show = "spotify:show:0000000000000000000001";
+        let mut playing = Track {
+            uri: "spotify:episode:0000000000000000000002".into(),
+            album_uri: Some(show.into()),
+            artist_uri: Some(show.into()),
+            uid: Some("uid".into()),
+            duration_ms: 1000,
+            ..Track::default()
+        };
+        let full = Track {
+            uri: playing.uri.clone(),
+            title: "Episode".into(),
+            duration_ms: 900,
+            ..Track::default()
+        };
+        fill_from_catalog(&mut playing, &full);
+        assert_eq!(playing.title, "Episode");
+        assert_eq!(playing.album_uri.as_deref(), Some(show));
+        assert_eq!(playing.artist_uri.as_deref(), Some(show));
+        assert_eq!(playing.uid.as_deref(), Some("uid"));
+        assert_eq!(playing.duration_ms, 1000);
+
+        let album = "spotify:album:0000000000000000000003";
+        let mut song = Track {
+            album_uri: Some("spotify:album:0000000000000000000004".into()),
+            ..Track::default()
+        };
+        fill_from_catalog(
+            &mut song,
+            &Track {
+                album_uri: Some(album.into()),
+                ..Track::default()
+            },
+        );
+        assert_eq!(song.album_uri.as_deref(), Some(album));
+    }
 
     #[test]
     fn asks_again_only_for_covers_that_failed_a_while_ago() {
