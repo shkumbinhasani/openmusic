@@ -380,7 +380,11 @@ impl OpenMusic {
     }
 
     pub fn cover_for(&self, track: &Track) -> Option<&Arc<Image>> {
-        track.cover.as_ref().and_then(|url| self.covers.get(url))
+        track
+            .cover
+            .as_ref()
+            .or_else(|| self.local_artwork(track))
+            .and_then(|url| self.covers.get(url))
     }
 
     pub fn back_button(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {

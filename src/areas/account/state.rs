@@ -12,6 +12,7 @@ use super::{
     friends::{self, Friends},
     friends_view::HIDE_KEY,
     local::{self, LocalLibrary},
+    local_match,
     local_scan::{LocalSources, is_local},
     name::{self, NameEditor},
     privacy::{self, PrivacyState},
@@ -794,6 +795,7 @@ pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
     profile::tick(app, cx);
     friends::tick(app, cx);
     local::tick(app, cx);
+    local_match::tick(app);
 }
 
 #[cfg(test)]

@@ -647,6 +647,9 @@ impl OpenMusic {
         options: PlayOptions,
         cx: &mut Context<Self>,
     ) {
+        let Some(index) = self.streamable_start(tracks, index, cx) else {
+            return;
+        };
         if self.needs_premium_here(false, cx) {
             return;
         }

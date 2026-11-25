@@ -10,6 +10,7 @@ use gpui_component::input::{InputEvent, InputState};
 use spotify_client::Track;
 
 use super::{
+    local_match::{self, LocalIndex, MatchedRows},
     local_scan::{
         LocalFile, LocalSources, MAX_FILES, ScanReport, ScanUpdate, home, index_path, is_local,
     },
@@ -256,6 +257,9 @@ pub struct LocalLibrary {
     pub limit: usize,
     pub sentinel: Sentinel,
     pub art_requested: HashSet<String>,
+    pub index: LocalIndex,
+    pub version: u64,
+    pub rows: MatchedRows,
 }
 
 impl Default for LocalLibrary {
@@ -278,6 +282,9 @@ impl Default for LocalLibrary {
             limit: PAGE_STEP,
             sentinel: Sentinel::default(),
             art_requested: HashSet::new(),
+            index: LocalIndex::default(),
+            version: 0,
+            rows: MatchedRows::default(),
         }
     }
 }
@@ -290,6 +297,12 @@ impl LocalLibrary {
                 .take(self.limit)
                 .filter_map(|track| track.cover.clone()),
         );
+        urls.extend(self.rows.keys().cloned());
+    }
+
+    pub fn reindex(&mut self) {
+        self.index = LocalIndex::build(&self.files);
+        self.version += 1;
     }
 
     pub fn refresh(&mut self) {
@@ -311,6 +324,7 @@ impl LocalLibrary {
         if let Some(files) = update.files {
             self.files = files;
             self.loaded = true;
+            self.reindex();
             self.refresh();
         }
         if let Some(report) = update.finished {
@@ -330,7 +344,15 @@ impl LocalLibrary {
     }
 
     pub fn file_for(&self, uri: &str) -> Option<&LocalFile> {
-        self.files.iter().find(|file| file.uri == uri)
+        self.index
+            .exact(uri)
+            .and_then(|position| self.files.get(position))
+    }
+
+    pub fn matching(&self, uri: &str) -> Option<&LocalFile> {
+        self.index
+            .find(&self.files, uri)
+            .and_then(|position| self.files.get(position))
     }
 
     pub fn queue_from(&self, row: usize) -> Option<(Vec<LocalFile>, usize)> {
@@ -575,9 +597,8 @@ impl OpenMusic {
     }
 
     pub fn local_playing(&self) -> bool {
-        self.track().is_some_and(|track| {
-            is_local(&track.uri) && self.account.local.file_for(&track.uri).is_some()
-        })
+        self.track()
+            .is_some_and(|track| self.local_match(&track.uri).is_some())
     }
 
     pub fn play_local_files(&mut self, cx: &mut Context<Self>) {
@@ -693,7 +714,12 @@ pub fn menu_items(target: &Target, app: &OpenMusic) -> Vec<(Group, MenuItem)> {
     if !is_local(&target.track.uri) {
         return Vec::new();
     }
-    let Some(file) = app.account.local.file_for(&target.track.uri) else {
+    let Some(file) = app
+        .account
+        .local
+        .file_for(&target.track.uri)
+        .or_else(|| app.local_match(&target.track.uri))
+    else {
         return Vec::new();
     };
     let path = file.path.clone();
@@ -833,6 +859,7 @@ pub fn debug(
         ("art", _) => app.request_local_art(),
         ("menu", _) => app.open_local_menu(),
         ("sort-menu", _) => app.open_local_sort_menu(),
+        ("rows" | "match" | "playrow", _) => local_match::debug(app, word, argument, directory, cx),
         _ => {}
     }
     let _ = std::fs::write(directory.join("localfiles.txt"), describe(app));

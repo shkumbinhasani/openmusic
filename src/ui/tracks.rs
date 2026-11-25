@@ -320,6 +320,7 @@ impl OpenMusic {
                         cx.listener(move |this, _, window, cx| match (&click, &context) {
                             (Some(click), _) => click(this, &queue, index, window, cx),
                             (None, _) if this.refuses_explicit(queue.get(index), cx) => {}
+                            (None, _) if this.plays_local_row(&queue, index, cx) => {}
                             (None, Some(context)) => this.play_context(context, &queue, index, cx),
                             (None, None) => this.play(&queue, index, cx),
                         }),

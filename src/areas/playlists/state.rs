@@ -752,8 +752,10 @@ impl OpenMusic {
         if collection.tracks.is_empty() {
             return;
         }
-        let uri = uri.clone();
-        self.shuffle_play(&uri, cx);
+        let (uri, tracks) = (uri.clone(), collection.tracks.clone());
+        if !self.shuffles_local_rows(&tracks, cx) {
+            self.shuffle_play(&uri, cx);
+        }
     }
 
     pub fn add_to_playlist(&mut self, uri: &str, sources: Vec<String>, position: ItemPosition) {

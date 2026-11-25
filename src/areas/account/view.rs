@@ -12,7 +12,7 @@ use super::state::{
     CHIP, CHIP_ROW, CLEAR_CACHE_KEY, FREE_MESSAGE, FREE_NOTICE, LANGUAGE_KEY, LANGUAGES,
     PREMIUM_KEY, PREMIUM_URL, cache_label, language_name,
 };
-use super::{local, profile};
+use super::{local, local_match, profile};
 use crate::{
     app::{OpenMusic, settings::SECTIONS},
     icons,
@@ -570,7 +570,9 @@ fn label_width(text: &str) -> f32 {
 }
 
 pub fn row_dimmed(app: &OpenMusic, track: &Track, row: Row, _options: &RowOptions) -> bool {
-    filtered(app.account(), track) || local::row_dimmed(app, row)
+    filtered(app.account(), track)
+        || local::row_dimmed(app, row)
+        || local_match::row_dimmed(app, track, row)
 }
 
 pub fn filtered(account: Option<&AccountInfo>, track: &Track) -> bool {
