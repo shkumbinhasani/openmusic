@@ -197,6 +197,17 @@ impl Unplayable {
 
 pub type Queue = (Vec<LocalFile>, usize);
 
+pub fn matched_file<'a>(
+    local: &'a LocalLibrary,
+    enabled: bool,
+    uri: &str,
+) -> Option<&'a LocalFile> {
+    if !is_local(uri) || !enabled {
+        return None;
+    }
+    local.matching(uri)
+}
+
 pub fn row_file(local: &LocalLibrary, enabled: bool, uri: &str) -> Result<usize, Unplayable> {
     if !enabled {
         return Err(Unplayable::Off);
@@ -386,10 +397,7 @@ impl OpenMusic {
     }
 
     pub fn local_match(&self, uri: &str) -> Option<&LocalFile> {
-        if !is_local(uri) || !self.local_files_on() {
-            return None;
-        }
-        self.account.local.matching(uri)
+        matched_file(&self.account.local, self.local_files_on(), uri)
     }
 
     pub fn local_artwork(&self, track: &Track) -> Option<&String> {

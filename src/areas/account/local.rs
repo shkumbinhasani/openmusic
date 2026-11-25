@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{AppContext, Context, Entity, PathPromptOptions, Window};
 use gpui_component::input::{InputEvent, InputState};
-use spotify_client::Track;
+use spotify_client::{Track, engine::NowPlaying};
 
 use super::{
     local_match::{self, LocalIndex, MatchedRows},
@@ -597,8 +597,11 @@ impl OpenMusic {
     }
 
     pub fn local_playing(&self) -> bool {
-        self.track()
-            .is_some_and(|track| self.local_match(&track.uri).is_some())
+        plays_local_file_here(
+            &self.account.local,
+            self.local_files_on(),
+            &self.playback.now,
+        )
     }
 
     pub fn play_local_files(&mut self, cx: &mut Context<Self>) {
@@ -645,6 +648,14 @@ impl OpenMusic {
         }));
         self.show_menu(items, Place::Under(SORT_KEY), None);
     }
+}
+
+pub fn plays_local_file_here(local: &LocalLibrary, enabled: bool, now: &NowPlaying) -> bool {
+    now.local
+        && now
+            .track
+            .as_ref()
+            .is_some_and(|track| local_match::matched_file(local, enabled, &track.uri).is_some())
 }
 
 pub fn load(app: &mut OpenMusic) {
@@ -1059,6 +1070,38 @@ mod tests {
         let mut urls = HashSet::new();
         local.covers(&mut urls);
         assert_eq!(urls.len(), 2);
+    }
+
+    #[test]
+    fn plays_a_matched_file_only_when_this_mac_plays_it() {
+        let mut local = LocalLibrary {
+            files: library(),
+            loaded: true,
+            ..LocalLibrary::default()
+        };
+        local.reindex();
+        let matched = local.files[0].track();
+        let here = NowPlaying {
+            track: Some(matched.clone()),
+            local: true,
+            ..NowPlaying::default()
+        };
+        assert!(plays_local_file_here(&local, true, &here));
+        assert!(!plays_local_file_here(&local, false, &here));
+        let phone = NowPlaying {
+            local: false,
+            device: Some("Phone".into()),
+            ..here.clone()
+        };
+        assert!(!plays_local_file_here(&local, true, &phone));
+        let streamed = NowPlaying {
+            track: Some(Track {
+                uri: "spotify:track:00000000000000000000t1".into(),
+                ..matched
+            }),
+            ..here
+        };
+        assert!(!plays_local_file_here(&local, true, &streamed));
     }
 
     #[test]
