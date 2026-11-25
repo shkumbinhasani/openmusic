@@ -1478,7 +1478,7 @@ impl MainState {
         emit(PlayerEvent::Position {
             generation: head.generation,
             position_ms,
-            playing: unsafe { deck.player.rate() } > 0.,
+            playing: self.playing,
             measured: Instant::now(),
         });
     }
