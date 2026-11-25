@@ -64,6 +64,7 @@ impl<T: Clone + 'static> Slot<T> {
 
 const DOCK_CLEARANCE: f32 = 84.;
 const CHROME: f32 = 116.;
+const SLIDE_DOWN: f32 = 30.;
 
 pub fn top(window: &Window) -> f32 {
     (f32::from(window.viewport_size().height) * 0.1).clamp(36., 96.)
@@ -71,7 +72,7 @@ pub fn top(window: &Window) -> f32 {
 
 pub fn body_height(window: &Window) -> f32 {
     let height = f32::from(window.viewport_size().height);
-    (height - top(window) - DOCK_CLEARANCE - CHROME).max(120.)
+    (height - top(window) - SLIDE_DOWN - DOCK_CLEARANCE - CHROME).max(120.)
 }
 
 pub fn redraw<T: 'static>(owner: WeakEntity<T>) -> Close {
