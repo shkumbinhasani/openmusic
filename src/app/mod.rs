@@ -47,6 +47,7 @@ pub struct OpenMusic {
     pub history: Vec<Page>,
     pub ahead: Vec<Page>,
     pub covers: HashMap<String, Arc<Image>>,
+    cover_scan: Option<(usize, Page)>,
     pub session_error: Option<String>,
     pub modal: bool,
     pub toast: Option<Toast>,
@@ -97,6 +98,7 @@ impl OpenMusic {
             history: Vec::new(),
             ahead: Vec::new(),
             covers: HashMap::new(),
+            cover_scan: None,
             session_error: None,
             modal: false,
             toast: None,
@@ -336,15 +338,35 @@ impl OpenMusic {
             .collect();
         for url in &stale {
             if let Some(image) = self.covers.remove(url) {
-                if let Some(render) = image.clone().get_render_image(window, cx) {
-                    let _ = window.drop_image(render);
-                }
-                image.remove_asset(cx);
+                let drawn = ui::drawn::forget(&image);
+                release(image, drawn, window, cx);
             }
         }
         if !stale.is_empty() {
             self.send(Command::ForgetCovers(stale));
         }
+    }
+
+    fn trim_covers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let scanned = self
+            .cover_scan
+            .as_ref()
+            .is_some_and(|(count, page)| *count == self.covers.len() && *page == self.page);
+        if self.covers.len() > COVER_CACHE_LIMIT && !scanned {
+            self.evict_covers(window, cx);
+            self.cover_scan = Some((self.covers.len(), self.page.clone()));
+        }
+    }
+
+    fn release_covers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for (_, image) in self.covers.drain() {
+            let drawn = ui::drawn::forget(&image);
+            release(image, drawn, window, cx);
+        }
+        for image in ui::drawn::drain() {
+            release(image, true, window, cx);
+        }
+        self.cover_scan = None;
     }
 
     pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -361,10 +383,11 @@ impl OpenMusic {
         let _ = self.commands.send(command.into());
     }
 
-    pub fn tick(&mut self, cx: &mut Context<Self>) {
+    pub fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.expire_toast() {
             cx.notify();
         }
+        self.trim_covers(window, cx);
         ui::gallery::tick(self, cx);
         account::state::tick(self, cx);
         audio::state::tick(self, cx);
@@ -474,7 +497,7 @@ impl OpenMusic {
                 self.page = Page::Home;
                 self.history.clear();
                 self.ahead.clear();
-                self.covers.clear();
+                self.release_covers(window, cx);
                 self.saved = Saved::default();
                 self.toast = None;
                 account::state::signed_out(self);
@@ -490,9 +513,6 @@ impl OpenMusic {
             Event::Cover { url, jpeg } => {
                 self.covers
                     .insert(url, Arc::new(Image::from_bytes(image_format(&jpeg), jpeg)));
-                if self.covers.len() > COVER_CACHE_LIMIT {
-                    self.evict_covers(window, cx);
-                }
             }
             Event::NowPlaying(now) => {
                 self.request_lyrics(&now);
@@ -527,6 +547,13 @@ impl OpenMusic {
 }
 
 const COVER_CACHE_LIMIT: usize = 220;
+
+fn release(image: Arc<Image>, drawn: bool, window: &mut Window, cx: &mut Context<OpenMusic>) {
+    if drawn && let Some(render) = image.clone().get_render_image(window, cx) {
+        let _ = window.drop_image(render);
+    }
+    image.remove_asset(cx);
+}
 
 fn image_format(bytes: &[u8]) -> ImageFormat {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {

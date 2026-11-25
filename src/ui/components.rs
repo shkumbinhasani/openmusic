@@ -2,7 +2,7 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui::{
     AnimationExt, Context, Div, ElementId, FontWeight, Image, ObjectFit, Pixels, Stateful, canvas,
-    div, img, prelude::*, px, rgb, rgba, svg,
+    div, prelude::*, px, rgb, rgba, svg,
 };
 use spotify_client::Track;
 
@@ -61,7 +61,7 @@ pub fn artwork(image: Option<&Arc<Image>>, side: Pixels, radius: Pixels, palette
         .bg(rgb(palette.raised))
         .map(|cover| match image {
             Some(image) => cover.child(
-                img(image.clone())
+                super::drawn::cover(image.clone())
                     .size_full()
                     .object_fit(ObjectFit::Cover)
                     .rounded(radius),

@@ -1,6 +1,7 @@
 pub mod cards;
 pub mod components;
 pub mod dock;
+pub mod drawn;
 pub mod gallery;
 pub mod menu;
 pub mod sidebar;
@@ -395,6 +396,7 @@ impl OpenMusic {
 
 impl Render for OpenMusic {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        drawn::next_frame();
         self.modal = window.has_active_dialog(cx) || window.has_active_sheet(cx);
         let palette = Palette::for_window(window.appearance());
         let Layout {

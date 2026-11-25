@@ -95,7 +95,10 @@ fn main() {
                                     .background_executor()
                                     .timer(Duration::from_millis(250))
                                     .await;
-                                if view.update_in(window, |this, _, cx| this.tick(cx)).is_err() {
+                                if view
+                                    .update_in(window, |this, window, cx| this.tick(window, cx))
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }

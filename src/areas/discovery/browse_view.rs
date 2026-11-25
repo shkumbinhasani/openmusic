@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, Context, Div, FontWeight, MouseButton, ObjectFit, Pixels, div, img,
-    linear_color_stop, linear_gradient, prelude::*, px, rgb, rgba,
+    AnyElement, Context, Div, FontWeight, MouseButton, ObjectFit, Pixels, div, linear_color_stop,
+    linear_gradient, prelude::*, px, rgb, rgba,
 };
 use spotify_client::{
     browse::BrowsePage,
@@ -20,6 +20,7 @@ use crate::{
         Palette,
         cards::{CardOptions, card_target},
         components::{artwork, bone, scroll_sentinel},
+        drawn,
     },
 };
 
@@ -259,7 +260,7 @@ impl OpenMusic {
             .bg(rgba(tint << 8 | HEADER_TINT))
             .when_some(image, |band, image| {
                 band.child(
-                    img(image)
+                    drawn::cover(image)
                         .absolute()
                         .inset_0()
                         .size_full()

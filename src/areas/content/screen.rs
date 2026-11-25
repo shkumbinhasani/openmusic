@@ -6,7 +6,7 @@ use std::{
 
 use gpui::{
     AnyElement, Bounds, Context, Corners, FontWeight, Hsla, Image, MouseButton, ObjectFit, Pixels,
-    canvas, div, fill, img, point, prelude::*, px, rgb, rgba, size,
+    canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
 };
 use spotify_client::{
     catalog::Track,
@@ -25,6 +25,7 @@ use crate::{
     ui::{
         Palette,
         components::link,
+        drawn,
         menu::{Surface, Target},
     },
 };
@@ -738,7 +739,7 @@ impl OpenMusic {
                         .bg(rgb(palette.raised))
                         .hover(|card| card.opacity(0.85))
                         .when_some(image, |card, image| {
-                            card.child(img(image).size_full().object_fit(ObjectFit::Cover))
+                            card.child(drawn::cover(image).size_full().object_fit(ObjectFit::Cover))
                         }),
                 )
                 .child(

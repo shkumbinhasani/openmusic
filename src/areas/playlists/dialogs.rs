@@ -5,8 +5,8 @@ use std::{
 
 use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Hsla, Image, ImageFormat, ObjectFit,
-    PathPromptOptions, SharedString, Subscription, WeakEntity, Window, div, hsla, img, prelude::*,
-    px, svg,
+    PathPromptOptions, SharedString, Subscription, WeakEntity, Window, div, hsla, prelude::*, px,
+    svg,
 };
 use gpui_component::{
     ActiveTheme, Sizable, WindowExt,
@@ -23,6 +23,7 @@ use super::{image, worker::Cover};
 use crate::{
     app::{OpenMusic, Page},
     icons,
+    ui::drawn,
     worker::trusted_image,
 };
 
@@ -250,7 +251,9 @@ impl Render for EditDetails {
             .items_center()
             .justify_center()
             .map(|tile| match current {
-                Some(image) => tile.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                Some(image) => {
+                    tile.child(drawn::cover(image).size_full().object_fit(ObjectFit::Cover))
+                }
                 None => tile.child(svg().path(icons::NOTE).size(px(60.)).text_color(muted)),
             })
             .child(
@@ -399,7 +402,7 @@ fn face(name: &str, image: Option<Arc<Image>>, fill: Hsla, text: Hsla) -> impl I
         .items_center()
         .justify_center();
     match image {
-        Some(image) => circle.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+        Some(image) => circle.child(drawn::cover(image).size_full().object_fit(ObjectFit::Cover)),
         None => circle
             .bg(fill)
             .text_color(text)
@@ -925,7 +928,9 @@ impl SaveTo {
             .items_center()
             .justify_center()
             .map(|tile| match picture {
-                Some(image) => tile.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                Some(image) => {
+                    tile.child(drawn::cover(image).size_full().object_fit(ObjectFit::Cover))
+                }
                 None => tile.child(svg().path(fallback).size(px(15.)).text_color(colors.muted)),
             });
         let mark = div()

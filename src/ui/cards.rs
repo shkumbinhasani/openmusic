@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpui::{
     Context, Div, FontWeight, MouseButton, ObjectFit, Pixels, SharedString, Stateful, Window, div,
-    img, prelude::*, px, rgb, rgba,
+    prelude::*, px, rgb, rgba,
 };
 use spotify_client::{
     Track, connect,
@@ -155,7 +155,7 @@ impl OpenMusic {
             .justify_center();
         match loaded {
             Some(image) => circle.bg(rgb(palette.raised)).child(
-                img(image.clone())
+                super::drawn::cover(image.clone())
                     .size_full()
                     .object_fit(ObjectFit::Cover)
                     .rounded_full(),
