@@ -147,6 +147,13 @@ impl OpenMusic {
                                         }),
                                 ),
                         )
+                    } else if self.lyrics_failed() {
+                        page.child(div().px(px(SIDE)).pt_6().child(self.lyrics_retry(
+                            "transcript-retry",
+                            "Couldn’t load the transcript.",
+                            palette,
+                            cx,
+                        )))
                     } else {
                         page.child(
                             div()

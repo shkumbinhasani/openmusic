@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use gpui::{
     AnyElement, Context, Div, FontWeight, MouseButton, Pixels, SharedString, Stateful, div,
     prelude::*, px, relative, rgb, rgba,
@@ -303,6 +305,28 @@ impl OpenMusic {
         ))
     }
 
+    pub(super) fn lyrics_retry(
+        &self,
+        id: &'static str,
+        message: &'static str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div().flex().child(
+            div()
+                .id(id)
+                .cursor_pointer()
+                .text_size(px(17.))
+                .text_color(rgb(palette.muted))
+                .hover(move |retry| retry.text_color(rgb(palette.text)).underline())
+                .child(format!("{message} Try again."))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.retry_lyrics(Duration::ZERO);
+                    cx.notify();
+                })),
+        )
+    }
+
     pub fn lyrics_page(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         if self
             .track()
@@ -317,9 +341,10 @@ impl OpenMusic {
             .map(|lyrics| lyrics.lines.as_slice())
             .unwrap_or_default();
         let active = self.content.lyrics_line;
+        let failed = self.lyrics_failed();
         let status = match (track, lyrics) {
             (None, _) => Some("Play a song to see its lyrics."),
-            (Some(_), None) if self.content.lyrics_loading => None,
+            (Some(_), None) if self.content.lyrics_loading || failed => None,
             (Some(_), None) => Some("Lyrics aren’t available for this song."),
             (Some(_), Some(_)) => None,
         };
@@ -375,6 +400,14 @@ impl OpenMusic {
                                 .text_color(rgb(palette.muted))
                                 .child(status),
                         )
+                    })
+                    .when(failed, |header| {
+                        header.child(div().pt_6().child(self.lyrics_retry(
+                            "lyrics-retry",
+                            "Couldn’t load the lyrics.",
+                            palette,
+                            cx,
+                        )))
                     }),
             )
             .when(

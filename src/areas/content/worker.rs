@@ -67,7 +67,7 @@ pub enum Command {
 pub enum Event {
     Lyrics {
         uri: String,
-        lyrics: Option<Lyrics>,
+        lyrics: Result<Option<Lyrics>, String>,
     },
     Show {
         uri: String,
@@ -281,8 +281,10 @@ fn failure(error: &anyhow::Error, what: &str) -> String {
 }
 
 async fn lyrics(api: Api, uri: String) -> crate::worker::Event {
-    let found = catalog::lyrics(&api, &uri).await.ok().flatten();
-    Event::Lyrics { uri, lyrics: found }.into()
+    let lyrics = catalog::lyrics(&api, &uri)
+        .await
+        .map_err(|error| error.to_string());
+    Event::Lyrics { uri, lyrics }.into()
 }
 
 async fn read_transcript(
@@ -290,8 +292,10 @@ async fn read_transcript(
     uri: String,
     known: Option<Vec<Transcript>>,
 ) -> crate::worker::Event {
-    let found = transcript::read(&api, &uri, known).await.ok().flatten();
-    Event::Lyrics { uri, lyrics: found }.into()
+    let lyrics = transcript::read(&api, &uri, known)
+        .await
+        .map_err(|error| error.to_string());
+    Event::Lyrics { uri, lyrics }.into()
 }
 
 async fn show(api: Api, uri: String) -> crate::worker::Event {

@@ -20,6 +20,7 @@ use spotify_client::{
 };
 
 use super::{
+    ask::RETRY_AFTER,
     canvas::Canvases,
     screen::{ALBUM_KEY, FULL_KEY, Screen, VIDEO_KEY},
     transcript::{SYNC_KEY, TranscriptView},
@@ -68,6 +69,7 @@ pub struct State {
     pub lyrics_scroll: ScrollHandle,
     pub lyrics_line: Option<usize>,
     pub lyrics_loading: bool,
+    pub lyrics_failed: Option<Instant>,
     pub show: Option<(String, Result<Show, String>)>,
     pub show_loading: bool,
     pub show_error: Option<String>,
@@ -169,6 +171,48 @@ impl State {
                 self.unavailable.insert(episode.uri.clone());
             }
         }
+    }
+
+    fn ask_words(&mut self, uri: String) {
+        self.lyrics = Some((uri, None));
+        self.lyrics_loading = true;
+        self.lyrics_failed = None;
+        self.lyrics_line = None;
+        self.transcript = None;
+    }
+
+    fn took_words(
+        &mut self,
+        uri: String,
+        result: Result<Option<Lyrics>, String>,
+        at: Instant,
+    ) -> bool {
+        if !self
+            .lyrics
+            .as_ref()
+            .is_some_and(|(pending, _)| *pending == uri)
+        {
+            return false;
+        }
+        let (lyrics, failed) = match result {
+            Ok(lyrics) => (lyrics, None),
+            Err(_) => (None, Some(at)),
+        };
+        self.transcript = lyrics
+            .as_ref()
+            .filter(|_| is_episode(&uri))
+            .map(|lyrics| TranscriptView::new(uri.clone(), lyrics.lines.len()));
+        self.lyrics = Some((uri, lyrics.map(Rc::new)));
+        self.lyrics_loading = false;
+        self.lyrics_failed = failed;
+        self.lyrics_line = None;
+        true
+    }
+
+    fn failed_words(&self, now: Instant, wait: Duration) -> Option<&str> {
+        let at = self.lyrics_failed?;
+        let (uri, _) = self.lyrics.as_ref()?;
+        (now.saturating_duration_since(at) >= wait).then_some(uri.as_str())
     }
 
     fn patch(&mut self, fresh: &Episode) {
@@ -281,6 +325,7 @@ impl OpenMusic {
 
     pub fn show_lyrics(&mut self, show: bool) {
         if show {
+            self.retry_lyrics(Duration::ZERO);
             self.navigate(Page::Lyrics);
             self.content.lyrics_line = None;
             if let Some(view) = self.transcript_view() {
@@ -298,8 +343,7 @@ impl OpenMusic {
         let Some(track) = &now.track else {
             return;
         };
-        let episode = is_episode(&track.uri);
-        if !(track.is_track() || episode)
+        if !(track.is_track() || is_episode(&track.uri))
             || self
                 .content
                 .lyrics
@@ -308,12 +352,12 @@ impl OpenMusic {
         {
             return;
         }
-        let uri = track.uri.clone();
-        self.content.lyrics = Some((uri.clone(), None));
-        self.content.lyrics_loading = true;
-        self.content.lyrics_line = None;
-        self.content.transcript = None;
-        if episode {
+        self.ask_words(track.uri.clone());
+    }
+
+    fn ask_words(&mut self, uri: String) {
+        self.content.ask_words(uri.clone());
+        if is_episode(&uri) {
             let known = self
                 .content
                 .loaded_episode(&uri)
@@ -323,6 +367,25 @@ impl OpenMusic {
         } else {
             self.send(Command::Lyrics(uri));
         }
+    }
+
+    pub fn lyrics_failed(&self) -> bool {
+        self.content
+            .failed_words(Instant::now(), Duration::ZERO)
+            .is_some_and(|uri| self.is_current(uri))
+    }
+
+    pub fn retry_lyrics(&mut self, wait: Duration) -> bool {
+        let Some(uri) = self
+            .content
+            .failed_words(Instant::now(), wait)
+            .filter(|uri| self.is_current(uri))
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        self.ask_words(uri);
+        true
     }
 
     fn watch_episode(&mut self, now: &NowPlaying) {
@@ -720,19 +783,7 @@ pub fn on_event(
 ) {
     match event {
         Event::Lyrics { uri, lyrics } => {
-            if app
-                .content
-                .lyrics
-                .as_ref()
-                .is_some_and(|(pending, _)| *pending == uri)
-            {
-                app.content.transcript = lyrics
-                    .as_ref()
-                    .filter(|_| is_episode(&uri))
-                    .map(|lyrics| TranscriptView::new(uri.clone(), lyrics.lines.len()));
-                app.content.lyrics = Some((uri, lyrics.map(Rc::new)));
-                app.content.lyrics_loading = false;
-                app.content.lyrics_line = None;
+            if app.content.took_words(uri, lyrics, Instant::now()) {
                 app.follow_lyrics();
             }
         }
@@ -965,6 +1016,8 @@ fn describe_words(app: &OpenMusic, lines: &mut String) {
     let Some(lyrics) = lyrics else {
         let state = if app.content.lyrics_loading {
             "loading"
+        } else if app.content.lyrics_failed.is_some() {
+            "failed"
         } else {
             "none"
         };
@@ -1188,6 +1241,9 @@ fn page_fragment(app: &OpenMusic) -> String {
                 Some((uri, None)) if *uri == track.uri && app.content.lyrics_loading => {
                     "transcript=loading".to_owned()
                 }
+                Some((uri, None)) if *uri == track.uri && app.content.lyrics_failed.is_some() => {
+                    "transcript=failed".to_owned()
+                }
                 _ => "transcript=none".to_owned(),
             },
             _ => String::new(),
@@ -1318,6 +1374,9 @@ pub fn row_dropped(
 }
 
 pub fn tick(app: &mut OpenMusic, cx: &mut Context<OpenMusic>) {
+    if app.retry_lyrics(RETRY_AFTER) {
+        cx.notify();
+    }
     let reduce_motion = app.content.canvas.reduce_motion;
     app.canvas_tick();
     app.screen_tick(cx);
@@ -1563,6 +1622,44 @@ mod tests {
         }
         assert!(filtered(Some(&filtering), &explicit.as_track()));
         assert!(!filtered(Some(&filtering), &clean.as_track()));
+    }
+
+    #[test]
+    fn tells_a_failed_lyrics_read_from_none_and_asks_again() {
+        let song = "spotify:track:00000000000000000000s1";
+        let mut state = State::default();
+        let now = Instant::now();
+        state.ask_words(song.into());
+        assert!(state.lyrics_loading);
+        assert!(!state.took_words("spotify:track:other".into(), Ok(None), now));
+        assert!(state.lyrics_loading);
+
+        assert!(state.took_words(song.into(), Err("offline".into()), now));
+        assert!(!state.lyrics_loading);
+        assert_eq!(state.lyrics_failed, Some(now));
+        assert_eq!(state.failed_words(now, Duration::ZERO), Some(song));
+        assert_eq!(state.failed_words(now, RETRY_AFTER), None);
+        assert_eq!(
+            state.failed_words(now + RETRY_AFTER, RETRY_AFTER),
+            Some(song)
+        );
+
+        state.ask_words(song.into());
+        assert_eq!(state.lyrics_failed, None);
+        assert!(state.took_words(song.into(), Ok(None), now));
+        assert_eq!(state.lyrics_failed, None);
+        assert!(matches!(&state.lyrics, Some((uri, None)) if uri == song));
+        assert_eq!(state.failed_words(now + RETRY_AFTER, RETRY_AFTER), None);
+
+        state.ask_words(song.into());
+        let found = Lyrics {
+            synced: false,
+            lines: Vec::new(),
+            provider: String::new(),
+        };
+        assert!(state.took_words(song.into(), Ok(Some(found)), now));
+        assert!(matches!(&state.lyrics, Some((_, Some(_)))));
+        assert!(state.transcript.is_none());
     }
 
     #[test]
