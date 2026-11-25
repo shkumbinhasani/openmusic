@@ -988,6 +988,41 @@ pub fn play_next_command(uris: &[String]) -> Value {
     })
 }
 
+pub const RESTART_AFTER_MS: u32 = 3000;
+
+pub fn previous_command(position_ms: u32, allowed: &Allowed) -> Option<Value> {
+    let restart = json!({ "endpoint": "seek_to", "value": 0 });
+    if position_ms >= RESTART_AFTER_MS && allowed.seek {
+        return Some(restart);
+    }
+    if allowed.skip_prev {
+        return Some(json!({ "endpoint": "skip_prev" }));
+    }
+    allowed.seek.then_some(restart)
+}
+
+pub const KEY_VOLUME_STEP: u16 = 4096;
+
+pub fn volume_unit(steps: u32) -> f64 {
+    f64::from(u16::MAX) / f64::from(steps.max(1))
+}
+
+pub fn volume_step(steps: u32) -> u16 {
+    volume_unit(steps)
+        .max(f64::from(KEY_VOLUME_STEP))
+        .ceil()
+        .min(f64::from(u16::MAX)) as u16
+}
+
+pub fn stepped_volume(current: u16, up: bool, steps: u32) -> u16 {
+    let unit = volume_unit(steps);
+    let step = f64::from(volume_step(steps));
+    let wanted = f64::from(current) + if up { step } else { -step };
+    ((wanted / unit).round() * unit)
+        .round()
+        .clamp(0., f64::from(u16::MAX)) as u16
+}
+
 pub fn update_context_command(context_uri: &str, session_id: &str) -> Value {
     json!({
         "endpoint": "update_context",
@@ -2032,6 +2067,45 @@ mod tests {
             )["options"]["player_options_override"]["modes"]["context_enhancement"],
             "RECOMMENDATION"
         );
+    }
+
+    #[test]
+    fn goes_back_or_restarts_like_the_desktop() {
+        let both = Allowed {
+            seek: true,
+            skip_prev: true,
+            ..Allowed::default()
+        };
+        let restart = json!({"endpoint": "seek_to", "value": 0});
+        let back = json!({"endpoint": "skip_prev"});
+        assert_eq!(previous_command(2999, &both), Some(back.clone()));
+        assert_eq!(previous_command(3000, &both), Some(restart.clone()));
+        assert_eq!(previous_command(95_000, &both), Some(restart.clone()));
+        let no_seek = Allowed {
+            skip_prev: true,
+            ..Allowed::default()
+        };
+        assert_eq!(previous_command(95_000, &no_seek), Some(back));
+        let first_track = Allowed {
+            seek: true,
+            ..Allowed::default()
+        };
+        assert_eq!(previous_command(500, &first_track), Some(restart));
+        assert_eq!(previous_command(95_000, &Allowed::default()), None);
+    }
+
+    #[test]
+    fn steps_volume_on_the_device_grid() {
+        assert_eq!(volume_step(64), KEY_VOLUME_STEP);
+        assert_eq!(volume_step(0), u16::MAX);
+        assert_eq!(volume_step(10), 6554);
+        assert_eq!(stepped_volume(0, true, 64), 4096);
+        assert_eq!(stepped_volume(4096, false, 64), 0);
+        assert_eq!(stepped_volume(65_000, true, 64), u16::MAX);
+        assert_eq!(stepped_volume(1000, false, 64), 0);
+        assert_eq!(stepped_volume(30_000, true, 10), 39_321);
+        assert_eq!(stepped_volume(30_000, false, 10), 26_214);
+        assert_eq!(stepped_volume(65_535, false, 100), 61_603);
     }
 
     fn uids(list: &[ProvidedTrack]) -> Vec<String> {

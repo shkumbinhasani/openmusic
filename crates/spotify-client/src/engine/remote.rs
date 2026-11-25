@@ -3,10 +3,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 use spotify_proto::connectstate::ProvidedTrack;
+use tokio::sync::watch;
 
 use super::Engine;
 use crate::connect::{
-    self, Allowed, CommandError, PlayOptions, Playback, QueueKey, Repeat, Shuffle,
+    self, Allowed, CommandError, ConnectDevice, PlayOptions, Playback, QueueKey, Repeat, Restore,
+    Shuffle,
 };
 
 const QUEUE_EDIT_WINDOW: Duration = Duration::from_secs(3);
@@ -31,11 +33,23 @@ pub enum Control {
         options: PlayOptions,
     },
     RefreshCluster,
+    Transfer(String),
+    DeviceVolume {
+        device: String,
+        volume: u16,
+    },
+}
+
+#[derive(Debug)]
+struct VolumeSender {
+    target: String,
+    sender: watch::Sender<u16>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct State {
     queue_edit: Option<(String, Instant)>,
+    volume: Option<VolumeSender>,
 }
 
 impl State {
@@ -97,6 +111,22 @@ fn refused(error: &anyhow::Error) -> bool {
         error.downcast_ref::<CommandError>(),
         Some(CommandError::Refused(_))
     )
+}
+
+fn device_name(device: &ConnectDevice) -> String {
+    if device.this_mac {
+        "This Mac".to_owned()
+    } else {
+        device.name.clone()
+    }
+}
+
+fn blocked_notice(name: &str, reason: &str) -> String {
+    match reason {
+        "Unavailable" => format!("{name} isn’t available right now."),
+        "Can’t play this" => format!("{name} can’t play this."),
+        _ => "You can’t move playback right now.".to_owned(),
+    }
 }
 
 impl Engine {
@@ -189,6 +219,109 @@ impl Engine {
                 .refresh_cluster()
                 .await
                 .map_err(|_| anyhow!("Couldn’t reach Spotify Connect.")),
+            Control::Transfer(id) => self.transfer_to(id).await,
+            Control::DeviceVolume { device, volume } => self.device_volume(device, volume).await,
+        }
+    }
+
+    fn device(&self, id: &str) -> Option<ConnectDevice> {
+        self.playback
+            .as_ref()?
+            .devices
+            .iter()
+            .find(|device| device.id == id)
+            .cloned()
+    }
+
+    async fn transfer_to(&mut self, id: String) -> Result<()> {
+        let own = self.device_id.clone();
+        let (to, alias) = connect::device_target(&id);
+        let here = to == own;
+        let Some(device) = self.device(&id) else {
+            let _ = self.refresh_cluster().await;
+            bail!("That device is no longer available.");
+        };
+        let name = device_name(&device);
+        let playback = self.playback.as_ref();
+        let nothing_active = playback.is_none_or(|playback| playback.active_device_id.is_none());
+        if device.active || (here && nothing_active) {
+            return Ok(());
+        }
+        if let Some(reason) = &device.blocked {
+            bail!(blocked_notice(&name, reason));
+        }
+        if playback.is_some_and(|playback| playback.track.is_some() && !playback.allowed.transfer) {
+            bail!("You can’t move playback right now.");
+        }
+        match connect::transfer(&self.api, &own, to, Restore::Keep, alias).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if gone(&error) || refused(&error) {
+                    let _ = self.refresh_cluster().await;
+                }
+                Err(anyhow!("Couldn’t connect to {name}."))
+            }
+        }
+    }
+
+    async fn device_volume(&mut self, id: String, volume: u16) -> Result<()> {
+        let (device, _) = connect::device_target(&id);
+        if device == self.device_id {
+            if self.remote_target().is_some() {
+                bail!("This Mac isn’t playing right now.");
+            }
+            return Box::pin(self.control(super::Control::Volume(volume))).await;
+        }
+        let Some(entry) = self.device(&id) else {
+            bail!("That device is no longer available.");
+        };
+        if entry.volume.is_none() {
+            bail!("You can’t change the volume on {}.", entry.name);
+        }
+        self.queue_volume(id, volume);
+        Ok(())
+    }
+
+    fn queue_volume(&mut self, target: String, volume: u16) {
+        if let Some(queued) = self
+            .remote
+            .volume
+            .as_ref()
+            .filter(|queued| queued.target == target && !queued.sender.is_closed())
+        {
+            queued.sender.send_replace(volume);
+            return;
+        }
+        let (sender, mut receiver) = watch::channel(volume);
+        receiver.mark_changed();
+        let api = self.api.clone();
+        let from = self.device_id.clone();
+        let to = target.clone();
+        tokio::spawn(async move {
+            while receiver.changed().await.is_ok() {
+                let volume = *receiver.borrow_and_update();
+                let (device, alias) = connect::device_target(&to);
+                let _ = connect::set_volume(&api, &from, device, volume, alias).await;
+            }
+        });
+        self.remote.volume = Some(VolumeSender { target, sender });
+    }
+
+    fn remote_position(&self) -> u32 {
+        let Some(playback) = self.playback.as_ref() else {
+            return 0;
+        };
+        let track = playback.track.as_ref().map(|track| &track.uri);
+        match &self.published {
+            Some((key, position, at)) if !key.local && key.track.as_ref() == track => {
+                let elapsed = if key.playing {
+                    at.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
+                } else {
+                    0
+                };
+                position.saturating_add(elapsed)
+            }
+            _ => playback.position_ms,
         }
     }
 
@@ -323,22 +456,41 @@ impl Engine {
             .map_err(|_| anyhow!("Couldn’t skip to that song."))
     }
 
-    pub(super) async fn remote(&mut self, target: String, control: super::Control) -> Result<()> {
-        let name = self
-            .playback
-            .as_ref()
-            .and_then(|playback| playback.active_device_name.clone())
+    pub(super) async fn remote(&mut self, _target: String, control: super::Control) -> Result<()> {
+        let target = self.command_target();
+        let active = self.playback.as_ref().and_then(Playback::active_device);
+        let name = active
+            .map(|device| device.name.clone())
+            .or_else(|| {
+                self.playback
+                    .as_ref()
+                    .and_then(|playback| playback.active_device_name.clone())
+            })
             .unwrap_or_else(|| "that device".into());
         let command = match control {
             super::Control::SetPlaying(true) => json!({"endpoint": "resume"}),
             super::Control::SetPlaying(false) => json!({"endpoint": "pause"}),
             super::Control::Next => json!({"endpoint": "skip_next"}),
-            super::Control::Previous => json!({"endpoint": "skip_prev"}),
+            super::Control::Previous => {
+                let Some(playback) = self
+                    .playback
+                    .as_ref()
+                    .filter(|playback| playback.track.is_some())
+                else {
+                    return Ok(());
+                };
+                match connect::previous_command(self.remote_position(), &playback.allowed) {
+                    Some(command) => command,
+                    None => bail!("You can’t go back right now."),
+                }
+            }
             super::Control::Seek(position) => json!({"endpoint": "seek_to", "value": position}),
             super::Control::Volume(volume) => {
-                return connect::set_volume(&self.api, &self.device_id, &target, volume, None)
-                    .await
-                    .map_err(|_| anyhow!("Spotify didn’t accept that command for {name}."));
+                if active.is_some_and(|device| device.volume.is_none()) {
+                    bail!("You can’t change the volume on {name}.");
+                }
+                self.queue_volume(target, volume);
+                return Ok(());
             }
             _ => return Ok(()),
         };
