@@ -37,7 +37,7 @@ OpenMusic against the official Spotify app on the same Mac, measured with `scrip
 
 <sub>MacBook Pro with Apple M4 Pro and 24 GB of memory, macOS 27.0, 23 November 2026. Launch time is the median of five launches, from <code>open</code> until the first window is on screen. Memory is the physical footprint of every process the app runs, added together; this is the figure Activity Monitor shows. CPU is the share of one core over 30 seconds. Each app was measured alone, signed in, 20 seconds after launch and again 20 seconds after it started playing the same album.</sub>
 
-These figures come from before this release added podcasts, video, Jam, local files and the other features below, so the current app may differ. Run the benchmark yourself after building the app. It needs OpenMusic signed in, and Spotify installed if you want the comparison. It plays music in both apps for about a minute. The script drives OpenMusic through a command folder that only exists in builds with the `debug-dir` feature, so build the app with it.
+These figures come from before this release added podcasts, Canvas, Jam, local files and the other features below, so the current app may differ. Run the benchmark yourself after building the app. It needs OpenMusic signed in, and Spotify installed if you want the comparison. It plays music in both apps for about a minute. The script drives OpenMusic through a command folder that only exists in builds with the `debug-dir` feature, so build the app with it.
 
 ```sh
 FEATURES=debug-dir ./scripts/bundle-macos.sh
@@ -69,12 +69,12 @@ Choose **Sign in with Spotify** and approve the pairing in your browser. Playing
 ## What it does
 
 - **Spotify Connect.** OpenMusic appears as a device named “OpenMusic”. Pick it from any Spotify app, or choose **Play on This Mac** to move playback here. The device picker lists every device on your account, moves playback between them and sets their volume.
-- **Playback.** Shuffle, smart shuffle and repeat, and a queue you can reorder and clear. Gapless playback, crossfade, Automix, volume normalization (it can only turn the volume down), a sleep timer and podcast speed. Spotify’s DJ shows up when your account has it; OpenMusic skips the DJ’s voice.
+- **Playback.** Shuffle, smart shuffle and repeat, and a queue you can reorder and clear. Gapless playback, crossfade, Automix, volume normalization (it can only turn the volume down), a sleep timer, and speed control for episodes that a podcast hosts outside Spotify. Spotify’s DJ shows up when your account has it; OpenMusic skips the DJ’s voice.
 - **Home and search.** Spotify’s Home feed with Music and Podcasts filters, and Browse all with its genre pages. Search finds songs, artists, albums, playlists, podcasts, episodes, audiobooks and profiles, suggests as you type and keeps your recent searches. Paste any Spotify link or URI to open it.
 - **Your Library.** The sidebar lists your playlists, albums, artists, podcasts and audiobooks, with filters, sorting, pins and folders. Like songs, save albums, follow artists, playlists and people. Create, rename and delete playlists and folders; add, remove and reorder songs; change a playlist’s name, description and cover; invite collaborators.
 - **Artists, albums and songs.** Artist pages show popular songs, the discography, music videos, the biography and related artists. Each song has a page with its credits. Right-click any song, album, artist, playlist, show or episode for Spotify’s menu: add to the queue or a playlist, go to the album or artist, song radio, share, embed, hide a song in a playlist or album, stop an artist from playing, or exclude it from your taste profile.
-- **Podcasts.** Show and episode pages, Your Episodes, resume where you stopped, mark as finished, and transcripts. Video podcasts play on the Now Playing page, with full screen. Episodes that a podcast hosts outside Spotify stream from that host, so the host can see what you play, as with Spotify’s own apps.
-- **Video.** Canvas loops in the dock artwork and on the Now Playing page. Songs with a music video can switch to it.
+- **Podcasts.** Show and episode pages, Your Episodes, resume where you stopped, mark as finished, and transcripts. Episodes that a podcast hosts outside Spotify stream from that host, so the host can see what you play, as with Spotify’s own apps.
+- **Canvas.** Canvas loops in the dock artwork and on the Now Playing page. Artist pages list the artist’s music videos.
 - **Lyrics.** Time-synced lyrics highlight and scroll with the song. Click a line to jump to it.
 - **Jam and Blend.** Start a Jam, invite people with its link, or join one from a link. Create a Blend and see who is in it.
 - **Local files.** Add folders in Settings to play music files from your Mac. Local songs inside your Spotify playlists play too.
@@ -86,6 +86,8 @@ Choose **Sign in with Spotify** and approve the pairing in your browser. Playing
 
 - **Offline downloads, 320 kbps and lossless.** Spotify protects these files with its own encryption rather than FairPlay, and OpenMusic does not break it. Songs stream at up to 256 kbps.
 - **Audiobooks.** You can browse and save them, but they do not play. OpenMusic offers to open them in Spotify.
+- **Video.** Spotify sends OpenMusic audio only, so video podcasts play their sound and music videos play the song.
+- **Speed on Spotify’s own podcast episodes.** Spotify refuses speed changes on this kind of device for the episodes it hosts itself.
 - **Private session.** Spotify offers no way for OpenMusic to start one.
 - **Free accounts.** You can sign in, browse and control Spotify on your other devices, but playing on this Mac needs Premium.
 
