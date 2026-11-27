@@ -82,14 +82,145 @@ Choose **Sign in with Spotify** and approve the pairing in your browser. Playing
 - **Mac integration.** Media keys, AirPods and Control Center control playback, and the song shows in Now Playing. Spotify’s keyboard shortcuts work; press ? to list them. Closing the window keeps the music playing; the Dock icon brings it back, and its menu holds the song, playback controls and Recently Played. Option-Command-M opens a floating mini player. Settings can turn on song-change notifications, Open at Login, and a broadcast of what’s playing for scrobblers and other apps.
 - **Native controls.** On macOS 26 and later the playback buttons, now-playing bar and volume are AppKit glass controls placed over the GPUI content, so songs scroll underneath them. Older systems get plain controls, without seeking and volume.
 
-## What it does not do
+## Parity with Spotify for Mac
 
-- **Offline downloads, 320 kbps and lossless.** Spotify protects these files with its own encryption rather than FairPlay, and OpenMusic does not break it. Songs stream at up to 256 kbps.
-- **Audiobooks.** You can browse and save them, but they do not play. OpenMusic offers to open them in Spotify.
-- **Video.** Spotify sends OpenMusic audio only, so video podcasts play their sound and music videos play the song.
-- **Speed on Spotify’s own podcast episodes.** Spotify refuses speed changes on this kind of device for the episodes it hosts itself.
-- **Private session.** Spotify offers no way for OpenMusic to start one.
-- **Free accounts.** You can sign in, browse and control Spotify on your other devices, but playing on this Mac needs Premium.
+How OpenMusic compares with Spotify’s own Mac app, feature by feature. **Yes** means it works as it does in Spotify, **Partly** means some of it works, and **No** means OpenMusic does not have it.
+
+### Playback
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Play, pause, next, previous, seek | Yes | Smart previous restarts the song after 3 seconds |
+| Shuffle and repeat | Yes | Repeat all and repeat one |
+| Smart shuffle | Yes | When your account has it |
+| Queue: view, reorder, remove, clear | Yes | |
+| Add to queue and Play next | Yes | From any song, album, playlist, Liked Songs or episode |
+| Autoplay when a list ends | Yes | |
+| Gapless playback | Yes | |
+| Crossfade | Yes | |
+| Automix | Partly | Mixed playlists play their transitions, but a transition’s speed change is not applied |
+| Volume normalization | Yes | It can only turn loud songs down, never quiet ones up |
+| Sleep timer | Yes | Runs on this Mac only |
+| Podcast speed | Partly | Only for episodes that a podcast hosts outside Spotify; Spotify refuses it for its own episodes on this kind of device |
+| Audio quality | Partly | Normal and High, up to 256 kbps AAC |
+| 320 kbps and lossless | No | Spotify protects these files with its own encryption, and OpenMusic does not break it |
+| Equalizer | No | |
+| DJ | Partly | Shows and plays when your account has DJ; the DJ’s voice is skipped |
+
+### Spotify Connect and devices
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Appears as a Connect device | Yes | Named “OpenMusic”; control it from Spotify on your phone |
+| Shows what other devices play | Yes | Song, position, queue and controls |
+| Device picker and transfer | Yes | Play on This Mac, or move playback to any device |
+| Volume of other devices | Yes | |
+| Jam | Partly | Start, invite with a link, join, guest mode and end are built, but have not been tried in a real Jam |
+| Google Cast and AirPlay targets | No | |
+
+### Home, search and browse
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Home feed | Yes | With the Music and Podcasts filters and Show all pages |
+| Browse all and genre pages | Yes | |
+| Search | Yes | Songs, artists, albums, playlists, podcasts, episodes, audiobooks, authors, profiles and genres, each in its own tab |
+| Suggestions as you type | Yes | |
+| Recent searches | Yes | |
+| Open a pasted Spotify link or URI | Yes | Every kind of link |
+| Artist pages | Yes | Popular songs, discography, music videos, biography, Fans also like |
+| Album pages | Yes | |
+
+### Your Library
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Library sidebar | Yes | Filters, sorting and a text filter |
+| Pins | Yes | |
+| Folders | Yes | Create, rename, move playlists in and out, delete |
+| Liked Songs | Yes | With sorting |
+| Saved albums, artists, podcasts and audiobooks | Yes | |
+| Recently played | Yes | |
+| Like, save and follow | Yes | Songs, albums, artists, playlists, shows and people |
+| Large libraries | Yes | Loads in pages as you scroll |
+| Offline downloads | No | Same reason as 320 kbps |
+
+### Playlists
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Create, rename and delete | Yes | |
+| Add, remove and reorder songs | Yes | Add to playlist submenu with search, a warning for songs already there, and drag onto sidebar playlists |
+| Name, description and cover | Yes | Upload or remove a cover |
+| Public or private | Yes | |
+| Collaborative playlists | Partly | Collaborators list, invite and leave are built; joining from an invite link is not |
+| Blend | Partly | Shows members and who added each song; creating a Blend and invites are built but untried |
+| Automix transition editor | No | |
+
+### Song details and menus
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Right-click menus | Yes | Spotify’s menu on songs, albums, artists, playlists, folders, shows, episodes and people |
+| Share | Yes | Copy link, copy Spotify URI with Option, embed code; the embed dialog has no live preview |
+| Song pages and credits | Yes | |
+| Song and artist radio | Yes | |
+| Go to album or artist | Yes | |
+| Hide a song, don’t play an artist, exclude from your taste profile | Yes | With Undo |
+| Lyrics | Yes | Time-synced; click a line to jump to it |
+
+### Podcasts, audiobooks and video
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Show and episode pages | Yes | |
+| Resume where you stopped, mark as finished | Yes | |
+| Follow shows and Your Episodes | Yes | |
+| Transcripts | Yes | On the Lyrics page |
+| Episodes hosted outside Spotify | Yes | They stream from the host, as in Spotify |
+| Video podcasts | No | Spotify sends OpenMusic audio only, so they play their sound |
+| Music videos | No | Listed on artist pages, but the song plays instead |
+| Canvas | Yes | In the dock artwork and on the Now Playing page; a still image when Reduce Motion is on |
+| Audiobooks | Partly | Browse and save them; Play offers to open them in Spotify |
+
+### Account and people
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Settings | Yes | Playback, audio, language, cache, startup, notifications, local files and more |
+| Friend Activity | Yes | |
+| Profiles | Yes | Public playlists, followers and following; follow, unfollow, block and unblock |
+| Your profile | Partly | Change your name and privacy settings; no picture upload |
+| Explicit content filter | Partly | Honoured when your account has it on, but cannot be changed here |
+| Free accounts | Partly | Browse and control other devices; playing on this Mac needs Premium |
+| Private session | No | Spotify offers no way for OpenMusic to start one |
+
+### Local files
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Play music files from your Mac | Yes | Add folders in Settings |
+| Local songs inside Spotify playlists | Yes | Matched by tags and length |
+
+### Mac integration
+
+| Feature | OpenMusic | Notes |
+|---|---|---|
+| Media keys, AirPods and Control Center | Yes | They control whichever device is playing |
+| Keyboard shortcuts and menu bar | Yes | Spotify’s shortcuts; press ? to list them |
+| Closing the window keeps the music playing | Yes | The Dock icon brings it back |
+| Dock menu | Yes | Song, controls and Recently Played |
+| Mini player | Yes | Option-Command-M; no queue or video |
+| Song-change notifications | Yes | Off by default |
+| Open at Login | Yes | |
+| Touch Bar and AppleScript | No | |
+
+### Known differences
+
+- Play on a card, on Liked Songs or on a pasted link moves playback to this Mac, even when another device is playing. Spotify plays on the active device.
+- After you quit and reopen OpenMusic, Play can start the song from an earlier point than where you stopped.
+- The volume goes back to 100% each time the app starts.
+- Some long titles are cut off without an ellipsis.
 
 ## Build from source
 
